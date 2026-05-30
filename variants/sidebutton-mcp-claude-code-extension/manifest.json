@@ -1,0 +1,7 @@
+{
+  "name": "sidebutton-mcp-claude-code-extension",
+  "title": "SideButton MCP + Claude Code + Chrome extension",
+  "description": "Default. Full SideButton agent: MCP server on :9876, Claude Code CLI, Chrome with the SideButton extension auto-installed via managed policy, and a post-services wait for the browser_connected handshake.",
+  "hooks": ["pre-services", "post-services"],
+  "default": true
+}

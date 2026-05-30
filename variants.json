@@ -1,0 +1,19 @@
+{
+  "$schema": "./variants.schema.json",
+  "version": 1,
+  "default": "sidebutton-mcp-claude-code-extension",
+  "variants": [
+    {
+      "name": "sidebutton-mcp-claude-code-extension",
+      "title": "SideButton MCP + Claude Code + Chrome extension",
+      "description": "Default. Full SideButton agent: MCP server on :9876, Claude Code CLI, Chrome with the SideButton extension auto-installed via managed policy, and a post-services wait for the browser_connected handshake.",
+      "hooks": ["pre-services", "post-services"]
+    },
+    {
+      "name": "sidebutton-mcp-claude-code",
+      "title": "SideButton MCP + Claude Code (no Chrome extension)",
+      "description": "Same as default but skips the Chrome managed-policy block that force-installs the SideButton extension and skips the browser_connected handshake wait. Chrome still boots — without the extension.",
+      "hooks": []
+    }
+  ]
+}

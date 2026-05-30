@@ -1,0 +1,126 @@
+# 16-services-prep.sh — write systemd unit files + patch xrdp config.
+# Does NOT start anything; the variant pre-services hook gets a chance to
+# write extra config (e.g. Chrome managed policy) before services-start.sh.
+
+step "Step 16/16: Systemd services (xvfb, xfce-session, x11vnc, chrome, sidebutton)"
+
+cat > /etc/systemd/system/xvfb.service <<'EOF'
+[Unit]
+Description=Virtual X Framebuffer for Agent Display
+After=network.target
+Before=xfce-session.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/Xvfb :10 -screen 0 1920x1080x24 -ac
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/xfce-session.service <<'EOF'
+[Unit]
+Description=XFCE Desktop Session on Virtual Display
+After=xvfb.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+User=agent
+Environment=DISPLAY=:10
+ExecStart=/usr/bin/dbus-launch --exit-with-session startxfce4
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/x11vnc.service <<'EOF'
+[Unit]
+Description=x11vnc VNC Server (shares agent display)
+After=xfce-session.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+User=agent
+Environment=DISPLAY=:10
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/bin/x11vnc -display :10 -forever -shared -nopw -rfbport 5910 -noxdamage -o /home/agent/.x11vnc.log
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/chrome.service <<'EOF'
+[Unit]
+Description=Chrome Browser with SideButton Extension
+After=xfce-session.service sidebutton.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+User=agent
+Environment=DISPLAY=:10
+ExecStartPre=/bin/bash -c 'rm -f /home/agent/.config/google-chrome/Singleton*'
+ExecStart=/opt/google/chrome/chrome \
+  --no-first-run \
+  --disable-session-crashed-bubble \
+  --disable-infobars \
+  --noerrdialogs \
+  --disable-features=InfiniteSessionRestore \
+  --profile-directory=Default \
+  https://sidebutton.com
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/sidebutton.service <<'EOF'
+[Unit]
+Description=SideButton MCP Server
+After=network.target xfce-session.service
+Requires=xvfb.service
+
+[Service]
+Type=simple
+User=agent
+WorkingDirectory=/home/agent/workspace
+EnvironmentFile=/home/agent/.agent-env
+Environment=DISPLAY=:10
+ExecStart=/usr/bin/sidebutton serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Point xrdp at the shared VNC display (so RDP shows the same session
+# Chrome is running on — not a separate empty one).
+if [ -f /etc/xrdp/xrdp.ini ]; then
+  cp -n /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini.bak
+  sed -i 's/^autorun=.*/autorun=vnc-any/' /etc/xrdp/xrdp.ini || true
+  if ! grep -q '^\[vnc-any\]' /etc/xrdp/xrdp.ini; then
+    cat >> /etc/xrdp/xrdp.ini <<'EOF'
+
+[vnc-any]
+name=Agent Desktop
+lib=libvnc.so
+ip=127.0.0.1
+port=5910
+username=na
+password=na
+EOF
+  fi
+fi
+if [ -f /etc/xrdp/sesman.ini ]; then
+  sed -i 's/^KillDisconnected=true/KillDisconnected=false/' /etc/xrdp/sesman.ini || true
+fi
