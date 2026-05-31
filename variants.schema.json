@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sidebutton/agent-runners/blob/main/variants.schema.json",
+  "title": "Agent runners variants manifest",
+  "description": "Machine-readable list of install overlays under variants/. The portal provisioner threads the chosen variant id into the cloud-init line as AGENT_RUNNER, which install.sh / base/run.sh resolve to a variants/<name>/ directory.",
+  "type": "object",
+  "required": ["version", "default", "variants"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Manifest format version. Bump when the shape of an entry changes in a non-additive way."
+    },
+    "default": {
+      "type": "string",
+      "description": "Variant name install.sh / base/run.sh fall through to when AGENT_RUNNER is unset. MUST match one of variants[].name."
+    },
+    "variants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/variant" }
+    }
+  },
+  "$defs": {
+    "variant": {
+      "type": "object",
+      "required": ["name", "title", "description", "hooks"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Slug matching the variants/<name>/ directory. Threaded into cloud-init as AGENT_RUNNER."
+        },
+        "title": {
+          "type": "string",
+          "description": "Short human label for the wizard dropdown / portal display."
+        },
+        "description": {
+          "type": "string",
+          "description": "One-paragraph explanation of what the overlay adds, drops, and which scenario it targets."
+        },
+        "hooks": {
+          "type": "array",
+          "description": "Names of hook scripts the variant ships (e.g. 'early-setup', 'pre-services', 'post-services'). The corresponding file must exist at variants/<name>/<hook>.sh. Omit a hook by leaving it out of the array (base/run.sh skips missing hooks silently).",
+          "items": {
+            "type": "string",
+            "enum": ["early-setup", "pre-services", "post-services"]
+          },
+          "uniqueItems": true
+        },
+        "default": {
+          "type": "boolean",
+          "description": "Convenience marker mirroring the top-level `default` field. Only one variant should set this to true."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -4,10 +4,19 @@
 # still produces a usable VM.
 
 step "Heartbeat: registering with ${PORTAL_URL}"
+# `sidebutton --version` is only meaningful when the SB server is installed.
+# For variants that skip it (SKIP_SIDEBUTTON_SERVER=1) we report "not-installed"
+# rather than "unknown" so the portal can distinguish "variant doesn't ship SB"
+# from "lookup failed" (matters for type-adaptive health semantics in SCRUM-1095).
+if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
+  SB_VERSION="not-installed"
+else
+  SB_VERSION="$(sidebutton --version 2>/dev/null || echo unknown)"
+fi
 HEARTBEAT_BODY=$(jq -n \
   --arg node "$(node --version 2>/dev/null || echo unknown)" \
   --arg chrome "$(google-chrome-stable --version 2>/dev/null | awk '{print $3}')" \
-  --arg sb "$(sidebutton --version 2>/dev/null || echo unknown)" \
+  --arg sb "$SB_VERSION" \
   --arg claude "$(claude --version 2>/dev/null || echo unknown)" \
   --arg installer "${BOOTSTRAP_VERSION:-unknown}" \
   --arg runner "${AGENT_RUNNER:-unknown}" \

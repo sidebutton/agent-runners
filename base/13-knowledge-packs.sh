@@ -12,18 +12,22 @@
 # portal provisioner) to register a private/self-hosted git registry the
 # agent has access to.
 
-step "Step 13/16: Default knowledge-pack registry"
-chown -R "${AGENT_USER}:${AGENT_USER}" "$AGENT_HOME"
-if [ -n "${SIDEBUTTON_DEFAULT_REGISTRY:-}" ]; then
-  if su - "$AGENT_USER" -c "sidebutton registry add '${SIDEBUTTON_DEFAULT_REGISTRY}' 2>&1"; then
-    log "registry added: ${SIDEBUTTON_DEFAULT_REGISTRY}"
-  else
-    log "WARN: 'sidebutton registry add ${SIDEBUTTON_DEFAULT_REGISTRY}' failed (private registry needs agent git access) — agent-side workflows unavailable until rerun as ${AGENT_USER}"
-  fi
+if [ "${SKIP_KNOWLEDGE_PACKS:-}" = "1" ]; then
+  step "Step 13/16: Default knowledge-pack registry (skipped — SKIP_KNOWLEDGE_PACKS=1)"
 else
-  if su - "$AGENT_USER" -c "sidebutton install agents 2>&1"; then
-    log "knowledge pack installed: agents (ops workflows)"
+  step "Step 13/16: Default knowledge-pack registry"
+  chown -R "${AGENT_USER}:${AGENT_USER}" "$AGENT_HOME"
+  if [ -n "${SIDEBUTTON_DEFAULT_REGISTRY:-}" ]; then
+    if su - "$AGENT_USER" -c "sidebutton registry add '${SIDEBUTTON_DEFAULT_REGISTRY}' 2>&1"; then
+      log "registry added: ${SIDEBUTTON_DEFAULT_REGISTRY}"
+    else
+      log "WARN: 'sidebutton registry add ${SIDEBUTTON_DEFAULT_REGISTRY}' failed (private registry needs agent git access) — agent-side workflows unavailable until rerun as ${AGENT_USER}"
+    fi
   else
-    log "WARN: 'sidebutton install agents' failed — agent-side workflows unavailable until rerun as ${AGENT_USER}"
+    if su - "$AGENT_USER" -c "sidebutton install agents 2>&1"; then
+      log "knowledge pack installed: agents (ops workflows)"
+    else
+      log "WARN: 'sidebutton install agents' failed — agent-side workflows unavailable until rerun as ${AGENT_USER}"
+    fi
   fi
 fi
