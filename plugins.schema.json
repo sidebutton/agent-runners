@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sidebutton/agent-runners/blob/main/plugins.schema.json",
+  "title": "Agent runners plugins catalog",
+  "description": "Catalog of installable SideButton agent plugins. A plugin is a small package (plugin.json + handlers) that the SideButton MCP server loads from ~/.sidebutton/plugins/ and exposes as MCP tools. The install step base/19b-plugins.sh resolves a slug to its public git repo from this file and runs `sidebutton plugin install`. The portal vendors this file as the single source of truth for plugin display metadata; agent-runners is the source of truth.",
+  "type": "object",
+  "required": ["version", "plugins"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Manifest format version. Bump when the shape of an entry changes in a non-additive way."
+    },
+    "plugins": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/plugin" }
+    }
+  },
+  "$defs": {
+    "plugin": {
+      "type": "object",
+      "required": ["slug", "name", "description", "repo"],
+      "properties": {
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Stable id used in profiles[].default_plugins, the provision API plugins[] override, and the SIDEBUTTON_PLUGINS install env. Matches the plugin.json `name` of the installed plugin."
+        },
+        "name": { "type": "string", "description": "Display name shown on the fleet list + agent detail." },
+        "description": { "type": "string", "description": "One-line description shown in the agent detail plugins section." },
+        "repo": {
+          "type": "string",
+          "pattern": "^[^/]+/[^/]+$",
+          "description": "Public GitHub repo (owner/name) the install step clones anonymously."
+        },
+        "ref": {
+          "type": "string",
+          "description": "Branch or tag to clone. Defaults to 'main' when omitted.",
+          "default": "main"
+        },
+        "submodules": {
+          "type": "boolean",
+          "description": "Clone with --recurse-submodules (e.g. writing-quality vendors humanizer + stop-slop). Defaults to false.",
+          "default": false
+        },
+        "system_deps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "apt packages the plugin needs at runtime (e.g. ['ffmpeg'] for screen-record). Installed as root before the plugin copy. Defaults to [].",
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

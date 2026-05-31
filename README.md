@@ -16,12 +16,17 @@ Production agents are provisioned by piping `https://sidebutton.com/install.sh` 
 
 ## Portal display metadata (single source of truth)
 
-This repo is also the single source of truth for what the SideButton portal **displays** for each variant + profile — the portal vendors these two files and reads them instead of hardcoding:
+This repo is also the single source of truth for what the SideButton portal **displays** for each variant + profile — the portal vendors these files and reads them instead of hardcoding:
 
 - **`variants.json`** carries, per variant: `kind` (`ext` / `noext` / `bare`), a role-centric `display` (name + description) used as the fleet-list fallback for rows with no profile, and a `deps` fingerprint — the components the variant installs and which ones show a live status dot.
-- **`profiles.json`** (validated against [`profiles.schema.json`](./profiles.schema.json)) is the product-level catalogue the Create-Agent wizard offers: each profile picks a `runner` variant + `default_roles` and a role-centric `name`/`description`. `aliases` maps renamed slugs (e.g. `claude-code-headless` → `swe-native`) so already-provisioned agents keep resolving.
+- **`profiles.json`** (validated against [`profiles.schema.json`](./profiles.schema.json)) is the product-level catalogue the Create-Agent wizard offers: each profile picks a `runner` variant + `default_roles` + `default_plugins` and a role-centric `name`/`description`. `aliases` maps renamed slugs (e.g. `claude-code-headless` → `swe-native`) so already-provisioned agents keep resolving.
+- **`plugins.json`** (validated against [`plugins.schema.json`](./plugins.schema.json)) is the catalogue of installable agent plugins — small packages the SideButton MCP server loads from `~/.sidebutton/plugins/` and exposes as MCP tools. Each entry maps a `slug` → public git `repo` (+ `ref`, `submodules`, `system_deps`). `base/19b-plugins.sh` clones and installs the slugs in `SIDEBUTTON_PLUGINS`; the portal vendors the same file to label the plugin chips it shows per agent.
 
-To change a profile name, description, dep chip, or add a variant/profile: edit it **here**. The portal refreshes its vendored copy with `pnpm --filter website sync:runners`, and a CI `git diff --exit-code` fails on drift.
+To change a profile name, description, dep chip, plugin, or add a variant/profile: edit it **here**. The portal refreshes its vendored copy with `pnpm --filter website sync:runners`, and a CI `git diff --exit-code` fails on drift.
+
+### Plugins
+
+Plugins are MCP tools the SideButton server hosts, so they only apply to variants that ship a server (`ext`, `noext`) — never the `bare` variant. At provision time the portal forwards `SIDEBUTTON_PLUGINS` (a profile's `default_plugins` ∪ any provision-request override); `base/19b-plugins.sh` runs after `19-secrets.sh` and ends with a `systemctl restart sidebutton` so the server loads the new plugins together with the now-populated `.agent-env` (e.g. `writing-quality` reads `ANTHROPIC_API_KEY` at runtime). The agent reports its loaded plugins on `GET /health` (`plugins[]`), which is what the portal fleet list + agent detail render.
 
 ## Layout
 
@@ -29,6 +34,8 @@ To change a profile name, description, dep chip, or add a variant/profile: edit 
 agent-runners/
 ├── install.sh                    # direct entry: dispatches to base/run.sh
 ├── variants.json                 # variant manifest
+├── profiles.json                 # Create-Agent wizard profile catalogue (vendored by portal)
+├── plugins.json                  # installable agent-plugin catalogue (vendored by portal)
 ├── base/                         # shared step scripts (sourced in order)
 │   ├── lib.sh                    # log/die/step + run_variant_hook
 │   ├── 01-preflight.sh           # env validation, OS detect, apt defaults
@@ -49,6 +56,7 @@ agent-runners/
 │   ├── 17-services-start.sh      # daemon-reload, enable, start, chown
 │   ├── 18-heartbeat.sh           # portal heartbeat
 │   ├── 19-secrets.sh             # pull per-agent secrets
+│   ├── 19b-plugins.sh            # install SIDEBUTTON_PLUGINS, restart server
 │   ├── 20-mark-installed.sh      # write /etc/sidebutton/installed
 │   └── run.sh                    # orchestrator
 ├── variants/
@@ -97,6 +105,7 @@ A hook is a regular bash file at `variants/<name>/<hook>.sh`. It runs in the sam
 | `PORTAL_URL` | no | `https://sidebutton.com` | Portal base URL |
 | `AGENT_PASSWORD` | no | random | Initial RDP password (overwritten by portal-provided secret) |
 | `SIDEBUTTON_DEFAULT_REGISTRY` | no | — | Self-hosted/private knowledge-pack registry; falls back to `sidebutton install agents` when unset |
+| `SIDEBUTTON_PLUGINS` | no | — | Comma-separated plugin slugs (`plugins.json`) to install via `19b-plugins.sh`; forwarded by the portal from the profile's `default_plugins` ∪ provision override. No-op on the `bare` variant. |
 
 ## Idempotency
 
