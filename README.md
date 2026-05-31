@@ -40,7 +40,6 @@ agent-runners/
 │   ├── 07-claude-code.sh
 │   ├── 08-sidebutton.sh          # MCP server
 │   ├── 09-agent-user.sh          # user, dirs, claude settings, swap
-│   ├── 10-the-assistant.sh
 │   ├── 11-polkit.sh
 │   ├── 12-workspace.sh           # .agent-env template, bashrc hook
 │   ├── 13-knowledge-packs.sh     # default registry
