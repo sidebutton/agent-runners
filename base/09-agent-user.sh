@@ -29,7 +29,7 @@ cat > "$AGENT_HOME/.claude/settings.json" <<'EOF'
         "matcher": "TaskCreate|TaskUpdate",
         "hooks": [
           { "type": "command", "command": "cat >> $HOME/ops/logs/task-events.jsonl" },
-          { "type": "command", "command": "curl -sf -X POST $PORTAL_URL/api/agents/events -H 'Content-Type: application/json' -H \"Authorization: Bearer $AGENT_TOKEN\" -H \"X-Agent-Name: $AGENT_NAME\" -d @- --max-time 5 2>/dev/null || true" }
+          { "type": "command", "command": "curl -4 -sf -X POST $PORTAL_URL/api/agents/events -H 'Content-Type: application/json' -H \"Authorization: Bearer $AGENT_TOKEN\" -H \"X-Agent-Name: $AGENT_NAME\" -d @- --max-time 5 2>/dev/null || true" }
         ]
       },
       {

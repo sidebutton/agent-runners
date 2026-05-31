@@ -4,7 +4,7 @@
 if [ -n "${SB_TOKEN:-}" ]; then
   log "Fetching agent secrets from portal..."
   SECRETS_RESP="$(mktemp)"
-  SECRETS_CODE=$(curl -sS -o "$SECRETS_RESP" -w '%{http_code}' \
+  SECRETS_CODE=$(curl -4 -sS -o "$SECRETS_RESP" -w '%{http_code}' \
     -X GET "${PORTAL_URL}/api/agents/secrets" \
     -H "Authorization: Bearer ${SB_TOKEN}" \
     --connect-timeout 10 --max-time 30 || echo "000")
