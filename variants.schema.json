@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/sidebutton/agent-runners/blob/main/variants.schema.json",
   "title": "Agent runners variants manifest",
-  "description": "Machine-readable list of install overlays under variants/. The portal provisioner threads the chosen variant id into the cloud-init line as AGENT_RUNNER, which install.sh / base/run.sh resolve to a variants/<name>/ directory.",
+  "description": "Machine-readable list of install overlays under variants/. The portal provisioner threads the chosen variant id into the cloud-init line as AGENT_RUNNER, which install.sh / base/run.sh resolve to a variants/<name>/ directory. The portal also vendors this file as the single source of truth for variant display data (kind, role-centric name/description, dep-chip fingerprint).",
   "type": "object",
   "required": ["version", "default", "variants"],
   "properties": {
@@ -25,7 +25,7 @@
   "$defs": {
     "variant": {
       "type": "object",
-      "required": ["name", "title", "description", "hooks"],
+      "required": ["name", "title", "description", "hooks", "kind", "display", "deps"],
       "properties": {
         "name": {
           "type": "string",
@@ -34,7 +34,7 @@
         },
         "title": {
           "type": "string",
-          "description": "Short human label for the wizard dropdown / portal display."
+          "description": "Short install-oriented label (what the overlay installs)."
         },
         "description": {
           "type": "string",
@@ -52,6 +52,48 @@
         "default": {
           "type": "boolean",
           "description": "Convenience marker mirroring the top-level `default` field. Only one variant should set this to true."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["ext", "noext", "bare"],
+          "description": "Capability class the portal uses for the accent color + dep-chip set: ext = SideButton extension bridge, noext = SideButton server but Claude-native browser, bare = no SideButton runtime."
+        },
+        "display": {
+          "type": "object",
+          "description": "Role-centric product display used as the fleet-list / detail-page fallback when a row has no profile (legacy / unknown slug).",
+          "required": ["name", "description"],
+          "properties": {
+            "name": { "type": "string", "description": "Role-centric name, e.g. 'SWE Full-Stack'." },
+            "description": { "type": "string", "description": "One-line stack description, e.g. 'SideButton MCP + Extension'." }
+          },
+          "additionalProperties": false
+        },
+        "deps": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Dep-chip fingerprint the portal renders for this variant — the components it installs. This is the authority for what an agent of this variant shows as installed.",
+          "items": { "$ref": "#/$defs/dep" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "dep": {
+      "type": "object",
+      "required": ["id", "label", "fullName", "live"],
+      "properties": {
+        "id": { "type": "string", "description": "Stable chip id." },
+        "label": { "type": "string", "description": "Short chip label." },
+        "fullName": { "type": "string", "description": "Full name for tooltip / a11y." },
+        "live": { "type": "boolean", "description": "True ⇒ the chip shows a process-driven status dot; false ⇒ a static 'installed' declaration." },
+        "processKey": {
+          "type": "string",
+          "enum": ["sidebutton", "chrome", "extension"],
+          "description": "Which process signal drives the live dot (live chips only)."
+        },
+        "versionKey": {
+          "type": "string",
+          "enum": ["sidebutton", "claude_code"],
+          "description": "Which dependency_versions field provides the version label."
         }
       },
       "additionalProperties": false

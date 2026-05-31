@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sidebutton/agent-runners/blob/main/profiles.schema.json",
+  "title": "Agent runners profiles manifest",
+  "description": "Product-level profile templates the portal Create-Agent wizard offers. A profile picks a runner variant (variants.json) + default roles and gives it a role-centric name/description. The portal vendors this file; agent-runners is the single source of truth.",
+  "type": "object",
+  "required": ["version", "default", "order", "profiles"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "default": {
+      "type": "string",
+      "description": "Default profile slug pre-selected in the wizard. MUST be one of profiles[].slug."
+    },
+    "order": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Dropdown order. MUST list every profiles[].slug exactly once."
+    },
+    "aliases": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "Legacy slug → canonical slug, e.g. 'claude-code-headless' → 'swe-native'. The portal canonicalises on resolve + display so persisted rows keep working after a rename."
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/profile" }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "required": ["slug", "name", "description", "runner", "default_roles", "extras"],
+      "properties": {
+        "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Stable id persisted in agents.profile." },
+        "name": { "type": "string", "description": "Role-centric template name shown in the wizard dropdown + consolidated profile block." },
+        "description": { "type": "string", "description": "One-line stack description (helper text + row sub-line)." },
+        "runner": { "type": "string", "description": "Variant name from variants.json this profile installs onto." },
+        "default_roles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Roles seeded into agents.capabilities when the wizard omits an explicit roles[] override."
+        },
+        "extras": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Reserved for user-editable templates — empty for the seed catalogue (chips are variant-derived)."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
