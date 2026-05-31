@@ -57,10 +57,19 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/chrome.service <<'EOF'
+# Chrome.service ordering depends on whether sidebutton.service exists.
+# Variants that skip the SB server (SKIP_SIDEBUTTON_SERVER=1) drop the After=
+# clause so Chrome can boot without waiting for a unit that will never start.
+if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
+  CHROME_AFTER='After=xfce-session.service'
+else
+  CHROME_AFTER='After=xfce-session.service sidebutton.service'
+fi
+
+cat > /etc/systemd/system/chrome.service <<EOF
 [Unit]
 Description=Chrome Browser with SideButton Extension
-After=xfce-session.service sidebutton.service
+${CHROME_AFTER}
 Requires=xvfb.service
 
 [Service]
@@ -68,13 +77,13 @@ Type=simple
 User=agent
 Environment=DISPLAY=:10
 ExecStartPre=/bin/bash -c 'rm -f /home/agent/.config/google-chrome/Singleton*'
-ExecStart=/opt/google/chrome/chrome \
-  --no-first-run \
-  --disable-session-crashed-bubble \
-  --disable-infobars \
-  --noerrdialogs \
-  --disable-features=InfiniteSessionRestore \
-  --profile-directory=Default \
+ExecStart=/opt/google/chrome/chrome \\
+  --no-first-run \\
+  --disable-session-crashed-bubble \\
+  --disable-infobars \\
+  --noerrdialogs \\
+  --disable-features=InfiniteSessionRestore \\
+  --profile-directory=Default \\
   https://sidebutton.com
 Restart=on-failure
 RestartSec=10
@@ -83,7 +92,11 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/systemd/system/sidebutton.service <<'EOF'
+if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
+  rm -f /etc/systemd/system/sidebutton.service
+  log "sidebutton.service unit not written (SKIP_SIDEBUTTON_SERVER=1)"
+else
+  cat > /etc/systemd/system/sidebutton.service <<'EOF'
 [Unit]
 Description=SideButton MCP Server
 After=network.target xfce-session.service
@@ -102,6 +115,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 # Point xrdp at the shared VNC display (so RDP shows the same session
 # Chrome is running on — not a separate empty one).

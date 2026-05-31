@@ -14,6 +14,12 @@
       "title": "SideButton MCP + Claude Code (no Chrome extension)",
       "description": "Same as default but skips the Chrome managed-policy block that force-installs the SideButton extension and skips the browser_connected handshake wait. Chrome still boots — without the extension.",
       "hooks": []
+    },
+    {
+      "name": "ubuntu-claude-code",
+      "title": "Ubuntu + Chrome + Claude Code (bare, no SideButton runtime)",
+      "description": "Bare Claude Code agent: keeps Ubuntu desktop + Chrome + Claude Code so Claude's native browser tools still work, but drops the SideButton MCP server, the Chrome extension, and the knowledge-pack registry. A thin fleet job client replaces the SB server on :9876, implementing the minimal heartbeat/job/status contract the portal expects.",
+      "hooks": ["early-setup", "pre-services", "post-services"]
     }
   ]
 }

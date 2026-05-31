@@ -17,6 +17,7 @@ log "SideButton agent-runners base v${BOOTSTRAP_VERSION:-unknown} starting"
 log "RUNNERS_VARIANT_DIR=${RUNNERS_VARIANT_DIR:-unset}"
 
 . "$BASE_DIR/01-preflight.sh"
+run_variant_hook "early-setup"
 . "$BASE_DIR/02-system.sh"
 . "$BASE_DIR/03-gh-cli.sh"
 . "$BASE_DIR/04-desktop.sh"

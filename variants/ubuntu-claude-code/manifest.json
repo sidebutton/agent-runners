@@ -1,0 +1,7 @@
+{
+  "name": "ubuntu-claude-code",
+  "title": "Ubuntu + Chrome + Claude Code (bare, no SideButton runtime)",
+  "description": "Bare Claude Code agent: keeps the Ubuntu desktop + Chrome + Claude Code so Claude's native browser tools work, but drops the SideButton MCP server, the Chrome extension, and the knowledge-pack registry. A thin fleet job client replaces the SB server on port 9876, implementing the minimal heartbeat/job/status contract the portal expects. Used by the 'SWE Bare' profile to benchmark raw Claude Code against the extension/native variants.",
+  "hooks": ["early-setup", "pre-services", "post-services"],
+  "default": false
+}
