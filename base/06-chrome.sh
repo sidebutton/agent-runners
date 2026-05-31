@@ -10,7 +10,7 @@ if ! command -v google-chrome-stable >/dev/null 2>&1; then
     apt-get install "${APT_OPTS[@]}" chromium-browser
     ln -sf /usr/bin/chromium-browser /usr/local/bin/google-chrome-stable
   else
-    wget -q -O /tmp/chrome.deb \
+    wget -q --timeout=30 --tries=3 -O /tmp/chrome.deb \
       "https://dl.google.com/linux/direct/google-chrome-stable_current_${arch}.deb"
     apt-get install "${APT_OPTS[@]}" /tmp/chrome.deb || apt-get install -f "${APT_OPTS[@]}"
     rm -f /tmp/chrome.deb
