@@ -53,3 +53,15 @@ APT_OPTS=(-y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-c
 if [ -d /etc/needrestart/conf.d ]; then
   echo "\$nrconf{restart} = 'a';" > /etc/needrestart/conf.d/50-autorestart.conf
 fi
+
+# Bound apt's network ops so a slow/stalled mirror can't hang the whole install.
+# (Observed: a Hetzner fsn1 CX23 sat at flat ~0.6% CPU for 18+ min, blocked in
+# `apt-get update` with no timeout, never reaching service start.) Written as a
+# global apt config so it also covers the bare `apt-get update` calls that don't
+# go through APT_OPTS.
+mkdir -p /etc/apt/apt.conf.d
+cat > /etc/apt/apt.conf.d/80-sidebutton-timeouts <<'EOF'
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+EOF
