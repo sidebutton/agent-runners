@@ -13,15 +13,29 @@ if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
 else
   SB_VERSION="$(sidebutton --version 2>/dev/null || echo unknown)"
 fi
+
+# Runner variant + extension presence are reported at the top level so the
+# portal can persist them on agents.runner and interpret browser_connected
+# relative to the variant (SCRUM-1095). Only the extension overlay actually
+# installs the Chrome managed-policy that loads the SideButton extension;
+# every other variant is `has_extension=false` by design, and a `false`
+# browser_connected on those must not be treated as an error.
+AGENT_RUNNER_VAL="${AGENT_RUNNER:-sidebutton-mcp-claude-code-extension}"
+case "$AGENT_RUNNER_VAL" in
+  sidebutton-mcp-claude-code-extension) HAS_EXTENSION="true" ;;
+  *) HAS_EXTENSION="false" ;;
+esac
+
 HEARTBEAT_BODY=$(jq -n \
   --arg node "$(node --version 2>/dev/null || echo unknown)" \
   --arg chrome "$(google-chrome-stable --version 2>/dev/null | awk '{print $3}')" \
   --arg sb "$SB_VERSION" \
   --arg claude "$(claude --version 2>/dev/null || echo unknown)" \
   --arg installer "${BOOTSTRAP_VERSION:-unknown}" \
-  --arg runner "${AGENT_RUNNER:-unknown}" \
+  --arg runner "$AGENT_RUNNER_VAL" \
   --arg runners_ref "${RUNNERS_REF:-unknown}" \
-  '{dependency_versions: {node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude, installer:$installer, agent_runner:$runner, runners_ref:$runners_ref}}')
+  --argjson has_extension "$HAS_EXTENSION" \
+  '{runner:$runner, has_extension:$has_extension, dependency_versions: {node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude, installer:$installer, agent_runner:$runner, runners_ref:$runners_ref}}')
 
 HEARTBEAT_RESP="$(mktemp)"
 HEARTBEAT_CODE=$(curl -sS -o "$HEARTBEAT_RESP" -w '%{http_code}' \
