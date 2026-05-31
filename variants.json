@@ -1,25 +1,59 @@
 {
   "$schema": "./variants.schema.json",
-  "version": 1,
+  "version": 2,
   "default": "sidebutton-mcp-claude-code-extension",
   "variants": [
     {
       "name": "sidebutton-mcp-claude-code-extension",
       "title": "SideButton MCP + Claude Code + Chrome extension",
       "description": "Default. Full SideButton agent: MCP server on :9876, Claude Code CLI, Chrome with the SideButton extension auto-installed via managed policy, and a post-services wait for the browser_connected handshake.",
-      "hooks": ["pre-services", "post-services"]
+      "hooks": ["pre-services", "post-services"],
+      "kind": "ext",
+      "display": {
+        "name": "SWE Full-Stack",
+        "description": "SideButton MCP + Extension"
+      },
+      "deps": [
+        { "id": "sidebutton", "label": "SB server", "fullName": "SideButton", "live": true, "processKey": "sidebutton", "versionKey": "sidebutton" },
+        { "id": "extension", "label": "Extension", "fullName": "SideButton Extension", "live": true, "processKey": "extension" },
+        { "id": "chrome", "label": "Chrome", "fullName": "Google Chrome", "live": true, "processKey": "chrome" },
+        { "id": "claude_code", "label": "Claude Code", "fullName": "Claude Code", "live": false, "versionKey": "claude_code" },
+        { "id": "knowledge_packs", "label": "Knowledge packs", "fullName": "Knowledge packs", "live": false },
+        { "id": "simulator", "label": "Simulator", "fullName": "Android Simulator", "live": false }
+      ]
     },
     {
       "name": "sidebutton-mcp-claude-code",
       "title": "SideButton MCP + Claude Code (no Chrome extension)",
       "description": "Same as default but skips the Chrome managed-policy block that force-installs the SideButton extension and skips the browser_connected handshake wait. Chrome still boots — without the extension.",
-      "hooks": []
+      "hooks": [],
+      "kind": "noext",
+      "display": {
+        "name": "SWE Native",
+        "description": "SideButton MCP · Claude-native browser (no extension)"
+      },
+      "deps": [
+        { "id": "sidebutton", "label": "SB server", "fullName": "SideButton", "live": true, "processKey": "sidebutton", "versionKey": "sidebutton" },
+        { "id": "chrome", "label": "Chrome", "fullName": "Google Chrome", "live": true, "processKey": "chrome" },
+        { "id": "claude_code", "label": "Claude Code", "fullName": "Claude Code", "live": false, "versionKey": "claude_code" },
+        { "id": "knowledge_packs", "label": "Knowledge packs", "fullName": "Knowledge packs", "live": false }
+      ]
     },
     {
       "name": "ubuntu-claude-code",
       "title": "Ubuntu + Chrome + Claude Code (bare, no SideButton runtime)",
       "description": "Bare Claude Code agent: keeps Ubuntu desktop + Chrome + Claude Code so Claude's native browser tools still work, but drops the SideButton MCP server, the Chrome extension, and the knowledge-pack registry. A thin fleet job client replaces the SB server on :9876, implementing the minimal heartbeat/job/status contract the portal expects.",
-      "hooks": ["early-setup", "pre-services", "post-services"]
+      "hooks": ["early-setup", "pre-services", "post-services"],
+      "kind": "bare",
+      "display": {
+        "name": "SWE Bare",
+        "description": "Claude Code · job API (no SideButton runtime)"
+      },
+      "deps": [
+        { "id": "chrome", "label": "Chrome", "fullName": "Google Chrome", "live": true, "processKey": "chrome" },
+        { "id": "claude_code", "label": "Claude Code", "fullName": "Claude Code", "live": false, "versionKey": "claude_code" },
+        { "id": "fleet_job_client", "label": "Fleet job client", "fullName": "Fleet job client", "live": false }
+      ]
     }
   ]
 }

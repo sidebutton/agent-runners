@@ -14,6 +14,15 @@ Production agents are provisioned by piping `https://sidebutton.com/install.sh` 
 
 `variants.json` is the canonical manifest (validated against [`variants.schema.json`](./variants.schema.json)). New variants are added by dropping a folder under `variants/<name>/` (with at least a `manifest.json`), optionally with hook scripts, and adding an entry to `variants.json`.
 
+## Portal display metadata (single source of truth)
+
+This repo is also the single source of truth for what the SideButton portal **displays** for each variant + profile — the portal vendors these two files and reads them instead of hardcoding:
+
+- **`variants.json`** carries, per variant: `kind` (`ext` / `noext` / `bare`), a role-centric `display` (name + description) used as the fleet-list fallback for rows with no profile, and a `deps` fingerprint — the components the variant installs and which ones show a live status dot.
+- **`profiles.json`** (validated against [`profiles.schema.json`](./profiles.schema.json)) is the product-level catalogue the Create-Agent wizard offers: each profile picks a `runner` variant + `default_roles` and a role-centric `name`/`description`. `aliases` maps renamed slugs (e.g. `claude-code-headless` → `swe-native`) so already-provisioned agents keep resolving.
+
+To change a profile name, description, dep chip, or add a variant/profile: edit it **here**. The portal refreshes its vendored copy with `pnpm --filter website sync:runners`, and a CI `git diff --exit-code` fails on drift.
+
 ## Layout
 
 ```

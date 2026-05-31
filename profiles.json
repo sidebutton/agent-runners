@@ -1,0 +1,43 @@
+{
+  "$schema": "./profiles.schema.json",
+  "version": 1,
+  "default": "swe-full-stack",
+  "order": ["swe-full-stack", "qa-generalist", "swe-native", "swe-bare"],
+  "aliases": {
+    "claude-code-headless": "swe-native"
+  },
+  "profiles": [
+    {
+      "slug": "swe-full-stack",
+      "name": "SWE Full-Stack",
+      "description": "SideButton MCP + Extension",
+      "runner": "sidebutton-mcp-claude-code-extension",
+      "default_roles": ["se", "qa", "sd", "pm"],
+      "extras": []
+    },
+    {
+      "slug": "qa-generalist",
+      "name": "QA Generalist",
+      "description": "SideButton MCP + Extension",
+      "runner": "sidebutton-mcp-claude-code-extension",
+      "default_roles": ["qa"],
+      "extras": []
+    },
+    {
+      "slug": "swe-native",
+      "name": "SWE Native",
+      "description": "SideButton MCP · Claude-native browser (no extension)",
+      "runner": "sidebutton-mcp-claude-code",
+      "default_roles": ["se", "qa"],
+      "extras": []
+    },
+    {
+      "slug": "swe-bare",
+      "name": "SWE Bare",
+      "description": "Claude Code · job API (no SideButton runtime)",
+      "runner": "ubuntu-claude-code",
+      "default_roles": ["se"],
+      "extras": []
+    }
+  ]
+}
