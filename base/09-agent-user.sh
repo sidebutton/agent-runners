@@ -59,6 +59,23 @@ cat > "$AGENT_HOME/.claude/settings.json" <<'EOF'
 }
 EOF
 
+# Pre-seed Claude Code's global state so the FIRST `claude` run skips the
+# interactive first-run onboarding (theme picker / "Let's get started"). Agent
+# jobs launch `claude --dangerously-skip-permissions "<prompt>"` non-interactively
+# in a terminal: that flag bypasses the trust/permission prompts but NOT the
+# onboarding, which is gated separately on hasCompletedOnboarding in
+# ~/.claude.json. Without this the job terminal hangs forever on the theme picker.
+# base/15 later chowns $AGENT_HOME to the agent and runs `claude mcp add`, which
+# merges its server entry into this file (the onboarding flag is preserved).
+if [ ! -f "$AGENT_HOME/.claude.json" ]; then
+  cat > "$AGENT_HOME/.claude.json" <<'EOF'
+{
+  "hasCompletedOnboarding": true,
+  "theme": "dark"
+}
+EOF
+fi
+
 if [ ! -f /swapfile ]; then
   fallocate -l 4G /swapfile
   chmod 600 /swapfile
