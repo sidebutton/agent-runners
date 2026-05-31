@@ -10,7 +10,10 @@ step "Step 4/16: XFCE desktop + xrdp"
 # (verified on a stuck fsn1 VM). The retry only runs on failure, so AWS — where
 # the first install succeeds — is unaffected. Also hardens the large desktop
 # install against any single-package maintainer-script hiccup.
-DESKTOP_PKGS=(xfce4 xfce4-goodies xfce4-terminal dbus-x11 xrdp x11vnc xvfb)
+# imagemagick provides `import`, used by the SB server's GET /api/screenshot
+# (import -window root) to capture the desktop for the portal agent screenshot;
+# without it that endpoint 503s and the portal shows no screen image (SCRUM-1101).
+DESKTOP_PKGS=(xfce4 xfce4-goodies xfce4-terminal dbus-x11 xrdp x11vnc xvfb imagemagick)
 if ! apt-get install "${APT_OPTS[@]}" "${DESKTOP_PKGS[@]}"; then
   log "WARN: desktop install failed (likely usbmuxd preinst/chfn); recovering + retrying"
   dpkg --configure -a || true
