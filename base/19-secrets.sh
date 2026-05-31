@@ -14,10 +14,12 @@ if [ -n "${SB_TOKEN:-}" ]; then
     ENV_KEYS=$(jq -r '.env | keys[]' "$SECRETS_RESP" 2>/dev/null || echo "")
     for key in $ENV_KEYS; do
       val=$(jq -r --arg k "$key" '.env[$k]' "$SECRETS_RESP" 2>/dev/null || echo "")
-      if grep -q "^export ${key}=" "$ENV_FILE" 2>/dev/null; then
-        sed -i "s|^export ${key}=.*|export ${key}=\"${val}\"|" "$ENV_FILE"
+      # KEY=VALUE with no 'export' so sidebutton.service's systemd
+      # EnvironmentFile actually reads these (GH_TOKEN, ANTHROPIC_*, …) — see base/12.
+      if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$ENV_FILE"
       else
-        echo "export ${key}=\"${val}\"" >> "$ENV_FILE"
+        echo "${key}=\"${val}\"" >> "$ENV_FILE"
       fi
     done
 

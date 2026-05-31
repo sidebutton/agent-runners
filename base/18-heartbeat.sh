@@ -63,11 +63,13 @@ else
   AGENT_IP=$(jq -r '.ip // empty' "$HEARTBEAT_RESP" 2>/dev/null || echo "")
   SB_TOKEN=$(jq -r '.sb_token // empty' "$HEARTBEAT_RESP" 2>/dev/null || echo "")
   if [ -n "$AGENT_DNS" ]; then
-    sed -i "s|^export AGENT_DNS=.*|export AGENT_DNS=\"${AGENT_DNS}\"|" "$ENV_FILE"
+    sed -i "s|^AGENT_DNS=.*|AGENT_DNS=\"${AGENT_DNS}\"|" "$ENV_FILE"
     log "registered: ip=${AGENT_IP} dns=${AGENT_DNS}"
   fi
   if [ -n "$SB_TOKEN" ]; then
-    sed -i "s|^export AGENT_TOKEN=.*|export AGENT_TOKEN=\"${SB_TOKEN}\"|" "$ENV_FILE"
+    # Swap the single-use bootstrap token for the permanent sb_token under both
+    # names the server + hooks read (no 'export' — systemd EnvironmentFile format).
+    sed -i "s|^AGENT_TOKEN=.*|AGENT_TOKEN=\"${SB_TOKEN}\"|; s|^SIDEBUTTON_AGENT_TOKEN=.*|SIDEBUTTON_AGENT_TOKEN=\"${SB_TOKEN}\"|" "$ENV_FILE"
     log "sb_token persisted to ${ENV_FILE}"
   fi
 fi
