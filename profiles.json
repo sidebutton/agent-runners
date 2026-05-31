@@ -13,6 +13,7 @@
       "description": "SideButton MCP + Extension",
       "runner": "sidebutton-mcp-claude-code-extension",
       "default_roles": ["se", "qa", "sd", "pm"],
+      "default_plugins": ["screen-record"],
       "extras": []
     },
     {
@@ -21,6 +22,7 @@
       "description": "SideButton MCP + Extension",
       "runner": "sidebutton-mcp-claude-code-extension",
       "default_roles": ["qa"],
+      "default_plugins": ["screen-record"],
       "extras": []
     },
     {
@@ -29,6 +31,7 @@
       "description": "SideButton MCP · Claude-native browser (no extension)",
       "runner": "sidebutton-mcp-claude-code",
       "default_roles": ["se", "qa"],
+      "default_plugins": ["screen-record"],
       "extras": []
     },
     {
@@ -37,6 +40,7 @@
       "description": "Claude Code · job API (no SideButton runtime)",
       "runner": "ubuntu-claude-code",
       "default_roles": ["se"],
+      "default_plugins": [],
       "extras": []
     }
   ]

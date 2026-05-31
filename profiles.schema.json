@@ -42,6 +42,11 @@
           "items": { "type": "string" },
           "description": "Roles seeded into agents.capabilities when the wizard omits an explicit roles[] override."
         },
+        "default_plugins": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Plugin slugs (from plugins.json) base/19b-plugins.sh installs when this profile is provisioned, unless the provision request passes an explicit plugins[] override. Empty for variants with no SideButton server (bare) — plugins are MCP tools the server hosts."
+        },
         "extras": {
           "type": "array",
           "items": { "type": "string" },

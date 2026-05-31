@@ -1,0 +1,24 @@
+{
+  "$schema": "./plugins.schema.json",
+  "version": 1,
+  "plugins": [
+    {
+      "slug": "writing-quality",
+      "name": "Writing Quality",
+      "description": "AI writing-pattern detection + 5-dimension quality scoring (Directness, Rhythm, Trust, Authenticity, Density).",
+      "repo": "sidebutton/plugin-writing-quality",
+      "ref": "main",
+      "submodules": true,
+      "system_deps": []
+    },
+    {
+      "slug": "screen-record",
+      "name": "Screen Record",
+      "description": "Screen recording on the agent VM via ffmpeg x11grab — start, stop, list recordings.",
+      "repo": "sidebutton/plugin-screen-record",
+      "ref": "main",
+      "submodules": false,
+      "system_deps": ["ffmpeg"]
+    }
+  ]
+}
