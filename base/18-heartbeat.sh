@@ -38,7 +38,11 @@ HEARTBEAT_BODY=$(jq -n \
   '{runner:$runner, has_extension:$has_extension, dependency_versions: {node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude, installer:$installer, agent_runner:$runner, runners_ref:$runners_ref}}')
 
 HEARTBEAT_RESP="$(mktemp)"
-HEARTBEAT_CODE=$(curl -sS -o "$HEARTBEAT_RESP" -w '%{http_code}' \
+# Force IPv4 (-4): on dual-stack VMs (e.g. Hetzner) outbound may prefer IPv6, but
+# the portal records only the IPv4 client IP — an IPv6-only heartbeat leaves the
+# agent with no IP, so it can't be health-polled or get a DNS A record and shows
+# offline minutes after install. -4 makes this first-run heartbeat register IPv4 + DNS.
+HEARTBEAT_CODE=$(curl -4 -sS -o "$HEARTBEAT_RESP" -w '%{http_code}' \
   -X POST "${PORTAL_URL}/api/agents/heartbeat" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \

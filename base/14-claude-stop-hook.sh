@@ -41,7 +41,7 @@ PAYLOAD=$(jq -n --argjson job_id "$JOB_ID" --argjson step "$STEP_INDEX" \
   --argjson dur "$DURATION_MS" --arg cost "$TOTAL_COST" \
   '{job_id:$job_id, step_index:$step, session_id:$sid,
     usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)})}')
-curl -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
+curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
   -H "X-Agent-Name: ${AGENT_NAME}" \
