@@ -121,11 +121,17 @@ fi
 # Chrome is running on — not a separate empty one).
 if [ -f /etc/xrdp/xrdp.ini ]; then
   cp -n /etc/xrdp/xrdp.ini /etc/xrdp/xrdp.ini.bak
-  sed -i 's/^autorun=.*/autorun=vnc-any/' /etc/xrdp/xrdp.ini || true
-  if ! grep -q '^\[vnc-any\]' /etc/xrdp/xrdp.ini; then
+  # Define a dedicated session that proxies RDP into the shared x11vnc display
+  # (:10 → 127.0.0.1:5910), then autorun it. Use a UNIQUE section name, NOT the
+  # stock [vnc-any]: that section ships in Ubuntu's xrdp with ip=ask/port=ask5900,
+  # and appending "[vnc-any] only if absent" never fired (it always exists), so
+  # RDP stayed pointed at the wrong VNC and died with "Error connecting to user
+  # session". A unique name makes append-if-absent correct + idempotent and never
+  # touches the stock section.
+  if ! grep -q '^\[agent-desktop\]' /etc/xrdp/xrdp.ini; then
     cat >> /etc/xrdp/xrdp.ini <<'EOF'
 
-[vnc-any]
+[agent-desktop]
 name=Agent Desktop
 lib=libvnc.so
 ip=127.0.0.1
@@ -134,6 +140,7 @@ username=na
 password=na
 EOF
   fi
+  sed -i 's/^autorun=.*/autorun=agent-desktop/' /etc/xrdp/xrdp.ini || true
 fi
 if [ -f /etc/xrdp/sesman.ini ]; then
   sed -i 's/^KillDisconnected=true/KillDisconnected=false/' /etc/xrdp/sesman.ini || true
