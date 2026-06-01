@@ -53,11 +53,13 @@ agent-runners/
 │   ├── 14-claude-stop-hook.sh
 │   ├── 15-claude-mcp.sh
 │   ├── 16-services-prep.sh       # write systemd units + xrdp config
+│   ├── 16b-wallpaper.sh          # SideButton desktop background (copy + xfconf autostart applier)
 │   ├── 17-services-start.sh      # daemon-reload, enable, start, chown
 │   ├── 18-heartbeat.sh           # portal heartbeat
 │   ├── 19-secrets.sh             # pull per-agent secrets
 │   ├── 19b-plugins.sh            # install SIDEBUTTON_PLUGINS, restart server
 │   ├── 20-mark-installed.sh      # write /etc/sidebutton/installed
+│   ├── assets/                   # bundled binaries (wallpaper.png)
 │   └── run.sh                    # orchestrator
 ├── variants/
 │   ├── sidebutton-mcp-claude-code-extension/
