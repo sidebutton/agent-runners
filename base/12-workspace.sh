@@ -47,4 +47,14 @@ if ! grep -q 'agent-env' "$AGENT_HOME/.bashrc" 2>/dev/null; then
   echo '[ -f ~/.agent-env ] && set -a && . ~/.agent-env && set +a' >> "$AGENT_HOME/.bashrc"
 fi
 
-git config -f "$AGENT_HOME/.gitconfig" credential.helper '!/usr/bin/gh auth git-credential' || true
+# Git credential helper for HTTPS clones/fetches/pushes of private workspace
+# git-projects (e.g. maxsv0/the-assistant). Wrap `gh auth git-credential` in a
+# shell that sources ~/.agent-env (set -a → export) at CALL time, so the helper
+# always uses the current GH_TOKEN — not whatever was in the sidebutton.service
+# process env at its single start (base/19b). systemd reads EnvironmentFile only
+# at start, so without this a GH_TOKEN that lands or is corrected AFTER first boot
+# (operator filling it per base/20, or an empty/failed secrets fetch fixed later)
+# never reaches `gh`, and `git clone <private>` dies with:
+#   fatal: could not read Username for 'https://github.com': terminal prompts disabled
+GH_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT_HOME}/.agent-env\"; set +a; exec /usr/bin/gh auth git-credential \"\$@\"; }; f"
+git config -f "$AGENT_HOME/.gitconfig" credential.helper "$GH_CRED_HELPER" || true
