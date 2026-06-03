@@ -32,8 +32,11 @@ GIT_USER_EMAIL=
 GH_TOKEN=
 
 # Optional: non-GitHub git hosts for workspace projects (delivered via per-agent
-# secrets / agent_env). Bitbucket HTTP-Basic = Atlassian email + API token; wired
-# as a per-host credential helper below.
+# secrets / agent_env), wired as a per-host credential helper below. BITBUCKET_API_TOKEN
+# is an Atlassian API token; git over HTTPS authenticates with the magic username
+# `x-bitbucket-api-token-auth` + that token (set by the helper below). BITBUCKET_USER_EMAIL
+# and BITBUCKET_AUTH_HEADER (= base64(email:token)) are the REST-API form of the same token.
+BITBUCKET_AUTH_HEADER=
 BITBUCKET_USER_EMAIL=
 BITBUCKET_API_TOKEN=
 
@@ -66,14 +69,14 @@ GH_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT
 git config -f "$AGENT_HOME/.gitconfig" credential.helper "$GH_CRED_HELPER" || true
 
 # Bitbucket HTTPS credential helper for non-GitHub workspace git-projects (e.g.
-# tusmediadevelopers/*). The global `gh` helper above only answers github.com, so
-# bitbucket.org clones died with:
-#   fatal: could not read Username for 'https://bitbucket.org': terminal prompts disabled
-# Same call-time .agent-env sourcing as the gh helper (rotation-safe; the token is
-# never written to .gitconfig). Bitbucket HTTP-Basic = Atlassian email (username) +
-# API token (password) — the credentials the portal delivers as BITBUCKET_USER_EMAIL /
-# BITBUCKET_API_TOKEN. The empty `--replace-all` resets the inherited (gh) helper list
-# for this host so only ours answers bitbucket.org; it no-ops when the creds are absent.
-BB_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT_HOME}/.agent-env\"; set +a; [ \"\$1\" = get ] || exit 0; [ -n \"\${BITBUCKET_USER_EMAIL}\" ] && [ -n \"\${BITBUCKET_API_TOKEN}\" ] || exit 0; printf 'username=%s\npassword=%s\n' \"\${BITBUCKET_USER_EMAIL}\" \"\${BITBUCKET_API_TOKEN}\"; }; f"
+# tusmediadevelopers/*). The global `gh` helper above only answers github.com. Uses the
+# agent's OWN env credential — no portal token is ever sent to the agent.
+# BITBUCKET_API_TOKEN is an Atlassian API token. For git over HTTPS, Bitbucket requires the
+# magic username `x-bitbucket-api-token-auth` with the API token as the password — VERIFIED
+# against a live repo (ls-remote returns refs). The account email (used for the REST API and
+# baked into BITBUCKET_AUTH_HEADER) is REJECTED by git with HTTP 401, so do NOT use it here.
+# Sourced at call time (rotation-safe; token never written to .gitconfig). The empty
+# `--replace-all` resets the inherited (gh) helper for this host so only ours answers it.
+BB_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT_HOME}/.agent-env\"; set +a; [ \"\$1\" = get ] || exit 0; [ -n \"\${BITBUCKET_API_TOKEN}\" ] || exit 0; printf 'username=x-bitbucket-api-token-auth\npassword=%s\n' \"\${BITBUCKET_API_TOKEN}\"; }; f"
 git config -f "$AGENT_HOME/.gitconfig" --replace-all credential.https://bitbucket.org.helper "" || true
 git config -f "$AGENT_HOME/.gitconfig" --add         credential.https://bitbucket.org.helper "$BB_CRED_HELPER" || true
