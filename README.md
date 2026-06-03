@@ -49,7 +49,7 @@ agent-runners/
 │   ├── 09-agent-user.sh          # user, dirs, claude settings, swap
 │   ├── 11-polkit.sh
 │   ├── 12-workspace.sh           # .agent-env template, bashrc hook
-│   ├── 13-knowledge-packs.sh     # default registry
+│   ├── 13-knowledge-packs.sh     # universal `agents` ops pack (public catalog)
 │   ├── 14-claude-stop-hook.sh
 │   ├── 15-claude-mcp.sh
 │   ├── 16-services-prep.sh       # write systemd units + xrdp config
@@ -58,8 +58,10 @@ agent-runners/
 │   ├── 18-heartbeat.sh           # portal heartbeat
 │   ├── 19-secrets.sh             # pull per-agent secrets
 │   ├── 19b-plugins.sh            # install SIDEBUTTON_PLUGINS, restart server
+│   ├── 19c-health-report.sh      # sb-health timer (metrics + screenshot)
+│   ├── 19d-account-registry.sh   # add SIDEBUTTON_DEFAULT_REGISTRY + update timer
 │   ├── 20-mark-installed.sh      # write /etc/sidebutton/installed
-│   ├── assets/                   # bundled binaries (wallpaper.png)
+│   ├── assets/                   # bundled scripts/binaries (wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh)
 │   └── run.sh                    # orchestrator
 ├── variants/
 │   ├── sidebutton-mcp-claude-code-extension/
@@ -93,7 +95,7 @@ A hook is a regular bash file at `variants/<name>/<hook>.sh`. It runs in the sam
 | Flag | Effect |
 |---|---|
 | `SKIP_SIDEBUTTON_SERVER=1` | Drops `08-sidebutton.sh` (npm install), the `sidebutton.service` unit in `16`, the enable/start lines in `17`, the `claude mcp add sidebutton` call in `15`, and reports `not-installed` instead of `unknown` for `dependency_versions.sidebutton` in `18`. |
-| `SKIP_KNOWLEDGE_PACKS=1` | Drops `13-knowledge-packs.sh`. |
+| `SKIP_KNOWLEDGE_PACKS=1` | Drops `13-knowledge-packs.sh` and `19d-account-registry.sh` (no `agents` pack, no account registry/update timer). |
 
 ## Env vars consumed
 
@@ -106,7 +108,8 @@ A hook is a regular bash file at `variants/<name>/<hook>.sh`. It runs in the sam
 | `RUNNERS_REF` | no | `main` | Git ref the bootstrapper downloads this repo at |
 | `PORTAL_URL` | no | `https://sidebutton.com` | Portal base URL |
 | `AGENT_PASSWORD` | no | random | Initial RDP password (overwritten by portal-provided secret) |
-| `SIDEBUTTON_DEFAULT_REGISTRY` | no | — | Self-hosted/private knowledge-pack registry; falls back to `sidebutton install agents` when unset |
+| `SIDEBUTTON_DEFAULT_REGISTRY` | no | — | Per-account/self-hosted knowledge-pack registry (git URL). **Additive**: the universal `agents` ops pack is always installed in `13`; this registry is added on top in `19d` (after secrets), not instead of it. |
+| `SIDEBUTTON_DEFAULT_REGISTRY_TOKEN` | no | — | Auth token for a **private** `SIDEBUTTON_DEFAULT_REGISTRY` git repo. Delivered into `~/.agent-env` by the secrets fetch (`19`); `19d` / the `sb-registry-update` timer feed it to git (as `x-access-token`) so the registry clone/pull authenticates regardless of the workspace `GH_TOKEN`. Omit for a public registry. |
 | `SIDEBUTTON_PLUGINS` | no | — | Comma-separated plugin slugs (`plugins.json`) to install via `19b-plugins.sh`; forwarded by the portal from the profile's `default_plugins` ∪ provision override. No-op on the `bare` variant. |
 
 ## Idempotency
