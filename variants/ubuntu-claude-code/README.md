@@ -35,7 +35,7 @@ reporting unchanged, because it only needs `job-context.json` + an
 
 | Hook | What it does |
 |---|---|
-| `early-setup` | Exports `SKIP_SIDEBUTTON_SERVER=1` + `SKIP_KNOWLEDGE_PACKS=1` so base steps 08, 13, 15, 16, 17, 18 short-circuit the SB-specific work without duplicating their code. |
+| `early-setup` | Exports `SKIP_SIDEBUTTON_SERVER=1` + `SKIP_KNOWLEDGE_PACKS=1` so base steps 08, 13, 15, 16, 17, 18, 19d short-circuit the SB-specific work without duplicating their code. |
 | `pre-services` | Installs `fleet-job-client.mjs` to `/usr/local/bin/` and writes the systemd unit. Must run before `17-services-start.sh` so chrome.service doesn't try to `After=sidebutton.service` (the unit doesn't exist on this variant). |
 | `post-services` | Enables + starts `fleet-job-client.service` and waits up to 60s for `/health` on :9876. |
 

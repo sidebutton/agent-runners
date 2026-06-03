@@ -8,9 +8,10 @@
 #     drops the sidebutton.service unit in 16-services-prep.sh, removes it from
 #     the enable/start list in 17-services-start.sh, and reports "not-installed"
 #     in the heartbeat dependency_versions.sidebutton field (18).
-#   * SKIP_KNOWLEDGE_PACKS=1 — drops 13-knowledge-packs.sh. Knowledge packs are
-#     served via the SB MCP server, which the bare variant doesn't run; the
-#     `sidebutton install agents` command would also fail without the binary.
+#   * SKIP_KNOWLEDGE_PACKS=1 — drops 13-knowledge-packs.sh and
+#     19d-account-registry.sh. Knowledge packs are served via the SB MCP server,
+#     which the bare variant doesn't run; `sidebutton install agents` / `registry
+#     add` would also fail without the binary.
 #
 # Step 15 (claude-mcp registration) gates on the same SKIP_SIDEBUTTON_SERVER
 # flag — there's no SB MCP endpoint on :9876 to register against.
