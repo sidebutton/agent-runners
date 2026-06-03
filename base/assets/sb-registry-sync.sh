@@ -59,6 +59,19 @@ case "$ACTION" in
     sidebutton registry add "$REGISTRY_URL"
     ;;
   update)
+    # Reconcile-then-pull (SCRUM-1167). The one-shot `add` in base/19d can fail
+    # transiently — the registry credential (SIDEBUTTON_DEFAULT_REGISTRY_TOKEN, or the
+    # GH_TOKEN the gh helper uses for own-repo accounts) lands in ~/.agent-env only after
+    # a later config-apply, so an add that ran before the token arrived leaves the agent
+    # with NO registry. Historically this timer only ran `update`, which pulls already-
+    # configured registries and therefore never re-adds the missing one — so the account
+    # registry stayed absent forever. Add-if-missing here heals that on the next tick.
+    if [ -n "${SIDEBUTTON_DEFAULT_REGISTRY:-}" ] \
+       && ! sidebutton registry list 2>/dev/null | grep -qF "$SIDEBUTTON_DEFAULT_REGISTRY"; then
+      log "configured registry absent — reconciling (add ${SIDEBUTTON_DEFAULT_REGISTRY})"
+      sidebutton registry add "$SIDEBUTTON_DEFAULT_REGISTRY" \
+        || log "WARN: reconcile add failed — will retry next tick"
+    fi
     log "updating git registries (git pull)"
     sidebutton registry update
     ;;
