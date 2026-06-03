@@ -31,6 +31,12 @@ GIT_USER_NAME=
 GIT_USER_EMAIL=
 GH_TOKEN=
 
+# Optional: non-GitHub git hosts for workspace projects (delivered via per-agent
+# secrets / agent_env). Bitbucket HTTP-Basic = Atlassian email + API token; wired
+# as a per-host credential helper below.
+BITBUCKET_USER_EMAIL=
+BITBUCKET_API_TOKEN=
+
 # Required for SE/QA agents: Jira credentials
 JIRA_URL=
 JIRA_EMAIL=
@@ -58,3 +64,16 @@ fi
 #   fatal: could not read Username for 'https://github.com': terminal prompts disabled
 GH_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT_HOME}/.agent-env\"; set +a; exec /usr/bin/gh auth git-credential \"\$@\"; }; f"
 git config -f "$AGENT_HOME/.gitconfig" credential.helper "$GH_CRED_HELPER" || true
+
+# Bitbucket HTTPS credential helper for non-GitHub workspace git-projects (e.g.
+# tusmediadevelopers/*). The global `gh` helper above only answers github.com, so
+# bitbucket.org clones died with:
+#   fatal: could not read Username for 'https://bitbucket.org': terminal prompts disabled
+# Same call-time .agent-env sourcing as the gh helper (rotation-safe; the token is
+# never written to .gitconfig). Bitbucket HTTP-Basic = Atlassian email (username) +
+# API token (password) — the credentials the portal delivers as BITBUCKET_USER_EMAIL /
+# BITBUCKET_API_TOKEN. The empty `--replace-all` resets the inherited (gh) helper list
+# for this host so only ours answers bitbucket.org; it no-ops when the creds are absent.
+BB_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT_HOME}/.agent-env\"; set +a; [ \"\$1\" = get ] || exit 0; [ -n \"\${BITBUCKET_USER_EMAIL}\" ] && [ -n \"\${BITBUCKET_API_TOKEN}\" ] || exit 0; printf 'username=%s\npassword=%s\n' \"\${BITBUCKET_USER_EMAIL}\" \"\${BITBUCKET_API_TOKEN}\"; }; f"
+git config -f "$AGENT_HOME/.gitconfig" --replace-all credential.https://bitbucket.org.helper "" || true
+git config -f "$AGENT_HOME/.gitconfig" --add         credential.https://bitbucket.org.helper "$BB_CRED_HELPER" || true
