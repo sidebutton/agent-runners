@@ -88,28 +88,37 @@ git config -f "$AGENT_HOME/.gitconfig" --replace-all credential.https://bitbucke
 git config -f "$AGENT_HOME/.gitconfig" --add         credential.https://bitbucket.org.helper "$BB_CRED_HELPER" || true
 
 # Portal-hosted account knowledge-pack registry HTTPS credential helper. When the
-# account's pack repo is portal-hosted — SIDEBUTTON_DEFAULT_REGISTRY points at a
-# git.sidebutton.com-style host, not github.com/bitbucket.org — SD write-back PUSHES
-# to it via the agent_push_pr workflow, and the gh/Bitbucket helpers above don't
-# answer that host. Scope a per-host helper that authenticates with the per-account
-# token delivered to ~/.agent-env (SIDEBUTTON_DEFAULT_REGISTRY_TOKEN) using the
-# smart-HTTP x-access-token username. The pull side (registry add/update) already
-# forces the same token via /opt/sb-registry-sync.sh's GIT_CONFIG_* override; this
-# closes the push side so portal-default AND own-repo accounts both work end-to-end.
+# account's pack repo is the SideButton-hosted default (SIDEBUTTON_DEFAULT_REGISTRY
+# points at git.sidebutton.com), SD's write-back is a plain `git push` to it, and the
+# gh/Bitbucket helpers above don't answer that host. Scope a per-host helper that
+# authenticates with the per-account token delivered to ~/.agent-env
+# (SIDEBUTTON_DEFAULT_REGISTRY_TOKEN) using the smart-HTTP x-access-token username. The
+# pull side (registry add/update) already forces the same token via
+# /opt/sb-registry-sync.sh's GIT_CONFIG_* override; this closes the push side.
 # Sourced at call time (rotation-safe; token never written to .gitconfig). The empty
 # --replace-all resets the inherited (gh) helper for this host so only ours answers it.
-# Skipped for own GitHub/Bitbucket repos (handled above) and when no registry is set.
+#
+# ALLOWLIST, not denylist: wire this ONLY for the SideButton-hosted host. An own-repo
+# provider (github.com / bitbucket.org / gitlab.com / self-hosted) must clone+push with
+# the agent's OWN credential via the gh/Bitbucket helpers above and must NEVER receive
+# the portal token — so a future own-GitLab account can't fall through to it. (Belt &
+# suspenders: secrets.ts only delivers SIDEBUTTON_DEFAULT_REGISTRY_TOKEN for mode=default
+# accounts, so the helper also self-guards on token presence.) Prod portal host is
+# git.sidebutton.com (GIT_HOST_PUBLIC_BASE default); a white-label deploy overriding that
+# base extends the match below — or the portal forwards the pack mode explicitly.
 REG_URL="${SIDEBUTTON_DEFAULT_REGISTRY:-}"
 case "$REG_URL" in
   https://*)
     REG_HOST="${REG_URL#https://}"; REG_HOST="${REG_HOST%%/*}"
     case "$REG_HOST" in
-      ""|github.com|*.github.com|bitbucket.org|*.bitbucket.org) : ;;  # own-repo hosts: covered above
-      *)
+      sidebutton.com|*.sidebutton.com)  # SideButton-hosted default registry only
         REG_CRED_HELPER="!f(){ set -a; [ -f \"${AGENT_HOME}/.agent-env\" ] && . \"${AGENT_HOME}/.agent-env\"; set +a; [ \"\$1\" = get ] || exit 0; [ -n \"\${SIDEBUTTON_DEFAULT_REGISTRY_TOKEN}\" ] || exit 0; printf 'username=x-access-token\npassword=%s\n' \"\${SIDEBUTTON_DEFAULT_REGISTRY_TOKEN}\"; }; f"
         git config -f "$AGENT_HOME/.gitconfig" --replace-all "credential.https://${REG_HOST}.helper" "" || true
         git config -f "$AGENT_HOME/.gitconfig" --add         "credential.https://${REG_HOST}.helper" "$REG_CRED_HELPER" || true
         log "portal registry credential helper configured for https://${REG_HOST}"
+        ;;
+      *)  # own-repo provider (github/bitbucket/gitlab/self-hosted) — its own helper handles auth
+        log "registry host ${REG_HOST:-<none>} is not portal-hosted — leaving its own (gh/Bitbucket) helper to authenticate"
         ;;
     esac
     ;;
