@@ -1,5 +1,13 @@
 # 14-claude-stop-hook.sh — Claude Code Stop/SubagentStop hook that POSTs
-# aggregated token usage + cost to the portal.
+# aggregated token usage + cost AND the full session transcript to the portal.
+#
+# CANONICAL agent-side hook. Cloud agents install THIS file (install.sh ->
+# base/run.sh); the docs/agents/services/claude-stop-hook.sh copy in the
+# the-assistant repo is legacy/manual and is NOT deployed. Any change to the
+# portal job-reporting contract — POST /api/jobs/usage and POST
+# /api/jobs/transcript — MUST land here, or agents silently stop reporting.
+# (cf. SCRUM-1166: the transcript upload was added only to the legacy copy, so
+#  no cloud agent ever uploaded a session log.)
 
 step "Step 14/16: Claude stop hook"
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
@@ -46,5 +54,29 @@ curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
   -H "X-Agent-Name: ${AGENT_NAME}" \
   -d "$PAYLOAD" --connect-timeout 10 --max-time 30 >/dev/null 2>&1 || true
+
+# Upload the full Claude Code session transcript (SCRUM-1166). transcript_path is
+# the MAIN session transcript for BOTH Stop and SubagentStop, so gate to the final
+# Stop — otherwise every subagent finish re-uploads the same growing file. The
+# /api/jobs/transcript endpoint keys by (job_id, step_index) and keeps the fuller
+# copy, so this last read is authoritative. Fully guarded + IPv4 (cf. #11): any
+# failure here stays invisible to Claude Code.
+HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
+if [ "$HOOK_EVENT" != "SubagentStop" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+  RAW_BYTES=$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null | tr -d ' ' || echo 0)
+  TS_GZ=$(mktemp 2>/dev/null || echo "${HOME}/.sidebutton/transcript-${JOB_ID}-${STEP_INDEX}.gz")
+  if gzip -c "$TRANSCRIPT_PATH" > "$TS_GZ" 2>/dev/null; then
+    TS_CODE=$(curl -4 -s -o /dev/null -w '%{http_code}' \
+      -X POST "${PORTAL_URL}/api/jobs/transcript?job_id=${JOB_ID}&step_index=${STEP_INDEX}&session_id=${SESSION_ID}&bytes=${RAW_BYTES}" \
+      -H "Content-Type: application/gzip" \
+      -H "Authorization: Bearer ${AGENT_TOKEN}" \
+      -H "X-Agent-Name: ${AGENT_NAME}" \
+      --data-binary "@${TS_GZ}" \
+      --connect-timeout 10 --max-time 120) || TS_CODE=0
+    log "transcript POST (${RAW_BYTES}B raw): ${TS_CODE}"
+  fi
+  rm -f "$TS_GZ"
+fi
+exit 0
 HOOKEOF
 chmod +x "$AGENT_HOME/.local/bin/claude-stop-hook.sh"
