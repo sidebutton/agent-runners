@@ -31,6 +31,13 @@ STEP_INDEX=$(jq -r '.step_index // empty' "$JOB_CONTEXT")
 [ -n "$JOB_ID" ] && [ -n "$STEP_INDEX" ] || { log "incomplete job-context"; exit 0; }
 SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty')
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty')
+# SCRUM-1178: only the MAIN agent Stop completes the job. This hook runs on BOTH
+# Stop and SubagentStop (usage accumulates on both); SubagentStop fires when a
+# sub-agent returns while the main agent is still working, so it must NOT trigger
+# completion. final=true only for hook_event_name == "Stop". (Reused below to
+# gate the transcript upload too.)
+HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
+if [ "$HOOK_EVENT" = "Stop" ]; then IS_FINAL=true; else IS_FINAL=false; fi
 USAGE='{}'
 if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
   USAGE=$(jq -s '[.[] | select(.type == "assistant" and .message.usage != null)] | {
@@ -47,21 +54,38 @@ TOTAL_COST=$(echo "$HOOK_INPUT" | jq -r '.total_cost_usd // .cost_usd // 0')
 PAYLOAD=$(jq -n --argjson job_id "$JOB_ID" --argjson step "$STEP_INDEX" \
   --arg sid "$SESSION_ID" --argjson u "$USAGE" \
   --argjson dur "$DURATION_MS" --arg cost "$TOTAL_COST" \
-  '{job_id:$job_id, step_index:$step, session_id:$sid,
+  --argjson final "$IS_FINAL" \
+  '{job_id:$job_id, step_index:$step, session_id:$sid, final:$final,
     usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)})}')
 curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
   -H "X-Agent-Name: ${AGENT_NAME}" \
   -d "$PAYLOAD" --connect-timeout 10 --max-time 30 >/dev/null 2>&1 || true
+log "posted usage (job $JOB_ID step $STEP_INDEX final=$IS_FINAL)"
+
+# SCRUM-1178 / SCRUM-511: on the main Stop, also POST step-complete — a
+# monitor-independent completion path that finalizes the job even if the usage
+# POST above failed or the job outlived the Temporal monitor's deadline.
+# Idempotent server-side (no-ops once the step is terminal); keyed on
+# job_id/step_index since the hook has no sb_run_id.
+if [ "$HOOK_EVENT" = "Stop" ]; then
+  STEP_COMPLETE_PAYLOAD=$(jq -n --argjson job_id "$JOB_ID" --argjson step "$STEP_INDEX" \
+    '{job_id:$job_id, step_index:$step, status:"success"}')
+  curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/step-complete" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${AGENT_TOKEN}" \
+    -H "X-Agent-Name: ${AGENT_NAME}" \
+    -d "$STEP_COMPLETE_PAYLOAD" --connect-timeout 10 --max-time 30 >/dev/null 2>&1 || true
+  log "posted step-complete (job $JOB_ID step $STEP_INDEX)"
+fi
 
 # Upload the full Claude Code session transcript (SCRUM-1166). transcript_path is
 # the MAIN session transcript for BOTH Stop and SubagentStop, so gate to the final
 # Stop — otherwise every subagent finish re-uploads the same growing file. The
 # /api/jobs/transcript endpoint keys by (job_id, step_index) and keeps the fuller
 # copy, so this last read is authoritative. Fully guarded + IPv4 (cf. #11): any
-# failure here stays invisible to Claude Code.
-HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
+# failure here stays invisible to Claude Code. (HOOK_EVENT computed above.)
 if [ "$HOOK_EVENT" != "SubagentStop" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
   RAW_BYTES=$(wc -c < "$TRANSCRIPT_PATH" 2>/dev/null | tr -d ' ' || echo 0)
   TS_GZ=$(mktemp 2>/dev/null || echo "${HOME}/.sidebutton/transcript-${JOB_ID}-${STEP_INDEX}.gz")
