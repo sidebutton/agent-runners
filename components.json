@@ -1,0 +1,85 @@
+{
+  "$schema": "./components.schema.json",
+  "version": 1,
+  "components": [
+    {
+      "slug": "chrome",
+      "kind": "runtime",
+      "title": "Google Chrome",
+      "description": "Chrome browser (required by the SideButton extension and Claude-native browsing).",
+      "requires": [],
+      "chip": { "label": "Chrome", "live": true, "processKey": "chrome" }
+    },
+    {
+      "slug": "sidebutton-server",
+      "kind": "runtime",
+      "title": "SideButton MCP server",
+      "description": "MCP server on :9876. Unlocks dispatch from the portal and agent capabilities (roles). Without it the agent is RDP/manual only and not dispatchable.",
+      "requires": [],
+      "unlocks": ["dispatch", "capabilities"],
+      "chip": { "label": "SB server", "live": true, "processKey": "sidebutton", "versionKey": "sidebutton" }
+    },
+    {
+      "slug": "sidebutton-extension",
+      "kind": "runtime",
+      "title": "SideButton Chrome extension",
+      "description": "Force-installs the SideButton extension via Chrome managed policy and waits for the browser_connected handshake.",
+      "requires": ["chrome", "sidebutton-server"],
+      "chip": { "label": "Extension", "live": true, "processKey": "extension" }
+    },
+    {
+      "slug": "knowledge-packs",
+      "kind": "packs",
+      "title": "Knowledge packs",
+      "description": "Universal 'agents' ops pack (dispatch ops workflows) + the per-account knowledge-pack registry and its update timer.",
+      "requires": ["sidebutton-server"],
+      "chip": { "label": "Knowledge packs", "live": false }
+    },
+    {
+      "slug": "screen-record",
+      "kind": "mcp-plugin",
+      "title": "Screen Record",
+      "description": "Screen recording on the agent VM via ffmpeg x11grab — start, stop, list recordings.",
+      "repo": "sidebutton/plugin-screen-record",
+      "ref": "main",
+      "submodules": false,
+      "system_deps": ["ffmpeg"],
+      "requires": ["sidebutton-server"]
+    },
+    {
+      "slug": "writing-quality",
+      "kind": "mcp-plugin",
+      "title": "Writing Quality",
+      "description": "AI writing-pattern detection + 5-dimension quality scoring.",
+      "repo": "sidebutton/plugin-writing-quality",
+      "ref": "main",
+      "submodules": true,
+      "system_deps": [],
+      "requires": ["sidebutton-server"]
+    },
+    {
+      "slug": "dotnet9",
+      "kind": "toolchain",
+      "title": ".NET 9 SDK",
+      "description": ".NET 9 SDK + ASP.NET runtime (build/run/test .NET projects).",
+      "requires": [],
+      "chip": { "label": ".NET 9", "live": false }
+    },
+    {
+      "slug": "docker",
+      "kind": "toolchain",
+      "title": "Docker",
+      "description": "Docker engine (enables container builds and Testcontainers-based test suites). Adds the agent user to the docker group.",
+      "requires": [],
+      "chip": { "label": "Docker", "live": true }
+    },
+    {
+      "slug": "postgres-client",
+      "kind": "toolchain",
+      "title": "PostgreSQL client",
+      "description": "psql command-line client for DB inspection and migration scripts.",
+      "requires": [],
+      "chip": { "label": "psql", "live": false }
+    }
+  ]
+}

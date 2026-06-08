@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/sidebutton/agent-runners/blob/main/components.schema.json",
+  "title": "Agent runners component catalog",
+  "description": "Optional components layered on top of the single base runner (ubuntu-claude-code). The base agent is always installed; components are selected per-agent via the AGENT_COMPONENTS env list. Profiles (profiles.json) are named presets of these slugs. The portal vendors this file; agent-runners is the single source of truth.",
+  "type": "object",
+  "required": ["version", "components"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "integer", "minimum": 1 },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/component" }
+    }
+  },
+  "$defs": {
+    "component": {
+      "type": "object",
+      "required": ["slug", "kind", "title", "requires"],
+      "properties": {
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Stable id persisted in agents.components and threaded into AGENT_COMPONENTS. Resolves to base/components/<slug>/."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["runtime", "packs", "mcp-plugin", "toolchain"],
+          "description": "Install dispatch class. runtime = service/binary install via the component's own scripts; packs = knowledge-pack install (needs the SB server); mcp-plugin = `sidebutton plugin install` from a git repo (needs the SB server); toolchain = OS-level dev tool (apt/repo)."
+        },
+        "title": { "type": "string", "description": "Wizard label." },
+        "description": { "type": "string", "description": "One-line helper text in the wizard." },
+        "requires": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Other component slugs that must also be selected. The wizard auto-checks these; unchecking a required-by component unchecks its dependents."
+        },
+        "unlocks": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["dispatch", "capabilities"] },
+          "description": "Portal-level abilities this component enables. sidebutton-server unlocks dispatch + capabilities; absence ⇒ capabilities=[] and the agent is not dispatchable."
+        },
+        "chip": {
+          "type": "object",
+          "description": "Fleet/detail dep-chip descriptor. live=true chips get a status dot from a process signal; live=false are static 'installed' declarations.",
+          "required": ["label", "live"],
+          "properties": {
+            "label": { "type": "string" },
+            "live": { "type": "boolean" },
+            "processKey": { "type": "string", "enum": ["sidebutton", "chrome", "extension"] },
+            "versionKey": { "type": "string", "enum": ["sidebutton", "claude_code"] }
+          },
+          "additionalProperties": false
+        },
+        "repo": { "type": "string", "description": "mcp-plugin only: github owner/repo to clone." },
+        "ref": { "type": "string", "description": "mcp-plugin only: git ref (default main)." },
+        "submodules": { "type": "boolean", "description": "mcp-plugin only: clone --recurse-submodules." },
+        "system_deps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "apt package names installed (as root, at provision) before the component installs. e.g. screen-record → ffmpeg."
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

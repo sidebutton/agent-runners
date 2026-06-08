@@ -55,8 +55,8 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["ext", "noext", "bare"],
-          "description": "Capability class the portal uses for the accent color + dep-chip set: ext = SideButton extension bridge, noext = SideButton server but Claude-native browser, bare = no SideButton runtime."
+          "enum": ["base", "ext", "noext", "bare"],
+          "description": "Capability class. As of the component model there is a single 'base' variant (ubuntu-claude-code); capabilities are layered as components (components.json), so dep chips are component-derived. Legacy values (ext = extension bridge, noext = SB server + native browser, bare = no SB runtime) are retained for back-compat display of pre-component rows."
         },
         "display": {
           "type": "object",

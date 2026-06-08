@@ -14,17 +14,18 @@ else
   SB_VERSION="$(sidebutton --version 2>/dev/null || echo unknown)"
 fi
 
-# Runner variant + extension presence are reported at the top level so the
-# portal can persist them on agents.runner and interpret browser_connected
-# relative to the variant (SCRUM-1095). Only the extension overlay actually
-# installs the Chrome managed-policy that loads the SideButton extension;
-# every other variant is `has_extension=false` by design, and a `false`
-# browser_connected on those must not be treated as an error.
-AGENT_RUNNER_VAL="${AGENT_RUNNER:-sidebutton-mcp-claude-code-extension}"
-case "$AGENT_RUNNER_VAL" in
-  sidebutton-mcp-claude-code-extension) HAS_EXTENSION="true" ;;
-  *) HAS_EXTENSION="false" ;;
-esac
+# has_extension is reported at the top level so the portal interprets
+# browser_connected correctly (SCRUM-1095): has_extension=false ⇒ a false
+# browser_connected is the expected resting state, NOT an error. With the
+# component model there is a single base runner, so this is driven by the
+# `sidebutton-extension` COMPONENT (INSTALL_EXTENSION from base/components.sh),
+# not the runner name. AGENT_RUNNER is still reported (persisted on agents.runner).
+AGENT_RUNNER_VAL="${AGENT_RUNNER:-ubuntu-claude-code}"
+if [ "${INSTALL_EXTENSION:-0}" = "1" ]; then
+  HAS_EXTENSION="true"
+else
+  HAS_EXTENSION="false"
+fi
 
 HEARTBEAT_BODY=$(jq -n \
   --arg node "$(node --version 2>/dev/null || echo unknown)" \

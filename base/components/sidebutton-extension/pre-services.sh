@@ -1,11 +1,13 @@
-# pre-services.sh — variant overlay (sidebutton-mcp-claude-code-extension)
+# components/sidebutton-extension/pre-services.sh
 #
-# Force-install the SideButton Chrome extension via managed policy. The Web
-# Store listing is public and the extension ID is stable:
+# Force-install the SideButton Chrome extension via managed policy. Sourced by
+# base/run.sh at the pre-services phase when `sidebutton-extension` is selected
+# (requires `chrome` + `sidebutton-server`). The Web Store listing is public and
+# the extension ID is stable:
 #   https://chromewebstore.google.com/detail/sidebutton/odaefhmdmgijnhdbkfagnlnmobphgkij
-# This MUST be in place BEFORE chrome.service first starts so the policy is
-# read during Chrome's initial profile creation. Without this, the extension
-# never auto-installs and browser_connected stays false.
+# MUST be in place BEFORE chrome.service first starts so the policy is read
+# during Chrome's initial profile creation — else the extension never
+# auto-installs and browser_connected stays false.
 
 SIDEBUTTON_EXT_ID="odaefhmdmgijnhdbkfagnlnmobphgkij"
 SIDEBUTTON_UPDATE_URL="https://clients2.google.com/service/update2/crx"

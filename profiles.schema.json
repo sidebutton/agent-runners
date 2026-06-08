@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/sidebutton/agent-runners/blob/main/profiles.schema.json",
   "title": "Agent runners profiles manifest",
-  "description": "Product-level profile templates the portal Create-Agent wizard offers. A profile picks a runner variant (variants.json) + default roles and gives it a role-centric name/description. The portal vendors this file; agent-runners is the single source of truth.",
+  "description": "Product-level profile templates the portal Create-Agent wizard offers. A profile is a named PRESET of components (components.json) on top of the single base runner, plus default roles. The wizard pre-checks the preset's components; the user may uncheck or add any component. The portal vendors this file; agent-runners is the single source of truth.",
   "type": "object",
   "required": ["version", "default", "order", "profiles"],
   "properties": {
@@ -17,10 +17,14 @@
       "items": { "type": "string" },
       "description": "Dropdown order. MUST list every profiles[].slug exactly once."
     },
+    "runner": {
+      "type": "string",
+      "description": "The single base runner variant all profiles install onto (ubuntu-claude-code). Profiles differ by components, not runner."
+    },
     "aliases": {
       "type": "object",
       "additionalProperties": { "type": "string" },
-      "description": "Legacy slug → canonical slug, e.g. 'claude-code-headless' → 'swe-native'. The portal canonicalises on resolve + display so persisted rows keep working after a rename."
+      "description": "Legacy slug → canonical slug (e.g. 'qa-generalist' → 'swe-full-stack', 'swe-bare' → 'swe-native'). The portal canonicalises on resolve + display so persisted rows keep working after a rename."
     },
     "profiles": {
       "type": "array",
@@ -31,26 +35,21 @@
   "$defs": {
     "profile": {
       "type": "object",
-      "required": ["slug", "name", "description", "runner", "default_roles", "extras"],
+      "required": ["slug", "name", "description", "runner", "default_roles", "components"],
       "properties": {
         "slug": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$", "description": "Stable id persisted in agents.profile." },
-        "name": { "type": "string", "description": "Role-centric template name shown in the wizard dropdown + consolidated profile block." },
+        "name": { "type": "string", "description": "Template name shown in the wizard dropdown + consolidated profile block." },
         "description": { "type": "string", "description": "One-line stack description (helper text + row sub-line)." },
-        "runner": { "type": "string", "description": "Variant name from variants.json this profile installs onto." },
+        "runner": { "type": "string", "description": "Base runner variant this profile installs onto (always ubuntu-claude-code)." },
         "default_roles": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Roles seeded into agents.capabilities when the wizard omits an explicit roles[] override."
+          "description": "Roles seeded into agents.capabilities when the wizard omits an explicit roles[] override AND the component set includes sidebutton-server. Without the server the agent has capabilities=[] (not dispatchable)."
         },
-        "default_plugins": {
+        "components": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Plugin slugs (from plugins.json) base/19b-plugins.sh installs when this profile is provisioned, unless the provision request passes an explicit plugins[] override. Empty for variants with no SideButton server (bare) — plugins are MCP tools the server hosts."
-        },
-        "extras": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "Reserved for user-editable templates — empty for the seed catalogue (chips are variant-derived)."
+          "description": "Component slugs (components.json) pre-checked in the wizard for this profile. The user may uncheck or add any component before provisioning; the final set is threaded as AGENT_COMPONENTS. Plugins (kind=mcp-plugin) are listed here too — default_plugins is gone."
         }
       },
       "additionalProperties": false
