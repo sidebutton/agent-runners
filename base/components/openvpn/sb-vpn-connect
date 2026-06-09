@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# sb-vpn-connect — deploy an OpenVPN client profile and autoconnect (idempotent).
+#
+# MVP helper installed by the `openvpn` component. The customer .ovpn is a SECRET
+# (inline private key), so it is NOT stored in the portal/repo — an operator copies
+# it to the agent post-provision and runs this once:
+#
+#     sudo sb-vpn-connect /path/to/profile.ovpn [name]
+#
+# It installs the profile as a systemd-managed client (openvpn-client@<name>, so it
+# reconnects on boot), and — because the connection may push redirect-gateway
+# (full tunnel) — pins the portal + cloud-metadata hosts to the PRE-VPN gateway via
+# OpenVPN's native `net_gateway` keyword, so the agent's heartbeat/secrets/dispatch
+# never get black-holed by the tunnel. Safe whether the server pushes a full or
+# split tunnel (a /32 net_gateway route is a no-op under split tunnel).
+#
+# Re-running with a new .ovpn cleanly replaces the profile.
+set -euo pipefail
+
+SRC="${1:?usage: sudo sb-vpn-connect <profile.ovpn> [name]}"
+NAME="${2:-vpn}"
+PORTAL_HOST="$(printf '%s' "${PORTAL_URL:-https://sidebutton.com}" | sed -E 's#^[a-z]+://##; s#/.*$##; s#:.*$##')"
+DEST="/etc/openvpn/client/${NAME}.conf"
+UNIT="openvpn-client@${NAME}.service"
+
+[ "$(id -u)" -eq 0 ] || { echo "must run as root (use sudo)" >&2; exit 1; }
+[ -r "$SRC" ]        || { echo "no such readable file: $SRC" >&2; exit 1; }
+command -v openvpn >/dev/null 2>&1 || { echo "openvpn not installed (select the 'openvpn' component)" >&2; exit 1; }
+
+install -D -m 600 -o root -g root "$SRC" "$DEST"
+
+# Heartbeat-safety routes (idempotent append). net_gateway = the real default gw,
+# resolved by OpenVPN regardless of any pushed redirect-gateway.
+_add_route() { grep -qxF "$1" "$DEST" || printf '%s\n' "$1" >> "$DEST"; }
+echo "Pinning portal host '${PORTAL_HOST}' + cloud metadata to the pre-VPN gateway..."
+_portal_ips="$(getent ahostsv4 "$PORTAL_HOST" 2>/dev/null | awk '{print $1}' | sort -u || true)"
+[ -n "$_portal_ips" ] || echo "WARN: could not resolve ${PORTAL_HOST} — portal route guard skipped (verify connectivity after connect)"
+for _ip in $_portal_ips; do _add_route "route ${_ip} 255.255.255.255 net_gateway"; done
+_add_route "route 169.254.169.254 255.255.255.255 net_gateway"   # cloud metadata
+
+systemctl enable "$UNIT" >/dev/null 2>&1 || true
+systemctl restart "$UNIT"
+
+echo "Waiting for the tunnel to come up..."
+for _i in $(seq 1 30); do
+  ip -br addr show tun0 2>/dev/null | grep -q . && break
+  sleep 2
+done
+
+echo "──────── result ────────"
+if ip -br addr show tun0 2>/dev/null | grep -q .; then
+  echo "tun0: $(ip -br addr show tun0 | awk '{print $3}')"
+  echo "egress IP: $(curl -fsS -m 10 https://ifconfig.me 2>/dev/null || echo '?')"
+else
+  echo "tun0 NOT up — inspect: journalctl -u ${UNIT} -n 50 --no-pager"
+fi
+# Confirm the heartbeat guard worked (portal still reachable through the real gw).
+if curl -fsS -o /dev/null -m 10 "https://${PORTAL_HOST}/" 2>/dev/null; then
+  echo "portal ${PORTAL_HOST}: reachable ✓ (heartbeat safe)"
+else
+  echo "portal ${PORTAL_HOST}: NOT reachable ✗ — the tunnel may be black-holing the portal; check the net_gateway routes in ${DEST}"
+fi
+echo "unit ${UNIT}: $(systemctl is-active "$UNIT" 2>/dev/null), $(systemctl is-enabled "$UNIT" 2>/dev/null) (reconnects on boot)"

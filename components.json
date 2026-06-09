@@ -58,6 +58,14 @@
       "description": "psql command-line client for DB inspection and migration scripts.",
       "requires": [],
       "chip": { "label": "psql", "live": false }
+    },
+    {
+      "slug": "openvpn",
+      "kind": "toolchain",
+      "title": "OpenVPN client",
+      "description": "OpenVPN client + the sb-vpn-connect helper. The .ovpn profile is applied manually post-provision (MVP): sudo sb-vpn-connect <profile.ovpn>. Autoconnects on boot via openvpn-client@.",
+      "requires": [],
+      "chip": { "label": "VPN", "live": false }
     }
   ]
 }

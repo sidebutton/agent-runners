@@ -91,6 +91,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | `dotnet9` | toolchain | **new** — Microsoft apt repo → `dotnet-sdk-9.0`; `DOTNET_ROOT` in `/etc/environment` | — | .NET 9 |
 | `docker` | toolchain | **new** — `docker-ce` + `systemctl enable --now docker` + `usermod -aG docker $AGENT_USER` | — | Docker (live) |
 | `postgres-client` | toolchain | **new** — `postgresql-client` | — | psql |
+| `openvpn` | toolchain | **new** — `openvpn` + `sb-vpn-connect` helper; .ovpn applied manually post-provision (MVP — see [`OPENVPN.md`](./OPENVPN.md)) | — | VPN |
 
 ### `components.json` shape
 
