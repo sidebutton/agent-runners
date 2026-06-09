@@ -37,6 +37,7 @@ not dispatchable** — it's a manual / RDP agent.
 | `dotnet9` | toolchain | — | .NET 9 SDK |
 | `docker` | toolchain | — | Docker engine (+ agent in `docker` group) |
 | `postgres-client` | toolchain | — | `psql` |
+| `openvpn` | toolchain | — | OpenVPN client + `sb-vpn-connect` helper (.ovpn applied manually post-provision — see [`docs/OPENVPN.md`](./docs/OPENVPN.md)) |
 
 `base/components.sh` resolves `AGENT_COMPONENTS` (comma- or space-separated) into
 the `has_component` helper + the `SKIP_*` / `INSTALL_*` gates the step scripts
@@ -109,6 +110,7 @@ agent-runners/
 │   │   ├── dotnet9/install.sh
 │   │   ├── docker/install.sh
 │   │   ├── postgres-client/install.sh
+│   │   ├── openvpn/{install.sh,sb-vpn-connect}
 │   │   └── sidebutton-extension/{pre,post}-services.sh
 │   ├── assets/                   # wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh
 │   └── run.sh                    # orchestrator
