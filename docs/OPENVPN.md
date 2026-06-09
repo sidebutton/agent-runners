@@ -29,24 +29,53 @@ AGENT_COMPONENTS=chrome,sidebutton-server,sidebutton-extension,knowledge-packs,o
 
 This installs `openvpn` and `/usr/local/bin/sb-vpn-connect`. No VPN is connected yet.
 
-## 2. Attach the profile (manual, one command)
+## 2. Get SSH access to the agent
 
-Copy the `.ovpn` to the agent over a secure channel — **never commit it or paste it
-into a ticket/log**. Use the agent's RDP clipboard, or `scp` to its IP:
+The agent's SSH key is generated and stored at provision (SCRUM-1212). Pull the
+connection details + private key from the portal (`GET /api/agents/:id/ssh`):
 
 ```bash
-scp profile-XXXX.ovpn root@<agent-ip>:/root/gostudent.ovpn
-ssh root@<agent-ip> 'sudo sb-vpn-connect /root/gostudent.ovpn gostudent && shred -u /root/gostudent.ovpn'
+# JSON: { host, port, username, private_key, has_key, ... }
+curl -s "https://sidebutton.com/api/agents/<agent-id>/ssh" -H "Authorization: Bearer <portal-token>"
+# …or download just the key file:
+curl -s "https://sidebutton.com/api/agents/<agent-id>/ssh?format=pem" -H "Authorization: Bearer <portal-token>" -o agent.pem
+chmod 600 agent.pem
 ```
+
+- **Login user is provider-specific** — the response `username` tells you: **`root`** on
+  Hetzner, **`ubuntu`** on AWS.
+- Port 22 is firewall-allowlisted to the **provisioning operator's IP** (`user_ip` at
+  provision), so connect from that machine. RDP/console is the alternative.
+
+## 3. Attach the profile (one command)
+
+Copy the `.ovpn` over the secure SSH channel — **never commit it or paste it into a
+ticket/log** — then run the helper (`<user>`/`<host>` from step 2):
+
+```bash
+scp -i agent.pem profile-XXXX.ovpn <user>@<host>:/tmp/gostudent.ovpn
+ssh -i agent.pem <user>@<host> 'sudo sb-vpn-connect /tmp/gostudent.ovpn gostudent && shred -u /tmp/gostudent.ovpn'
+```
+
+> ⚠️ **Full-tunnel + SSH:** if the server pushes `redirect-gateway`, bringing the
+> tunnel up can drop *your own* interactive SSH session — the helper pins the
+> portal/relay/metadata off-tunnel, but not your operator IP. Run it from
+> **RDP/console**, or **detached** so it finishes regardless of your session:
+> ```bash
+> ssh -i agent.pem <user>@<host> 'nohup sudo sb-vpn-connect /tmp/gostudent.ovpn gostudent >/tmp/vpn.log 2>&1 &'
+> # reconnect, then: cat /tmp/vpn.log
+> ```
+> (Pre-pinning your IP via the real gateway also keeps the session alive:
+> `ip route replace <your-ip>/32 via $(ip route show default | awk '/default/{print $3}')`.)
 
 `sb-vpn-connect <profile.ovpn> [name]` (default name `vpn`):
 
 1. installs the profile as `/etc/openvpn/client/<name>.conf` (`chmod 600`),
-2. pins the **portal host + cloud-metadata** to the pre-VPN gateway (see below),
+2. pins the **portal host + relay + cloud-metadata** to the pre-VPN gateway (see *How it stays heartbeat-safe*),
 3. enables + starts `openvpn-client@<name>` (so it **reconnects on boot**),
 4. waits for `tun0` and prints a status + connectivity check.
 
-## 3. Verify
+## 4. Verify
 
 `sb-vpn-connect` prints the result; to re-check later:
 
