@@ -9,7 +9,7 @@
 #
 # It installs the profile as a systemd-managed client (openvpn-client@<name>, so it
 # reconnects on boot), and — because the connection may push redirect-gateway
-# (full tunnel) — pins the portal + cloud-metadata hosts to the PRE-VPN gateway via
+# (full tunnel) — pins the portal host + relay + cloud-metadata to the PRE-VPN gateway via
 # OpenVPN's native `net_gateway` keyword, so the agent's heartbeat/secrets/dispatch
 # never get black-holed by the tunnel. Safe whether the server pushes a full or
 # split tunnel (a /32 net_gateway route is a no-op under split tunnel).
@@ -32,11 +32,17 @@ install -D -m 600 -o root -g root "$SRC" "$DEST"
 # Heartbeat-safety routes (idempotent append). net_gateway = the real default gw,
 # resolved by OpenVPN regardless of any pushed redirect-gateway.
 _add_route() { grep -qxF "$1" "$DEST" || printf '%s\n' "$1" >> "$DEST"; }
-echo "Pinning portal host '${PORTAL_HOST}' + cloud metadata to the pre-VPN gateway..."
+echo "Pinning portal host '${PORTAL_HOST}' + relay + cloud metadata to the pre-VPN gateway..."
+# (1) PORTAL_HOST — the OUTBOUND heartbeat target (may be CDN-fronted → several IPs).
 _portal_ips="$(getent ahostsv4 "$PORTAL_HOST" 2>/dev/null | awk '{print $1}' | sort -u || true)"
 [ -n "$_portal_ips" ] || echo "WARN: could not resolve ${PORTAL_HOST} — portal route guard skipped (verify connectivity after connect)"
 for _ip in $_portal_ips; do _add_route "route ${_ip} 255.255.255.255 net_gateway"; done
-_add_route "route 169.254.169.254 255.255.255.255 net_gateway"   # cloud metadata
+# (2) RELAY/origin IP — the portal PROBES the agent INBOUND on :9876 from this host
+#     (a DIFFERENT, non-CDN IP than PORTAL_HOST). Without pinning it, the agent's
+#     reply routes into the tunnel and the portal marks the agent offline.
+_add_route "route ${SIDEBUTTON_RELAY_IP:-46.225.225.112} 255.255.255.255 net_gateway"
+# (3) Cloud metadata.
+_add_route "route 169.254.169.254 255.255.255.255 net_gateway"
 
 systemctl enable "$UNIT" >/dev/null 2>&1 || true
 systemctl restart "$UNIT"
