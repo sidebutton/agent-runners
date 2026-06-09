@@ -25,7 +25,7 @@
         "slug": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]*$",
-          "description": "Stable id. Also appears as a `kind: mcp-plugin` entry in components.json (catalog/wizard); this file carries the install detail (repo/ref) base/19b-plugins.sh uses to install the slugs in SIDEBUTTON_PLUGINS. Matches the plugin.json `name` of the installed plugin."
+          "description": "Stable id. base/19b-plugins.sh uses the install detail (repo/ref) here to install the slugs passed in SIDEBUTTON_PLUGINS. Matches the plugin.json `name` of the installed plugin."
         },
         "name": { "type": "string", "description": "Display name shown on the fleet list + agent detail." },
         "description": { "type": "string", "description": "One-line description shown in the agent detail plugins section." },
@@ -48,6 +48,12 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "apt packages the plugin needs at runtime (e.g. ['ffmpeg'] for screen-record). Installed as root before the plugin copy. Defaults to [].",
+          "default": []
+        },
+        "default_roles": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Roles this plugin is pre-checked for in the wizard's Step-2 plugin picker. Use [\"*\"] for all roles. The portal's pluginsForRoles() selects a plugin when its default_roles contain \"*\" or intersect the chosen roles. Defaults to [] (never auto-selected).",
           "default": []
         }
       },
