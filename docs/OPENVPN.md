@@ -68,12 +68,18 @@ that OpenVPN resolves to the **real** default gateway via its native `net_gatewa
 keyword, so those stay off the tunnel regardless of what the server pushes:
 
 ```
-route <portal-ip>      255.255.255.255 net_gateway
-route 169.254.169.254  255.255.255.255 net_gateway
+route <portal-host-ip>  255.255.255.255 net_gateway   # outbound heartbeat (PORTAL_HOST; may be CDN)
+route <relay-ip>        255.255.255.255 net_gateway   # inbound :9876 probe reply path (origin/relay)
+route 169.254.169.254   255.255.255.255 net_gateway   # cloud metadata
 ```
 
-Under a split tunnel these `/32` routes are harmless no-ops. (Override the portal
-host with `PORTAL_URL=… sb-vpn-connect …` if not `sidebutton.com`.)
+**Both** the portal host **and** the relay/origin IP matter: `PORTAL_HOST`
+(`sidebutton.com`) is often CDN-fronted and only covers the *outbound* heartbeat,
+while the portal *probes the agent inbound on :9876* from a **different**
+origin/relay IP — the agent's reply must stay off-tunnel too, or the portal marks
+it offline (verified end-to-end on a GoStudent full-tunnel agent). Under a split
+tunnel these `/32` routes are harmless no-ops. Overrides: `PORTAL_URL=…` /
+`SIDEBUTTON_RELAY_IP=…`.
 
 ## Replace / remove
 
