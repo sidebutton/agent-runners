@@ -49,7 +49,7 @@
         "components": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Component slugs (components.json) pre-checked in the wizard for this profile. The user may uncheck or add any component before provisioning; the final set is threaded as AGENT_COMPONENTS. Plugins (kind=mcp-plugin) are listed here too — default_plugins is gone."
+          "description": "Infra component slugs (components.json) pre-checked in the wizard for this profile. The user may uncheck or add any component before provisioning; the final set is threaded as AGENT_COMPONENTS. Plugins are NOT components — they are a separate role-driven catalog (plugins.json) selected in wizard Step 2 and sent as SIDEBUTTON_PLUGINS."
         }
       },
       "additionalProperties": false

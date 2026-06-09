@@ -26,8 +26,8 @@
         },
         "kind": {
           "type": "string",
-          "enum": ["runtime", "packs", "mcp-plugin", "toolchain"],
-          "description": "Install dispatch class. runtime = service/binary install via the component's own scripts; packs = knowledge-pack install (needs the SB server); mcp-plugin = `sidebutton plugin install` from a git repo (needs the SB server); toolchain = OS-level dev tool (apt/repo)."
+          "enum": ["runtime", "packs", "toolchain"],
+          "description": "Install dispatch class. runtime = service/binary install via the component's own scripts; packs = knowledge-pack install (needs the SB server); toolchain = OS-level dev tool (apt/repo). MCP plugins are a separate role-driven catalog (plugins.json), not components."
         },
         "title": { "type": "string", "description": "Wizard label." },
         "description": { "type": "string", "description": "One-line helper text in the wizard." },
@@ -52,14 +52,6 @@
             "versionKey": { "type": "string", "enum": ["sidebutton", "claude_code"] }
           },
           "additionalProperties": false
-        },
-        "repo": { "type": "string", "description": "mcp-plugin only: github owner/repo to clone." },
-        "ref": { "type": "string", "description": "mcp-plugin only: git ref (default main)." },
-        "submodules": { "type": "boolean", "description": "mcp-plugin only: clone --recurse-submodules." },
-        "system_deps": {
-          "type": "array",
-          "items": { "type": "string" },
-          "description": "apt package names installed (as root, at provision) before the component installs. e.g. screen-record → ffmpeg."
         }
       },
       "additionalProperties": false

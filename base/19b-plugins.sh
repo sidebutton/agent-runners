@@ -1,11 +1,11 @@
 # 19b-plugins.sh — install the agent plugins the portal selected, then start the
 # SideButton server (its first start) now that its runtime env is complete.
 #
-# SIDEBUTTON_PLUGINS is a comma-separated list of plugin slugs forwarded by the
-# provisioner (a profile's default_plugins ∪ the provision request override).
-# Each slug resolves to a public git repo via plugins.json (repo root). Plugins
-# are MCP tools hosted by the SideButton server, so this step is a no-op on
-# variants without a server (SKIP_SIDEBUTTON_SERVER=1, e.g. ubuntu-claude-code).
+# SIDEBUTTON_PLUGINS is a comma-separated list of plugin slugs the portal selected
+# (role-driven, from plugins.json) and passed in cloud-init. Each slug resolves to
+# a public git repo via plugins.json (repo root). Plugins are MCP tools hosted by
+# the SideButton server, so this step is a no-op without a server
+# (SKIP_SIDEBUTTON_SERVER=1, e.g. a manual base agent).
 #
 # sidebutton.service is enabled in base/17 but deliberately NOT started there: at
 # that point ~/.agent-env still holds the single-use bootstrap token + empty

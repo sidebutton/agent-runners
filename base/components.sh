@@ -4,30 +4,11 @@
 # Sourced by base/run.sh right after lib.sh. Turns the AGENT_COMPONENTS env list
 # (comma- or space-separated component slugs from components.json) into:
 #   - has_component <slug>   helper used by run.sh to gate phases
-#   - the SKIP_*/INSTALL_*/SIDEBUTTON_PLUGINS gates the existing step scripts read
+#   - the SKIP_*/INSTALL_* gates the existing step scripts read
 #
-# Back-compat: if AGENT_COMPONENTS is unset, the set is derived from the legacy
-# AGENT_RUNNER variant so old cloud-init keeps producing the same install.
-
-# Legacy AGENT_RUNNER variant → component set.
-_legacy_runner_components() {
-  case "${1:-}" in
-    sidebutton-mcp-claude-code-extension|"")
-      echo "chrome sidebutton-server sidebutton-extension knowledge-packs screen-record" ;;
-    sidebutton-mcp-claude-code)
-      echo "chrome sidebutton-server knowledge-packs screen-record" ;;
-    ubuntu-claude-code)
-      echo "" ;;                       # bare base — no optional components
-    *)
-      echo "chrome sidebutton-server sidebutton-extension knowledge-packs screen-record" ;;
-  esac
-}
-
-if [ -n "${AGENT_COMPONENTS:-}" ]; then
-  _components="$(printf '%s' "$AGENT_COMPONENTS" | tr ',' ' ')"
-else
-  _components="$(_legacy_runner_components "${AGENT_RUNNER:-}")"
-fi
+# AGENT_COMPONENTS is the authoritative selection (the portal always sends it).
+# Unset/empty ⇒ a manual base agent (no optional components).
+_components="$(printf '%s' "${AGENT_COMPONENTS:-}" | tr ',' ' ')"
 # Space-pad the normalised list so word matches are unambiguous.
 COMPONENTS=" $(echo $_components | xargs) "
 export COMPONENTS
@@ -41,15 +22,9 @@ has_component knowledge-packs   && export SKIP_KNOWLEDGE_PACKS=0   || export SKI
 has_component chrome            && export INSTALL_CHROME=1         || export INSTALL_CHROME=0
 has_component sidebutton-extension && export INSTALL_EXTENSION=1   || export INSTALL_EXTENSION=0
 
-# mcp-plugin components → SIDEBUTTON_PLUGINS (consumed by 19b-plugins.sh). An
-# explicit SIDEBUTTON_PLUGINS env still wins (operator override).
-if [ -z "${SIDEBUTTON_PLUGINS:-}" ]; then
-  _plugins=""
-  for _c in screen-record writing-quality; do
-    has_component "$_c" && _plugins="${_plugins}${_plugins:+,}${_c}"
-  done
-  export SIDEBUTTON_PLUGINS="$_plugins"
-fi
+# SIDEBUTTON_PLUGINS is selected by the portal (role-driven, from plugins.json)
+# and passed explicitly in cloud-init; 19b-plugins.sh consumes it. Nothing to
+# derive here — plugins are no longer components.
 
 # Enforce hard prerequisites (components.json `requires`) defensively, so a
 # dependent never installs broken even if a caller sends an inconsistent set.
@@ -63,7 +38,7 @@ if [ "$SKIP_KNOWLEDGE_PACKS" = 0 ] && [ "$SKIP_SIDEBUTTON_SERVER" != 0 ]; then
   log "components: knowledge-packs requires sidebutton-server — enabling"; export SKIP_SIDEBUTTON_SERVER=0
 fi
 if [ -n "${SIDEBUTTON_PLUGINS:-}" ] && [ "$SKIP_SIDEBUTTON_SERVER" != 0 ]; then
-  log "components: mcp-plugins require sidebutton-server — enabling"; export SKIP_SIDEBUTTON_SERVER=0
+  log "components: plugins require sidebutton-server — enabling"; export SKIP_SIDEBUTTON_SERVER=0
 fi
 
 log "components: [$(echo $COMPONENTS | xargs)]"

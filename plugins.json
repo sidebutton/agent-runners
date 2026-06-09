@@ -9,7 +9,8 @@
       "repo": "sidebutton/plugin-writing-quality",
       "ref": "main",
       "submodules": true,
-      "system_deps": []
+      "system_deps": [],
+      "default_roles": ["smm"]
     },
     {
       "slug": "screen-record",
@@ -18,7 +19,8 @@
       "repo": "sidebutton/plugin-screen-record",
       "ref": "main",
       "submodules": false,
-      "system_deps": ["ffmpeg"]
+      "system_deps": ["ffmpeg"],
+      "default_roles": ["*"]
     }
   ]
 }

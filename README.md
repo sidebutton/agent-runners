@@ -34,20 +34,33 @@ not dispatchable** — it's a manual / RDP agent.
 | `sidebutton-server` | runtime | — | MCP server on :9876 — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | `chrome`, `sidebutton-server` | Chrome managed-policy force-install + handshake wait |
 | `knowledge-packs` | packs | `sidebutton-server` | universal `agents` ops pack + account registry |
-| `screen-record`, `writing-quality` | mcp-plugin | `sidebutton-server` | MCP tools (`sidebutton plugin install`) |
 | `dotnet9` | toolchain | — | .NET 9 SDK |
 | `docker` | toolchain | — | Docker engine (+ agent in `docker` group) |
 | `postgres-client` | toolchain | — | `psql` |
 
 `base/components.sh` resolves `AGENT_COMPONENTS` (comma- or space-separated) into
-the `has_component` helper + the `SKIP_*` / `INSTALL_*` / `SIDEBUTTON_PLUGINS`
-gates the step scripts read, and enforces `requires` defensively. Component
+the `has_component` helper + the `SKIP_*` / `INSTALL_*` gates the step scripts
+read, and enforces `requires` defensively. Component
 install logic lives under `base/components/<slug>/` (`install.sh` for
 runtime/toolchain installs; `pre-services.sh` / `post-services.sh` for lifecycle
 phases — e.g. the extension's managed-policy + handshake).
 
 `components.json` is validated against
 [`components.schema.json`](./components.schema.json).
+
+### Plugins (`plugins.json`) — separate, role-driven
+
+MCP plugins are Claude-Code-skill-like tools the SideButton server loads (not components). Each entry
+carries install detail (`repo`/`ref`/`submodules`/`system_deps`) + `default_roles`; the wizard
+pre-checks them **by role** in Step 2 (only when `sidebutton-server` is selected), and the final
+selection is sent as `SIDEBUTTON_PLUGINS` and installed by `base/19b-plugins.sh`.
+
+| slug | default_roles | requires |
+|---|---|---|
+| `screen-record` | `["*"]` (all roles) | `sidebutton-server` |
+| `writing-quality` | `["smm"]` | `sidebutton-server` |
+
+`plugins.json` is validated against [`plugins.schema.json`](./plugins.schema.json).
 
 ### Profiles (`profiles.json`) — wizard presets
 
@@ -56,12 +69,11 @@ wizard pre-checks; the user may uncheck or add any component.
 
 | Profile | Components | Roles |
 |---|---|---|
-| **SideButton SWE Full Stack** (default) | `chrome, sidebutton-server, sidebutton-extension, knowledge-packs, screen-record` | se, qa, sd, pm |
+| **SideButton SWE Full Stack** (default) | `chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
 | **SideButton SWE .NET** | Full Stack + `dotnet9` | se, qa, sd, pm |
-| **SideButton SWE Native** | `chrome, sidebutton-server, knowledge-packs, screen-record` | se, qa |
+| **SideButton SWE Native** | `chrome, sidebutton-server, knowledge-packs` | se, qa |
 
-`aliases` maps legacy slugs (`qa-generalist` → `swe-full-stack`, `swe-bare` →
-`swe-native`, `claude-code-headless` → `swe-native`) so persisted rows resolve.
+Plugins are selected separately, by role (see Plugins above) — not baked into profile presets.
 
 ## Portal display metadata (single source of truth)
 
@@ -72,8 +84,8 @@ drift:
 - **`components.json`** — component catalog: `kind`, `requires`, dep-`chip`.
 - **`profiles.json`** — wizard presets (component sets + roles).
 - **`variants.json`** — the single base runner (display fallback + legacy `kind`).
-- **`plugins.json`** — install detail (slug → git `repo`) for `kind: mcp-plugin`
-  components, consumed by `base/19b-plugins.sh`.
+- **`plugins.json`** — the role-driven plugin catalog: install detail (slug → git `repo`) +
+  per-plugin `default_roles`, consumed by `base/19b-plugins.sh` via `SIDEBUTTON_PLUGINS`.
 
 ## Layout
 
@@ -83,7 +95,7 @@ agent-runners/
 ├── components.json               # component catalog (vendored by portal)
 ├── profiles.json                 # wizard presets (vendored by portal)
 ├── variants.json                 # single base runner manifest (vendored by portal)
-├── plugins.json                  # mcp-plugin install catalogue (slug → repo)
+├── plugins.json                  # role-driven plugin catalogue (slug → repo + default_roles)
 ├── docs/COMPONENTS.md            # component model + implementation plan
 ├── base/
 │   ├── lib.sh                    # log/die/step + run_variant_hook
@@ -130,7 +142,6 @@ variant ships no hooks — component behaviour is driven from `run.sh`.
 | `SKIP_KNOWLEDGE_PACKS=1` | `knowledge-packs` not selected → skips `13` + `19d` |
 | `INSTALL_CHROME=0` | `chrome` not selected → skips `06` + the `chrome.service` unit/start |
 | `INSTALL_EXTENSION=1` | `sidebutton-extension` selected → runs the extension component's pre/post-services |
-| `SIDEBUTTON_PLUGINS` | mcp-plugin components selected → installed by `19b` |
 
 ## Env vars consumed
 
@@ -139,21 +150,21 @@ variant ships no hooks — component behaviour is driven from `run.sh`.
 | `AGENT_TOKEN` | yes | — | Bootstrap token from `/portal/agents` |
 | `AGENT_NAME` | yes | — | Unique fleet identifier |
 | `AGENT_ROLE` | no | `se` | One of `se`, `qa`, `sd` |
-| `AGENT_COMPONENTS` | no | — | Comma/space list of component slugs. Unset ⇒ derived from `AGENT_RUNNER` (back-compat) |
-| `AGENT_RUNNER` | no | `ubuntu-claude-code` | The single base variant. Legacy variant names still map to a component set |
+| `AGENT_COMPONENTS` | no | — | Comma/space list of component slugs. Unset ⇒ manual base agent (no optional components) |
+| `AGENT_RUNNER` | no | `ubuntu-claude-code` | The single base variant |
 | `RUNNERS_REF` | no | `main` | Git ref the bootstrapper downloads this repo at |
 | `PORTAL_URL` | no | `https://sidebutton.com` | Portal base URL |
 | `AGENT_PASSWORD` | no | random | Initial RDP password (overwritten by portal secret) |
 | `SIDEBUTTON_DEFAULT_REGISTRY` | no | — | Per-account knowledge-pack registry (git URL); additive on top of the `agents` pack |
 | `SIDEBUTTON_DEFAULT_REGISTRY_TOKEN` | no | — | Auth token for a private registry; delivered via the secrets fetch |
-| `SIDEBUTTON_PLUGINS` | no | derived | Comma plugin slugs; defaults to the mcp-plugin components in the set |
+| `SIDEBUTTON_PLUGINS` | no | — | Comma plugin slugs (`plugins.json`); selected by the portal per role. Requires `sidebutton-server` |
 
-## Back-compat
+## No legacy
 
-Legacy cloud-init that sets `AGENT_RUNNER=sidebutton-mcp-claude-code-extension`
-(or `…-claude-code`) still works: the runner falls back to the single base
-variant and `base/components.sh` maps the legacy name to the equivalent
-component set, producing the same install.
+Old agents are deleted and re-provisioned, so the portal always sends an explicit
+`AGENT_COMPONENTS` (+ `SIDEBUTTON_PLUGINS`). `base/components.sh` reads `AGENT_COMPONENTS` only —
+unset ⇒ a manual base agent. The old `AGENT_RUNNER`→component-set mapping and profile `aliases` have
+been removed.
 
 ## Idempotency
 
