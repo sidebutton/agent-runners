@@ -12,18 +12,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-AGENT_RUNNER="${AGENT_RUNNER:-sidebutton-mcp-claude-code-extension}"
+# Single base runner (named after its deps). The capability composition lives in
+# AGENT_COMPONENTS (see components.json / docs/COMPONENTS.md), not the runner.
+AGENT_RUNNER="${AGENT_RUNNER:-ubuntu-claude-code}"
 RUNNERS_REF="${RUNNERS_REF:-local}"
 BOOTSTRAP_VERSION="${BOOTSTRAP_VERSION:-2.0.0}"
 
-if [ ! -d "$SCRIPT_DIR/variants/$AGENT_RUNNER" ]; then
-  echo "ERROR: unknown AGENT_RUNNER='$AGENT_RUNNER'" >&2
-  echo "Available variants: $(ls -1 "$SCRIPT_DIR/variants" 2>/dev/null | tr '\n' ' ')" >&2
-  exit 1
+# Resolve the variant dir. Legacy runner names (pre component model) no longer
+# have their own dir — fall back to the single base variant. AGENT_RUNNER is left
+# as-passed so base/components.sh can map a legacy name → component set (only used
+# when AGENT_COMPONENTS is unset); the new path passes AGENT_COMPONENTS directly.
+VARIANT_DIR="$SCRIPT_DIR/variants/$AGENT_RUNNER"
+if [ ! -d "$VARIANT_DIR" ]; then
+  echo "WARN: AGENT_RUNNER='$AGENT_RUNNER' has no variants/ dir — using base 'ubuntu-claude-code'" >&2
+  VARIANT_DIR="$SCRIPT_DIR/variants/ubuntu-claude-code"
 fi
 
 export AGENT_RUNNER RUNNERS_REF BOOTSTRAP_VERSION
+export AGENT_COMPONENTS="${AGENT_COMPONENTS:-}"
 export RUNNERS_ROOT="$SCRIPT_DIR"
-export RUNNERS_VARIANT_DIR="$SCRIPT_DIR/variants/$AGENT_RUNNER"
+export RUNNERS_VARIANT_DIR="$VARIANT_DIR"
 
 exec bash "$SCRIPT_DIR/base/run.sh"

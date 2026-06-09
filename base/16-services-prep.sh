@@ -57,16 +57,21 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# Chrome.service ordering depends on whether sidebutton.service exists.
-# Variants that skip the SB server (SKIP_SIDEBUTTON_SERVER=1) drop the After=
-# clause so Chrome can boot without waiting for a unit that will never start.
-if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
-  CHROME_AFTER='After=xfce-session.service'
+# chrome.service — only when the `chrome` component is selected (INSTALL_CHROME).
+# Ordering depends on whether sidebutton.service exists: when the SB server is
+# absent (SKIP_SIDEBUTTON_SERVER=1) drop the After= clause so Chrome doesn't wait
+# on a unit that will never start.
+if [ "${INSTALL_CHROME:-1}" != "1" ]; then
+  rm -f /etc/systemd/system/chrome.service
+  log "chrome.service unit not written (chrome component not selected)"
 else
-  CHROME_AFTER='After=xfce-session.service sidebutton.service'
-fi
+  if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
+    CHROME_AFTER='After=xfce-session.service'
+  else
+    CHROME_AFTER='After=xfce-session.service sidebutton.service'
+  fi
 
-cat > /etc/systemd/system/chrome.service <<EOF
+  cat > /etc/systemd/system/chrome.service <<EOF
 [Unit]
 Description=Chrome Browser with SideButton Extension
 ${CHROME_AFTER}
@@ -91,6 +96,7 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+fi
 
 if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
   rm -f /etc/systemd/system/sidebutton.service

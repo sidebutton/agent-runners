@@ -25,7 +25,7 @@
         "slug": {
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9-]*$",
-          "description": "Stable id used in profiles[].default_plugins, the provision API plugins[] override, and the SIDEBUTTON_PLUGINS install env. Matches the plugin.json `name` of the installed plugin."
+          "description": "Stable id. Also appears as a `kind: mcp-plugin` entry in components.json (catalog/wizard); this file carries the install detail (repo/ref) base/19b-plugins.sh uses to install the slugs in SIDEBUTTON_PLUGINS. Matches the plugin.json `name` of the installed plugin."
         },
         "name": { "type": "string", "description": "Display name shown on the fleet list + agent detail." },
         "description": { "type": "string", "description": "One-line description shown in the agent detail plugins section." },

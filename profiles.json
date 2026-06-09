@@ -1,47 +1,38 @@
 {
   "$schema": "./profiles.schema.json",
-  "version": 1,
+  "version": 2,
   "default": "swe-full-stack",
-  "order": ["swe-full-stack", "qa-generalist", "swe-native", "swe-bare"],
+  "order": ["swe-full-stack", "swe-dotnet", "swe-native"],
+  "runner": "ubuntu-claude-code",
   "aliases": {
-    "claude-code-headless": "swe-native"
+    "claude-code-headless": "swe-native",
+    "qa-generalist": "swe-full-stack",
+    "swe-bare": "swe-native"
   },
   "profiles": [
     {
       "slug": "swe-full-stack",
-      "name": "SWE Full-Stack",
-      "description": "SideButton MCP + Extension",
-      "runner": "sidebutton-mcp-claude-code-extension",
+      "name": "SideButton SWE Full Stack",
+      "description": "SideButton MCP server + Chrome extension + knowledge packs.",
+      "runner": "ubuntu-claude-code",
       "default_roles": ["se", "qa", "sd", "pm"],
-      "default_plugins": ["screen-record"],
-      "extras": []
+      "components": ["chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "screen-record"]
     },
     {
-      "slug": "qa-generalist",
-      "name": "QA Generalist",
-      "description": "SideButton MCP + Extension",
-      "runner": "sidebutton-mcp-claude-code-extension",
-      "default_roles": ["qa"],
-      "default_plugins": ["screen-record"],
-      "extras": []
+      "slug": "swe-dotnet",
+      "name": "SideButton SWE .NET",
+      "description": "SWE Full Stack + the .NET 9 SDK. Add Docker + Postgres client for the full test stack.",
+      "runner": "ubuntu-claude-code",
+      "default_roles": ["se", "qa", "sd", "pm"],
+      "components": ["chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "screen-record", "dotnet9"]
     },
     {
       "slug": "swe-native",
-      "name": "SWE Native",
-      "description": "SideButton MCP · Claude-native browser (no extension)",
-      "runner": "sidebutton-mcp-claude-code",
-      "default_roles": ["se", "qa"],
-      "default_plugins": ["screen-record"],
-      "extras": []
-    },
-    {
-      "slug": "swe-bare",
-      "name": "SWE Bare",
-      "description": "Claude Code · job API (no SideButton runtime)",
+      "name": "SideButton SWE Native",
+      "description": "SideButton MCP server + Claude-native browser (no Chrome extension).",
       "runner": "ubuntu-claude-code",
-      "default_roles": ["se"],
-      "default_plugins": [],
-      "extras": []
+      "default_roles": ["se", "qa"],
+      "components": ["chrome", "sidebutton-server", "knowledge-packs", "screen-record"]
     }
   ]
 }

@@ -1,7 +1,8 @@
-# post-services.sh — variant overlay (sidebutton-mcp-claude-code-extension)
+# components/sidebutton-extension/post-services.sh
 #
 # Wait for Chrome to fetch + install the SideButton extension from the Web Store
-# and complete the handshake with the SideButton MCP server on :9876.
+# and complete the handshake with the SideButton MCP server on :9876. Sourced by
+# base/run.sh at the post-services phase when `sidebutton-extension` is selected.
 #
 # The extension is force-installed via managed policy (ExtensionInstallForcelist,
 # see pre-services.sh) as a single best-effort fetch when chrome.service first

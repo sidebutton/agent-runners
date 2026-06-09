@@ -5,17 +5,16 @@
 # the server reads a complete ~/.agent-env on its first and only start (no stale-
 # token window, no restart). systemd reads the EnvironmentFile only at start.
 #
-# Variants that don't ship the SB server (SKIP_SIDEBUTTON_SERVER=1) drop
-# sidebutton.service from the enable list — the unit doesn't exist (see step 16).
-# Replacement services (e.g. fleet-job-client.service for ubuntu-claude-code) are
-# enabled/started by the variant's post-services hook.
+# Component-gated: `chrome` (INSTALL_CHROME) and `sidebutton-server`
+# (SKIP_SIDEBUTTON_SERVER) only join the enable/start list when selected — their
+# units are written conditionally in step 16.
 
 systemctl daemon-reload
-if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
-  systemctl enable xvfb xfce-session x11vnc chrome >/dev/null
-else
-  systemctl enable xvfb xfce-session x11vnc chrome sidebutton >/dev/null
-fi
+ENABLE_UNITS="xvfb xfce-session x11vnc"
+[ "${INSTALL_CHROME:-1}" = "1" ] && ENABLE_UNITS="$ENABLE_UNITS chrome"
+[ "${SKIP_SIDEBUTTON_SERVER:-}" != "1" ] && ENABLE_UNITS="$ENABLE_UNITS sidebutton"
+# shellcheck disable=SC2086
+systemctl enable $ENABLE_UNITS >/dev/null
 systemctl restart xrdp
 systemctl start xvfb
 sleep 1
@@ -26,6 +25,8 @@ sleep 1
 # sidebutton.service is intentionally NOT started here — base/19b starts it once
 # the permanent token + secrets are in ~/.agent-env (see header). The Chrome
 # extension reconnects on its own once the server comes up.
-systemctl start chrome || log "WARN: chrome service failed to start"
+if [ "${INSTALL_CHROME:-1}" = "1" ]; then
+  systemctl start chrome || log "WARN: chrome service failed to start"
+fi
 
 chown -R "${AGENT_USER}:${AGENT_USER}" "$AGENT_HOME"

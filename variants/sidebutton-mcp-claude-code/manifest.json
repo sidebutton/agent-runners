@@ -1,7 +1,0 @@
-{
-  "name": "sidebutton-mcp-claude-code",
-  "title": "SideButton MCP + Claude Code (no Chrome extension)",
-  "description": "Same as the default variant but skips the Chrome managed-policy block that force-installs the SideButton extension and skips the browser_connected handshake wait. Chrome still boots — without the extension. Useful for benchmarking Claude Code native tools against the SideButton browser bridge and for fleets that don't need an in-browser bridge.",
-  "hooks": [],
-  "default": false
-}
