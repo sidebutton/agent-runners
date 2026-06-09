@@ -4,8 +4,9 @@
 # CANONICAL agent-side hook. Cloud agents install THIS file (install.sh ->
 # base/run.sh); the docs/agents/services/claude-stop-hook.sh copy in the
 # the-assistant repo is legacy/manual and is NOT deployed. Any change to the
-# portal job-reporting contract — POST /api/jobs/usage and POST
-# /api/jobs/transcript — MUST land here, or agents silently stop reporting.
+# portal job-reporting contract — POST /api/jobs/usage, POST /api/jobs/transcript,
+# and POST /api/jobs/step-complete (now carrying output_message for the SCRUM-1199
+# verdict footer) — MUST land here, or agents silently stop reporting.
 # (cf. SCRUM-1166: the transcript upload was added only to the legacy copy, so
 #  no cloud agent ever uploaded a session log.)
 
@@ -70,8 +71,19 @@ log "posted usage (job $JOB_ID step $STEP_INDEX final=$IS_FINAL)"
 # Idempotent server-side (no-ops once the step is terminal); keyed on
 # job_id/step_index since the hook has no sb_run_id.
 if [ "$HOOK_EVENT" = "Stop" ]; then
+  # SCRUM-1199 (A2): forward the agent's final assistant message as output_message so
+  # the portal can parse the ===SB_RESULT=== verdict footer from it (its last line)
+  # without re-reading Jira. Last assistant turn's text blocks, joined; "" on any miss.
+  OUTPUT_MSG=""
+  if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
+    OUTPUT_MSG=$(jq -rs '
+      ([.[] | select(.type=="assistant")] | last) as $m
+      | ($m.message.content // [] | map(select(.type=="text") | .text) | join("\n"))
+    ' "$TRANSCRIPT_PATH" 2>/dev/null || echo "")
+  fi
   STEP_COMPLETE_PAYLOAD=$(jq -n --argjson job_id "$JOB_ID" --argjson step "$STEP_INDEX" \
-    '{job_id:$job_id, step_index:$step, status:"success"}')
+    --arg msg "$OUTPUT_MSG" \
+    '{job_id:$job_id, step_index:$step, status:"success", output_message:$msg}')
   curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/step-complete" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${AGENT_TOKEN}" \
