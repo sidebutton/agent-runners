@@ -19,45 +19,16 @@ startxfce4
 EOF
 chmod +x "$AGENT_HOME/.xsession"
 
-cat > "$AGENT_HOME/.claude/settings.json" <<'EOF'
-{
-  "skipDangerousModePermissionPrompt": true,
-  "env": { "DISABLE_AUTOUPDATER": "1" },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "TaskCreate|TaskUpdate",
-        "hooks": [
-          { "type": "command", "command": "cat >> $HOME/ops/logs/task-events.jsonl" },
-          { "type": "command", "command": "curl -4 -sf -X POST $PORTAL_URL/api/agents/events -H 'Content-Type: application/json' -H \"Authorization: Bearer $AGENT_TOKEN\" -H \"X-Agent-Name: $AGENT_NAME\" -d @- --max-time 5 2>/dev/null || true" }
-        ]
-      },
-      {
-        "matcher": ".*",
-        "hooks": [
-          { "type": "command", "command": "date -u +%Y-%m-%dT%H:%M:%SZ > $HOME/.sidebutton/last-tool-use" }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          { "type": "command", "command": "$HOME/.local/bin/claude-stop-hook.sh" }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "matcher": "",
-        "hooks": [
-          { "type": "command", "command": "$HOME/.local/bin/claude-stop-hook.sh" }
-        ]
-      }
-    ]
-  }
-}
-EOF
+# Hooks live in base/assets/claude-hooks.json — single source of truth shared
+# with the-assistant's update-agent.sh, which re-merges the block onto existing
+# boxes (this step only runs at provision time). The referenced helper scripts
+# (sb-mark-tool-use.sh, sb-session-id.sh, claude-stop-hook.sh) are installed by
+# base/14 before any Claude job runs.
+jq -n --slurpfile h "$BASE_DIR/assets/claude-hooks.json" '{
+  skipDangerousModePermissionPrompt: true,
+  env: { DISABLE_AUTOUPDATER: "1" },
+  hooks: $h[0].hooks
+}' > "$AGENT_HOME/.claude/settings.json"
 
 # Pre-seed Claude Code's global state so the FIRST `claude` run skips the
 # interactive first-run onboarding (theme picker / "Let's get started"). Agent
