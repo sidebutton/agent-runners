@@ -75,10 +75,15 @@ for pid in $(pgrep -u "$(id -u)" -x claude 2>/dev/null || true); do
   [ -r "/proc/$pid/stat" ] || continue
 
   cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
-  # Skip non-session invocations (mcp helpers, version/doctor probes) — they are
-  # short-lived and would exit long before the grace window anyway.
-  case " $cmd " in
-    *" mcp "*|*" --version "*|*" -v "*|*" doctor "*) continue ;;
+  # Skip non-session invocations (mcp helpers, version/doctor probes). Match the
+  # SUBCOMMAND token (argv[1]) ONLY — not the whole cmdline — because a real
+  # session carries its task prompt in argv, and a prompt that merely mentions
+  # "mcp"/"doctor"/"-v" must never be mistaken for `claude mcp …` and left
+  # un-reaped. These probes are short-lived and exit before the grace window
+  # anyway, so this is only belt-and-suspenders.
+  mapfile -d '' -t _argv < "/proc/$pid/cmdline" 2>/dev/null || _argv=()
+  case "${_argv[1]:-}" in
+    mcp|--version|-v|doctor) continue ;;
   esac
 
   line="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
