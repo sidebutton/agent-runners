@@ -75,4 +75,5 @@ run_variant_hook "post-services"
 . "$BASE_DIR/19b-plugins.sh"         # installs SIDEBUTTON_PLUGINS; starts SB server
 . "$BASE_DIR/19c-health-report.sh"   # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/19d-account-registry.sh"
+. "$BASE_DIR/19e-session-reaper.sh"  # close Claude Code sessions idle >1h after finish (SCRUM-1250)
 . "$BASE_DIR/20-mark-installed.sh"
