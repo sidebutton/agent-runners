@@ -1,0 +1,36 @@
+{
+  "_comment": "Canonical Claude Code hooks block for agent VMs. Single source of truth: base/09 composes ~/.claude/settings.json from it at provision time, and the-assistant docs/agents/scripts/update-agent.sh re-merges it onto existing boxes (base/09 is not re-run there). Commands are literal — $HOME/$PORTAL_URL/$AGENT_TOKEN/$AGENT_NAME expand when Claude runs the hook. The last-tool-use writer and the stop hook are gated to the JOB session via sb-session-id.sh (installed by base/14) so lingering/operator sessions cannot pollute job liveness or reporting (JOB-SIGNAL-ATTRIBUTION plan).",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "TaskCreate|TaskUpdate",
+        "hooks": [
+          { "type": "command", "command": "cat >> $HOME/ops/logs/task-events.jsonl" },
+          { "type": "command", "command": "curl -4 -sf -X POST $PORTAL_URL/api/agents/events -H 'Content-Type: application/json' -H \"Authorization: Bearer $AGENT_TOKEN\" -H \"X-Agent-Name: $AGENT_NAME\" -d @- --max-time 5 2>/dev/null || true" }
+        ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.local/bin/sb-mark-tool-use.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.local/bin/claude-stop-hook.sh" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.local/bin/claude-stop-hook.sh" }
+        ]
+      }
+    ]
+  }
+}
