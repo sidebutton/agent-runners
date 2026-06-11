@@ -46,6 +46,56 @@ date -u +%Y-%m-%dT%H:%M:%SZ > "${HOME}/.sidebutton/last-tool-use"
 TUEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-mark-tool-use.sh"
 
+# --- PostToolUse attribution forwarder (SCRUM-512) ----------------------------
+# Referenced from base/assets/claude-hooks.json (second command on the `.*`
+# PostToolUse entry). Forwards one REDUCED event per tool call to
+# POST /api/agents/events so the portal can attribute usage per MCP server
+# (mcp_tool_calls / mcp_server_stats). tool_input/tool_response can be 100s of
+# KB for MCP tools (browser snapshots), so only byte-derived token estimates
+# (~4 bytes/token) leave the box — never the raw payloads. TaskCreate/TaskUpdate
+# are skipped: the dedicated TaskCreate|TaskUpdate hook entry already posts them
+# in full (the task checklist needs tool_input/tool_response). Same job-session
+# gate as the liveness marker above; with no job-context session id (operator /
+# manual session) the event still posts — production telemetry wants those too.
+# The curl runs in the background so a slow portal never adds latency to a tool
+# call, and every failure is silent (Claude Code must never see this hook fail).
+cat > "$AGENT_HOME/.local/bin/sb-post-tool-event.sh" <<'PTEOF'
+#!/usr/bin/env bash
+# stdin: Claude Code PostToolUse hook JSON (tool_name, tool_input, tool_response, …).
+IN=$(cat 2>/dev/null || true)
+[ -z "$IN" ] && exit 0
+TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
+[ -z "$TOOL" ] && exit 0
+case "$TOOL" in TaskCreate|TaskUpdate) exit 0 ;; esac
+JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
+if [ -n "$JOB_SID" ]; then
+  SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+  if [ -n "$SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+fi
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
+AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
+PAYLOAD=$(echo "$IN" | jq -c '{
+  session_id: (.session_id // ""),
+  tool_name: .tool_name,
+  tool_use_id: (.tool_use_id // ("sb-" + (.session_id // "x") + "-" + (now * 1000 | floor | tostring))),
+  input_tokens: (((.tool_input // "" | tostring | utf8bytelength) / 4) | round),
+  output_tokens: (((.tool_response // "" | tostring | utf8bytelength) / 4) | round),
+  duration_ms: (.duration_ms // 0),
+  result_status: (if (.tool_response.isError? // .tool_response.is_error? // false) == true then "error" else "ok" end)
+}' 2>/dev/null || true)
+[ -z "$PAYLOAD" ] && exit 0
+curl -4 -sf -X POST "${PORTAL_URL}/api/agents/events" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${AGENT_TOKEN}" \
+  -H "X-Agent-Name: ${AGENT_NAME}" \
+  -d "$PAYLOAD" --connect-timeout 2 --max-time 5 >/dev/null 2>&1 &
+exit 0
+PTEOF
+chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
+
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
