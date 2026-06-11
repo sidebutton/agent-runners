@@ -11,9 +11,13 @@ if [ -n "${SB_TOKEN:-}" ]; then
 
   log "secrets: HTTP ${SECRETS_CODE}"
   if [ "$SECRETS_CODE" = "200" ]; then
-    ENV_KEYS=$(jq -r '.env | keys[]' "$SECRETS_RESP" 2>/dev/null || echo "")
+    # The portal secrets endpoint returns { agent_env: {...}, rdp_password }: the
+    # account/assistant env vars live under .agent_env, NOT .env (SCRUM-1196). No
+    # 2>/dev/null on the keys filter, so a future response-shape change is loud
+    # instead of silently writing zero env vars.
+    ENV_KEYS=$(jq -r '.agent_env | keys[]' "$SECRETS_RESP" || echo "")
     for key in $ENV_KEYS; do
-      val=$(jq -r --arg k "$key" '.env[$k]' "$SECRETS_RESP" 2>/dev/null || echo "")
+      val=$(jq -r --arg k "$key" '.agent_env[$k]' "$SECRETS_RESP" 2>/dev/null || echo "")
       # KEY=VALUE with no 'export' so sidebutton.service's systemd
       # EnvironmentFile actually reads these (GH_TOKEN, ANTHROPIC_*, …) — see base/12.
       if grep -q "^${key}=" "$ENV_FILE" 2>/dev/null; then
@@ -31,7 +35,11 @@ if [ -n "${SB_TOKEN:-}" ]; then
 
     chmod 600 "$ENV_FILE"
     chown "${AGENT_USER}:${AGENT_USER}" "$ENV_FILE"
-    log "Secrets written to ${ENV_FILE}"
+    if [ -n "$ENV_KEYS" ]; then
+      log "Secrets written to ${ENV_FILE}"
+    else
+      log "WARN: no agent_env keys in secrets response — ${ENV_FILE} has no account env (only rdp_password applied)"
+    fi
   elif [ "$SECRETS_CODE" = "404" ]; then
     log "INFO: no secrets row for this agent (legacy/unregistered) — skipping"
   else
