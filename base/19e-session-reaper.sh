@@ -9,17 +9,21 @@
 # Claude Code session once it has been idle for ~1h after finishing — long enough
 # for an operator to inspect the result on the live desktop, then reclaimed.
 #
-# Why CPU-idle and not the on-disk transcript mtime: a box runs several sessions
-# at once, and on this runtime Claude Code is NOT launched with a stable,
-# discoverable session id — job-context.json's session_id differs from the
-# transcript filename, and neither appears in the process cmdline/env — so a
-# transcript file cannot be mapped back to its process. Per-PID CPU time is
-# unambiguous: a finished TUI accrues no CPU, whereas any working session (even
-# one streaming a long LLM turn or running a tool) advances utime+stime within a
-# sampling window. The reaper samples CPU each tick and closes a session whose CPU
-# has been flat for SB_SESSION_MAX_IDLE_SEC. The active job is doubly protected —
-# it advances CPU, and if its job-context session id ever does appear in the
-# cmdline that pid is skipped outright.
+# Idle signal is the session's on-disk transcript mtime (SCRUM-1354). Each session
+# is now launched as `claude --session-id <uuid> …`, and its transcript is named
+# ~/.claude/projects/*/<uuid>.jsonl, so a pid maps unambiguously to its transcript
+# via the cmdline. A finished TUI stops writing its transcript; any working session
+# (even one streaming a long LLM turn or running a tool) appends to it within
+# seconds. idle = now − mtime; reap once idle ≥ SB_SESSION_MAX_IDLE_SEC.
+#
+# The earlier CPU-flatness heuristic (SCRUM-1250) never reaped anything: a finished
+# Claude Code TUI holds ~1% CPU forever (Node event loop + MCP keepalives + Ink
+# render loop), so utime+stime advanced on every tick, last_active reset every
+# tick, and accrued idle never reached the threshold. It was only ever validated
+# against stand-in processes (comm=claudezz) that genuinely go CPU-flat. The active
+# job is still doubly protected — a fresh transcript keeps it alive, AND its
+# job-context session id is skipped outright when present (it can be empty mid-run,
+# so the fresh transcript is the primary guard, not this belt-and-suspenders skip).
 #
 # Installed on every variant (all ship Claude Code); needs only claude + jq +
 # systemd, no SB server, so it is NOT gated by SKIP_SIDEBUTTON_SERVER. It acts at
@@ -34,47 +38,39 @@ REAPER_DEST="/opt/sb-session-reaper.sh"
 cat > "$REAPER_DEST" <<'EOF'
 #!/usr/bin/env bash
 # /opt/sb-session-reaper.sh — close Claude Code sessions idle since they finished.
-# Installed by agent-runners base/19e (SCRUM-1250). State lives under
-# ~/.sidebutton and is keyed by pid+starttime, so a reboot (PIDs reset) or PID
-# reuse can never make it target the wrong process.
+# Installed by agent-runners base/19e (SCRUM-1250, rewritten SCRUM-1354).
+#
+# Idle is measured from the session's on-disk transcript mtime, located via the
+# --session-id <uuid> in the process cmdline (~/.claude/projects/*/<uuid>.jsonl).
+# This is stateless: idle = now − mtime each tick, no snapshot to carry across
+# ticks. The previous pid+starttime/CPU state file is gone — a finished TUI never
+# went CPU-flat (it holds ~1% CPU forever) so that signal never reaped anything.
 set -uo pipefail
 
 GRACE="${SB_SESSION_MAX_IDLE_SEC:-3600}"          # close a session idle this long (seconds) ~1h
 TERM_GRACE="${SB_SESSION_TERM_GRACE_SEC:-10}"     # wait between SIGTERM and SIGKILL (seconds)
 STATE_DIR="${HOME:-/home/agent}/.sidebutton"
-STATE_FILE="${STATE_DIR}/session-reaper.state"    # one "pid starttime cpu_jiffies last_active_epoch" line per tracked session
 LOG_FILE="${STATE_DIR}/session-reaper.log"
 JOB_CONTEXT="${STATE_DIR}/job-context.json"
+PROJECTS_DIR="${HOME:-/home/agent}/.claude/projects"
 
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >> "$LOG_FILE" 2>/dev/null || true; }
 
 now="$(date +%s)"
 
-# Active job session id — extra guard. On this runtime it may not appear in the
-# cmdline, but when it does we never touch that session.
+# Active job session id — belt-and-suspenders only. It can be empty mid-run
+# (observed on hamilton), so a fresh transcript is the primary guard, not this.
 JOB_SID=""
 [ -r "$JOB_CONTEXT" ] && JOB_SID="$(jq -r '.session_id // empty' "$JOB_CONTEXT" 2>/dev/null || true)"
 
-# Load the previous snapshot into assoc arrays keyed by "pid:starttime".
-declare -A PREV_CPU PREV_ACTIVE
-if [ -r "$STATE_FILE" ]; then
-  while read -r p st cpu la _rest; do
-    [ -n "${p:-}" ] || continue
-    PREV_CPU["$p:$st"]="$cpu"
-    PREV_ACTIVE["$p:$st"]="$la"
-  done < "$STATE_FILE"
-fi
-
-NEW_STATE="$(mktemp 2>/dev/null || echo "${STATE_FILE}.tmp")"
-: > "$NEW_STATE"
 reap_pids=()
+seen=0; reaped=0; skipped=0
 
 # Only the reaper user's own Claude Code CLI processes (comm == "claude").
 for pid in $(pgrep -u "$(id -u)" -x claude 2>/dev/null || true); do
-  [ -r "/proc/$pid/stat" ] || continue
+  [ -r "/proc/$pid/cmdline" ] || continue
 
-  cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)"
   # Skip non-session invocations (mcp helpers, version/doctor probes). Match the
   # SUBCOMMAND token (argv[1]) ONLY — not the whole cmdline — because a real
   # session carries its task prompt in argv, and a prompt that merely mentions
@@ -86,45 +82,57 @@ for pid in $(pgrep -u "$(id -u)" -x claude 2>/dev/null || true); do
     mcp|--version|-v|doctor) continue ;;
   esac
 
-  line="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
-  [ -n "$line" ] || continue
-  # /proc/<pid>/stat: "pid (comm) state ppid pgrp ... utime stime ... starttime".
-  # comm can contain spaces/parens, so strip up to the final ") " then index the
-  # remaining fields: state=$1 … utime=$12 stime=$13 … starttime=$20.
-  after="${line##*) }"
-  # shellcheck disable=SC2086
-  set -- $after
-  starttime="${20:-0}"
-  cpu=$(( ${12:-0} + ${13:-0} ))            # utime + stime, in clock ticks
-  key="$pid:$starttime"
+  seen=$(( seen + 1 ))
 
-  prev_cpu="${PREV_CPU[$key]:-}"
-  prev_active="${PREV_ACTIVE[$key]:-}"
-  if [ -z "$prev_active" ]; then
-    last_active="$now"                       # first time we see it → start the clock now
-  elif [ -n "$prev_cpu" ] && [ "$cpu" -gt "$prev_cpu" ]; then
-    last_active="$now"                       # CPU advanced since last tick → busy now
-  else
-    last_active="$prev_active"               # flat CPU → still idle, keep the clock
-  fi
+  # Pull --session-id <uuid> (or --session-id=<uuid>) out of argv.
+  sid=""
+  for (( i = 0; i < ${#_argv[@]}; i++ )); do
+    case "${_argv[i]}" in
+      --session-id)   sid="${_argv[i+1]:-}"; break ;;
+      --session-id=*) sid="${_argv[i]#--session-id=}"; break ;;
+    esac
+  done
 
-  # Never reap the active job session, even if it goes quiet.
-  if [ -n "$JOB_SID" ] && printf '%s' "$cmd" | grep -qF -- "$JOB_SID"; then
-    printf '%s %s %s %s\n' "$pid" "$starttime" "$cpu" "$now" >> "$NEW_STATE"
+  # No discoverable session id (operator/manual session): we cannot measure
+  # idleness from a transcript and CPU flatness is invalid, so never reap. Skip.
+  if [ -z "$sid" ]; then
+    skipped=$(( skipped + 1 ))
     continue
   fi
 
-  idle=$(( now - last_active ))
+  # Active job session — extra guard on top of the fresh-transcript check below.
+  if [ -n "$JOB_SID" ] && [ "$sid" = "$JOB_SID" ]; then
+    skipped=$(( skipped + 1 ))
+    continue
+  fi
+
+  # Locate the transcript ~/.claude/projects/*/<uuid>.jsonl. No nullglob: an
+  # unmatched glob stays literal and [ -e ] then fails, leaving transcript empty.
+  transcript=""
+  for f in "$PROJECTS_DIR"/*/"$sid".jsonl; do
+    [ -e "$f" ] || continue
+    transcript="$f"; break
+  done
+  # Session id present but no transcript yet (brand-new session): nothing to
+  # measure, so leave it alone.
+  if [ -z "$transcript" ]; then
+    skipped=$(( skipped + 1 ))
+    continue
+  fi
+
+  mtime="$(stat -c %Y "$transcript" 2>/dev/null || echo 0)"
+  idle=$(( now - mtime ))
   if [ "$idle" -ge "$GRACE" ]; then
-    log "reaping pid=$pid idle=${idle}s cpu=${cpu}j cmd=$(printf '%.80s' "$cmd")"
+    log "reaping pid=$pid sid=$sid idle=${idle}s transcript=$transcript"
     kill -TERM "$pid" 2>/dev/null || true
-    reap_pids+=("$pid")                       # dropped from state — it is on its way out
-  else
-    printf '%s %s %s %s\n' "$pid" "$starttime" "$cpu" "$last_active" >> "$NEW_STATE"
+    reap_pids+=("$pid")
+    reaped=$(( reaped + 1 ))
   fi
 done
 
-mv -f "$NEW_STATE" "$STATE_FILE" 2>/dev/null || true
+# Per-tick summary so a future "never reaps" regression is detectable from the
+# log alone (the SCRUM-1250 bug's only symptom was a permanently absent log).
+log "tick: seen=$seen reaped=$reaped skipped=$skipped grace=${GRACE}s"
 
 # Escalate to SIGKILL for anything that ignored SIGTERM.
 if [ "${#reap_pids[@]}" -gt 0 ]; then
