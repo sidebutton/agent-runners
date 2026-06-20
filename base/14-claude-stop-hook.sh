@@ -104,6 +104,97 @@ set -euo pipefail
 USAGE_LOG="${HOME}/.sidebutton/usage-hook.log"
 JOB_CONTEXT="${HOME}/.sidebutton/job-context.json"
 log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$USAGE_LOG" 2>/dev/null || true; }
+
+# --- Phase D git telemetry capture (SCRUM-513) --------------------------------
+# At the main Stop, resolve every git repo the agent touched under its workspace
+# and emit a `prs` JSON array (one element per repo/PR) onto the step-complete
+# payload. All best-effort: any failure → that repo is omitted; the array is at
+# worst []. The portal stores it in jobs.prs (final grain, comment 18808) and
+# makes NO GitHub calls itself — churn + PR + SHAs all come from the agent's box,
+# using its own gh/git credentials. Repos the box can't reach gracefully degrade
+# to churn + SHAs with empty PR fields (AC #7).
+normalize_repo_url() {
+  # git@host:owner/repo(.git) | https://host/owner/repo(.git) -> https://host/owner/repo
+  local u="$1"
+  [ -z "$u" ] && { echo ""; return 0; }
+  u="${u%.git}"
+  if [[ "$u" == git@*:* ]]; then
+    local host path
+    host="${u#git@}"; host="${host%%:*}"
+    path="${u#*:}"
+    u="https://${host}/${path}"
+  fi
+  echo "$u"
+}
+capture_git_prs() {
+  set +e
+  local entry="$1"
+  [ -z "$entry" ] && { echo '[]'; return 0; }
+  local -a roots=() uniq=()
+  local top sub r u seen
+  # entry_path is the WORKSPACE (~/workspace); the repo is a SUBDIR. Resolve the
+  # real toplevel for the entry itself and each immediate subdir (≥1 repo), then dedupe.
+  if top=$(git -C "$entry" rev-parse --show-toplevel 2>/dev/null); then roots+=("$top"); fi
+  for sub in "$entry"/*/; do
+    [ -d "$sub" ] || continue
+    top=$(git -C "$sub" rev-parse --show-toplevel 2>/dev/null) || continue
+    roots+=("$top")
+  done
+  for r in "${roots[@]}"; do
+    seen=0
+    for u in "${uniq[@]}"; do [ "$u" = "$r" ] && { seen=1; break; }; done
+    [ "$seen" = 0 ] && uniq+=("$r")
+  done
+  [ ${#uniq[@]} -eq 0 ] && { echo '[]'; return 0; }
+  local -a elems=()
+  local repo_url sha_end sha_start ss la ld fc co pr_url pr_number state merged_at ghj elem
+  for r in "${uniq[@]}"; do
+    repo_url=$(normalize_repo_url "$(git -C "$r" remote get-url origin 2>/dev/null)")
+    sha_end=$(git -C "$r" rev-parse HEAD 2>/dev/null)
+    sha_start=$(git -C "$r" merge-base origin/HEAD HEAD 2>/dev/null)
+    [ -z "$sha_start" ] && sha_start=$(git -C "$r" rev-parse HEAD~1 2>/dev/null)
+    # churn from the diff range (fallback / non-GitHub hosts)
+    la=""; ld=""; fc=""; co=""
+    if [ -n "$sha_start" ]; then
+      ss=$(git -C "$r" diff --shortstat "${sha_start}...HEAD" 2>/dev/null)
+      fc=$(echo "$ss" | grep -oE '[0-9]+ file'      | grep -oE '[0-9]+' | head -1)
+      la=$(echo "$ss" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' | head -1)
+      ld=$(echo "$ss" | grep -oE '[0-9]+ deletion'  | grep -oE '[0-9]+' | head -1)
+      co=$(git -C "$r" rev-list --count "${sha_start}...HEAD" 2>/dev/null)
+    fi
+    # PR state + authoritative churn from gh (the agent's own token). Empty on no
+    # PR / non-GitHub / unreachable — then we keep the git-derived churn above.
+    pr_url=""; pr_number=""; state=""; merged_at=""
+    ghj=$( (cd "$r" 2>/dev/null && gh pr view --json url,number,state,mergedAt,additions,deletions,changedFiles,commits 2>/dev/null) )
+    if [ -n "$ghj" ]; then
+      pr_url=$(echo "$ghj"     | jq -r '.url // ""')
+      pr_number=$(echo "$ghj"  | jq -r '.number // empty')
+      state=$(echo "$ghj"      | jq -r '.state // ""')
+      merged_at=$(echo "$ghj"  | jq -r '.mergedAt // ""')
+      la=$(echo "$ghj"         | jq -r '.additions // empty')
+      ld=$(echo "$ghj"         | jq -r '.deletions // empty')
+      fc=$(echo "$ghj"         | jq -r '.changedFiles // empty')
+      co=$(echo "$ghj"         | jq -r '(.commits | length) // empty')
+    fi
+    # Skip a repo we couldn't identify at all (no repo_url AND no pr_url).
+    [ -z "$repo_url" ] && [ -z "$pr_url" ] && continue
+    elem=$(jq -n \
+      --arg repo_url "$repo_url" --arg pr_url "$pr_url" \
+      --argjson pr_number "${pr_number:-null}" \
+      --arg sha_start "${sha_start:-}" --arg sha_end "${sha_end:-}" \
+      --argjson la "${la:-null}" --argjson ld "${ld:-null}" \
+      --argjson fc "${fc:-null}" --argjson co "${co:-null}" \
+      --arg state "$state" --arg merged_at "$merged_at" \
+      '{repo_url:$repo_url, pr_url:$pr_url, pr_number:$pr_number,
+        sha_start:$sha_start, sha_end:$sha_end,
+        lines_added:$la, lines_deleted:$ld, files_changed:$fc, commits:$co,
+        state:$state, pr_merged_at:(if $merged_at=="" then null else $merged_at end)}' 2>/dev/null)
+    [ -n "$elem" ] && elems+=("$elem")
+  done
+  [ ${#elems[@]} -eq 0 ] && { echo '[]'; return 0; }
+  printf '%s\n' "${elems[@]}" | jq -s '.' 2>/dev/null || echo '[]'
+}
+
 HOOK_INPUT=$(cat)
 [ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
 AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
@@ -185,9 +276,18 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
       | ($m.message.content // [] | map(select(.type=="text") | .text) | join("\n"))
     ' "$TRANSCRIPT_PATH" 2>/dev/null || echo "")
   fi
+  # Phase D (SCRUM-513): resolve the repo(s) under the workspace and attach a `prs`
+  # JSON array. entry_path (the workspace) comes from job-context; default ~/workspace.
+  # Best-effort — capture_git_prs returns [] on any failure, and [] is dropped below.
+  ENTRY_PATH=$(jq -r '.entry_path // empty' "$JOB_CONTEXT" 2>/dev/null || true)
+  [ -z "$ENTRY_PATH" ] && ENTRY_PATH="${HOME}/workspace"
+  PRS_JSON=$(capture_git_prs "$ENTRY_PATH" 2>/dev/null || echo '[]')
+  case "$PRS_JSON" in ''|'[]') PRS_JSON='[]' ;; esac
+  log "git telemetry: $(echo "$PRS_JSON" | jq -c 'length') PR(s) from $ENTRY_PATH"
   STEP_COMPLETE_PAYLOAD=$(jq -n --argjson job_id "${JOB_ID:-null}" --argjson step "${STEP_INDEX:-null}" \
-    --arg msg "$OUTPUT_MSG" --arg sid "$SESSION_ID" \
-    '{job_id:$job_id, step_index:$step, session_id:$sid, status:"success", output_message:$msg}')
+    --arg msg "$OUTPUT_MSG" --arg sid "$SESSION_ID" --argjson prs "$PRS_JSON" \
+    '{job_id:$job_id, step_index:$step, session_id:$sid, status:"success", output_message:$msg}
+      + (if ($prs|length) > 0 then {prs:$prs} else {} end)')
   curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/step-complete" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${AGENT_TOKEN}" \
