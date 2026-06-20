@@ -318,6 +318,50 @@ if [ "$HOOK_EVENT" != "SubagentStop" ] && [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TR
   fi
   rm -f "$TS_GZ"
 fi
+
+# Upload gate artifacts (SCRUM-1370). The agent saves deliverables it produces at a playbook gate —
+# mockups, QA screenshots, RCA/coverage reports — under <workspace>/artifacts/ (the documented
+# contract in the deploy CLAUDE.md); on the final Stop, glob that dir and POST each file to
+# /api/jobs/artifacts so the evidence reaches the operator's Files hub + the Run page instead of dying
+# on the VM. Gated to the main Stop like the transcript upload (SubagentStop would re-send mid-run).
+# The endpoint keys on the session_id query param (v3), falling back to (job_id, step_index), and is
+# idempotent per (job, step, filename), so a re-fired Stop overwrites rather than duplicates. Fully
+# guarded + IPv4 (cf. #11): any failure here stays invisible to Claude Code. (HOOK_EVENT from above.)
+if [ "$HOOK_EVENT" != "SubagentStop" ]; then
+  HOOK_CWD=$(echo "$HOOK_INPUT" | jq -r '.cwd // empty' 2>/dev/null || true)
+  ART_DIR=""
+  for d in "${HOOK_CWD:+${HOOK_CWD}/artifacts}" "${HOME}/workspace/artifacts" "${HOME}/artifacts"; do
+    if [ -n "$d" ] && [ -d "$d" ]; then ART_DIR="$d"; break; fi
+  done
+  if [ -n "$ART_DIR" ]; then
+    ART_N=0
+    ART_MAX=50                      # per-step cap so a runaway dir can't flood the portal
+    ART_MAX_BYTES=26214400          # 25 MB — matches the endpoint cap; skip oversized locally
+    while IFS= read -r -d '' f; do
+      if [ "$ART_N" -ge "$ART_MAX" ]; then log "artifact cap ${ART_MAX} reached — skipping the rest"; break; fi
+      FSIZE=$(wc -c < "$f" 2>/dev/null | tr -d ' ' || echo 0)
+      if [ "${FSIZE:-0}" -eq 0 ] || [ "${FSIZE:-0}" -gt "$ART_MAX_BYTES" ]; then continue; fi
+      FN=$(basename "$f")
+      # Infer the gallery kind from the extension (server re-validates against screenshot|mock|report).
+      case "$(echo "$FN" | tr '[:upper:]' '[:lower:]')" in
+        *.png|*.jpg|*.jpeg|*.gif|*.webp) ART_KIND=screenshot ;;
+        *.svg|*.html|*.htm|*.fig)        ART_KIND=mock ;;
+        *)                               ART_KIND=report ;;
+      esac
+      FN_ENC=$(jq -rn --arg s "$FN" '$s|@uri' 2>/dev/null || echo "$FN")
+      AR_CODE=$(curl -4 -s -o /dev/null -w '%{http_code}' \
+        -X POST "${PORTAL_URL}/api/jobs/artifacts?job_id=${JOB_ID}&step_index=${STEP_INDEX}&session_id=${SESSION_ID}&kind=${ART_KIND}&filename=${FN_ENC}" \
+        -H "Content-Type: application/octet-stream" \
+        -H "Authorization: Bearer ${AGENT_TOKEN}" \
+        -H "X-Agent-Name: ${AGENT_NAME}" \
+        --data-binary "@${f}" \
+        --connect-timeout 10 --max-time 120) || AR_CODE=0
+      ART_N=$((ART_N + 1))
+      log "artifact POST ${FN} (${FSIZE}B kind=${ART_KIND}): ${AR_CODE}"
+    done < <(find "$ART_DIR" -maxdepth 3 -type f ! -name '.*' -print0 2>/dev/null)
+    log "artifacts: posted ${ART_N} file(s) from ${ART_DIR}"
+  fi
+fi
 exit 0
 HOOKEOF
 chmod +x "$AGENT_HOME/.local/bin/claude-stop-hook.sh"
