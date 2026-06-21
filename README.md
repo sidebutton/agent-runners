@@ -100,10 +100,12 @@ agent-runners/
 ├── docs/COMPONENTS.md            # component model + implementation plan
 ├── base/
 │   ├── lib.sh                    # log/die/step + run_variant_hook
+│   ├── lib-refresh.sh            # shared change-gated base-artifact refresh (sb-self-update + agent-redeploy.sh)
+│   ├── refresh-manifest.txt      # base steps safe to re-run on a live agent (drives the refresh)
 │   ├── components.sh             # resolve AGENT_COMPONENTS → has_component + gates
 │   ├── 01-preflight.sh … 20-mark-installed.sh   # shared steps (sourced in order)
 │   ├── 06-chrome.sh              # gated on INSTALL_CHROME
-│   ├── 08-sidebutton.sh          # gated on SKIP_SIDEBUTTON_SERVER
+│   ├── 08-sidebutton.sh          # SB server (gated) + installs the sb-self-update wrapper (all agents)
 │   ├── 16-services-prep.sh       # chrome/sidebutton units written conditionally
 │   ├── 18b-heartbeat-timer.sh    # recurring online beat when serverless
 │   ├── 19e-session-reaper.sh     # close Claude Code sessions idle >1h after finish
@@ -113,7 +115,8 @@ agent-runners/
 │   │   ├── postgres-client/install.sh
 │   │   ├── openvpn/{install.sh,sb-vpn-connect}
 │   │   └── sidebutton-extension/{pre,post}-services.sh
-│   ├── assets/                   # wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh
+│   ├── assets/                   # wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh, sb-self-update.sh
+│   ├── tests/                    # pure bash+jq regression guards (run directly)
 │   └── run.sh                    # orchestrator
 └── variants/
     └── ubuntu-claude-code/       # the single base variant (manifest + README; no hooks)
@@ -169,11 +172,43 @@ Old agents are deleted and re-provisioned, so the portal always sends an explici
 unset ⇒ a manual base agent. The old `AGENT_RUNNER`→component-set mapping and profile `aliases` have
 been removed.
 
+## Self-update (the fleet path)
+
+Existing agents keep themselves current via **`sb-self-update`** — a tiny
+root-owned wrapper installed by `base/08` and run fleet-wide by the
+`agent_pull_repos` ops job through a narrow NOPASSWD sudoers rule scoped to *only*
+that wrapper (the agent's single privileged action). It does two idempotent,
+**change-gated** things:
+
+1. Upgrade the global `sidebutton` CLI/server npm package, restarting the service
+   **only** when the version changed (self-gated on `command -v sidebutton`, so a
+   no-op on serverless variants).
+2. **Refresh base artifacts** — re-download `agent-runners@<ref>` and re-run the
+   refresh-safe base steps (`base/refresh-manifest.txt`) + re-merge the Claude
+   hooks block over `~/.claude/settings.json`, so step-script / hook changes reach
+   the fleet without an operator SSH. A fingerprint over the deployed artifacts is
+   compared against `/etc/sidebutton/updated`; a routine tick with nothing new
+   upstream is a true no-op (no rewrite, no restart). The shared apply logic lives
+   in `base/lib-refresh.sh`, which the operator break-glass `agent-redeploy.sh`
+   (in the-assistant) also sources from the downloaded tree, so the two paths
+   can't drift.
+
+The manifest is the source of truth for which steps are safe to re-run on a live
+box — token-rotating / re-registering / OS-install steps are deliberately
+excluded. Add new refresh-safe steps there so they reach existing agents.
+
+**Drift visibility:** the heartbeat (`base/18`, and the serverless `18b` timer)
+reports the *effective* `runners_ref` + a `base_artifacts_sha` from the markers
+(`/etc/sidebutton/updated`, else the provision-time `/etc/sidebutton/installed`),
+so the portal can show what each agent is actually running.
+
 ## Idempotency
 
-`/etc/sidebutton/installed` is written by `20-mark-installed.sh` on success. The
-bootstrapper short-circuits with a service-health summary when present; remove
-the marker to force a reinstall.
+`/etc/sidebutton/installed` is written by `20-mark-installed.sh` on success (now
+including a `base_artifacts_sha` fingerprint + `runners_repo`). The bootstrapper
+short-circuits with a service-health summary when present; remove the marker to
+force a reinstall. `/etc/sidebutton/updated` records the effective ref +
+fingerprint after each `sb-self-update` base-artifact refresh.
 
 ## License
 

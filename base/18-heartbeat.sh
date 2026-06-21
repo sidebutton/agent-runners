@@ -27,6 +27,23 @@ else
   HAS_EXTENSION="false"
 fi
 
+# Report the EFFECTIVE base-artifacts ref + fingerprint, not the provision-time
+# RUNNERS_REF, so the portal shows what the agent is actually running and can flag
+# "N agents on stale base scripts" (SCRUM-1380). After a fleet refresh
+# sb-self-update records the effective ref/sha in /etc/sidebutton/updated; prefer
+# it, else fall back to the live provision-time values. (This step runs before
+# base/20 writes the install marker, so the sha is computed from BASE_DIR here.)
+# shellcheck source=./lib-refresh.sh
+. "$BASE_DIR/lib-refresh.sh"
+# Always succeeds (returns "" when the marker/field is absent) so a command-sub
+# assignment can't trip `set -e` at provision, when /etc/sidebutton/updated does
+# not yet exist.
+hb_marker_field() { { [ -r "$2" ] && sed -n "s/^$1=//p" "$2" | tail -1; } || true; }
+EFFECTIVE_REF="$(hb_marker_field runners_ref /etc/sidebutton/updated)"
+[ -n "$EFFECTIVE_REF" ] || EFFECTIVE_REF="${RUNNERS_REF:-unknown}"
+BASE_ARTIFACTS_SHA="$(hb_marker_field base_artifacts_sha /etc/sidebutton/updated)"
+[ -n "$BASE_ARTIFACTS_SHA" ] || BASE_ARTIFACTS_SHA="$(sb_base_artifacts_fingerprint "$BASE_DIR" 2>/dev/null || echo unknown)"
+
 HEARTBEAT_BODY=$(jq -n \
   --arg node "$(node --version 2>/dev/null || echo unknown)" \
   --arg chrome "$(google-chrome-stable --version 2>/dev/null | awk '{print $3}')" \
@@ -34,9 +51,10 @@ HEARTBEAT_BODY=$(jq -n \
   --arg claude "$(claude --version 2>/dev/null || echo unknown)" \
   --arg installer "${BOOTSTRAP_VERSION:-unknown}" \
   --arg runner "$AGENT_RUNNER_VAL" \
-  --arg runners_ref "${RUNNERS_REF:-unknown}" \
+  --arg runners_ref "$EFFECTIVE_REF" \
+  --arg base_artifacts_sha "$BASE_ARTIFACTS_SHA" \
   --argjson has_extension "$HAS_EXTENSION" \
-  '{runner:$runner, has_extension:$has_extension, dependency_versions: {node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude, installer:$installer, agent_runner:$runner, runners_ref:$runners_ref}}')
+  '{runner:$runner, has_extension:$has_extension, dependency_versions: {node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude, installer:$installer, agent_runner:$runner, runners_ref:$runners_ref, base_artifacts_sha:$base_artifacts_sha}}')
 
 HEARTBEAT_RESP="$(mktemp)"
 # Force IPv4 (-4): on dual-stack VMs (e.g. Hetzner) outbound may prefer IPv6, but

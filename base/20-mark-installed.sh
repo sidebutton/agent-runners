@@ -1,5 +1,14 @@
 # 20-mark-installed.sh — write the idempotency marker and final summary.
 
+# Record the base-artifacts fingerprint (+ the source repo) at provision so the
+# portal can detect base-script drift even before the first sb-self-update refresh
+# writes /etc/sidebutton/updated — i.e. agents provisioned long ago that the repo
+# has since moved past (SCRUM-1380). sb_base_artifacts_fingerprint is the same
+# hash sb-self-update gates on, so provision and refresh report comparably.
+# shellcheck source=./lib-refresh.sh
+. "$BASE_DIR/lib-refresh.sh"
+BASE_ARTIFACTS_SHA="$(sb_base_artifacts_fingerprint "$BASE_DIR" 2>/dev/null || echo unknown)"
+
 mkdir -p "$(dirname "$INSTALL_MARKER")"
 {
   echo "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -7,6 +16,8 @@ mkdir -p "$(dirname "$INSTALL_MARKER")"
   echo "agent_role=${AGENT_ROLE}"
   echo "agent_runner=${AGENT_RUNNER:-unknown}"
   echo "runners_ref=${RUNNERS_REF:-unknown}"
+  echo "runners_repo=${RUNNERS_REPO:-sidebutton/agent-runners}"
+  echo "base_artifacts_sha=${BASE_ARTIFACTS_SHA:-unknown}"
   echo "bootstrap_version=${BOOTSTRAP_VERSION:-unknown}"
 } > "$INSTALL_MARKER"
 
