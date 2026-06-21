@@ -20,7 +20,7 @@ EOF
 chmod +x "$AGENT_HOME/.xsession"
 
 # Hooks live in base/assets/claude-hooks.json — single source of truth shared
-# with the-assistant's update-agent.sh, which re-merges the block onto existing
+# with the-assistant's agent-redeploy.sh, which re-merges the block onto existing
 # boxes (this step only runs at provision time). The referenced helper scripts
 # (sb-mark-tool-use.sh, sb-session-id.sh, claude-stop-hook.sh) are installed by
 # base/14 before any Claude job runs.
