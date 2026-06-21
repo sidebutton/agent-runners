@@ -142,8 +142,10 @@ case "$EVENT" in
   Notification)
     case "$(echo "$IN" | jq -r '.notification_type // empty' 2>/dev/null || true)" in
       permission_prompt) ACTION=open; KIND=permission; TUID="notif-permission" ;;
-      idle_prompt)       ACTION=open; KIND=idle;       TUID="notif-idle" ;;
-      *) exit 0 ;;   # auth_success / elicitation_* — not a needs-you state
+      # idle_prompt ("Claude is waiting for your input") is a self-resolving machine state — the
+      # portal surfaces idle via the IDLE counter, not the Needs-you band. Capturing it here
+      # spammed Needs-you from idle/post-job/between-job sessions, so it falls through to exit 0.
+      *) exit 0 ;;   # idle_prompt / auth_success / elicitation_* — not a needs-you state
     esac
     ;;
   Stop)
