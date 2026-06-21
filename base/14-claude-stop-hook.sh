@@ -193,6 +193,102 @@ exit 0
 PREOF
 chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
 
+# --- Needs-input answer return (SCRUM-1375) -----------------------------------
+# Referenced from base/assets/claude-hooks.json as the SECOND PreToolUse command on
+# AskUserQuestion|ExitPlanMode (it runs right after sb-post-request.sh opens the row).
+# This is the RETURN half of the loop: it long-polls GET /api/agents/requests/:key for the
+# operator's answer (recorded via POST /api/agents/requests/:id/resolve, SCRUM-1374), then maps
+# that answer string onto a Claude Code PreToolUse permission decision so the portal pick unblocks
+# the run WITHOUT the operator opening the Live desktop.
+#
+#   plan (ExitPlanMode):  "Keep planning"/reject -> deny (keep planning);  anything else (Approved) -> allow
+#   question (AskUserQuestion):  the v2.1.175 hook contract has NO field that injects a tool
+#     answer (SCRUM-1375 spike), so the chosen option is delivered through deny + permissionDecisionReason
+#     — i.e. the model is STEERED with "Operator selected: '<answer>'" rather than the tool being
+#     natively answered. Honoring it is therefore model-dependent (verify in QA).
+#
+# Strictly gated to THIS job's session (JOB_SID == SID): a manual/operator Claude on the box,
+# or any non-job session, exits 0 immediately so its prompts render normally and are never
+# blocked. On any miss — no answer within the budget, network error, missing token, the row
+# resolved on the desktop instead — it exits 0 with NO output, so the tool proceeds exactly as
+# today (AC: free-form / idle / timeout still route to the Live desktop). It NEVER denies on
+# uncertainty; a deny is emitted only when a real operator answer says so.
+cat > "$AGENT_HOME/.local/bin/sb-await-decision.sh" <<'AWAITEOF'
+#!/usr/bin/env bash
+# stdin: Claude Code PreToolUse hook JSON (AskUserQuestion | ExitPlanMode).
+IN=$(cat 2>/dev/null || true)
+[ -z "$IN" ] && exit 0
+EVENT=$(echo "$IN" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
+[ "$EVENT" = "PreToolUse" ] || exit 0
+TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
+case "$TOOL" in
+  AskUserQuestion) KIND=question ;;
+  ExitPlanMode)    KIND=plan ;;
+  *) exit 0 ;;
+esac
+SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -z "$SID" ] && exit 0
+
+# Block ONLY this job's session. No active job, or a different (lingering/operator) session:
+# don't long-poll — let the prompt render normally. (Stricter than the capture forwarder, which
+# posts even with no job session; a blocking hook must never freeze an interactive operator box.)
+JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
+[ -z "$JOB_SID" ] && exit 0
+[ "$SID" != "$JOB_SID" ] && exit 0
+
+TUID=$(echo "$IN" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
+[ -z "$TUID" ] && TUID="$TOOL"          # same stable fallback the capture forwarder uses
+KEY="${SID}:${TUID}"
+
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
+AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
+
+KEY_ENC=$(jq -rn --arg s "$KEY" '$s|@uri' 2>/dev/null || echo "$KEY")
+WAIT_PER=25                                       # server long-poll seconds (<= endpoint cap 30)
+TOTAL="${SB_REQUEST_WAIT_TOTAL:-100}"             # total seconds to wait before the desktop fallback
+START=$SECONDS
+
+emit() {  # $1=allow|deny  $2=reason
+  jq -nc --arg d "$1" --arg r "$2" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:$d, permissionDecisionReason:$r}}' \
+    2>/dev/null || true
+  exit 0
+}
+
+while [ $((SECONDS - START)) -lt "$TOTAL" ]; do
+  RESP=$(curl -4 -sf "${PORTAL_URL}/api/agents/requests/${KEY_ENC}?wait=${WAIT_PER}" \
+    -H "Authorization: Bearer ${AGENT_TOKEN}" -H "X-Agent-Name: ${AGENT_NAME}" \
+    --connect-timeout 5 --max-time $((WAIT_PER + 10)) 2>/dev/null || true)
+  [ -z "$RESP" ] && { sleep 1; continue; }        # network blip — retry within the budget
+
+  ANSWER=$(echo "$RESP" | jq -r '.answer // empty' 2>/dev/null || true)
+  STATUS=$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null || true)
+
+  if [ -n "$ANSWER" ]; then
+    if [ "$KIND" = "plan" ]; then
+      # ExitPlanMode: "Keep planning"/reject -> deny (keep planning); anything else (Approved) -> allow.
+      case "$(printf '%s' "$ANSWER" | tr '[:upper:]' '[:lower:]')" in
+        *"keep planning"*|*reject*|*denied*|*deny*) emit deny  "Operator asked to keep planning (${ANSWER}). Do not exit plan mode yet." ;;
+        *)                                          emit allow "Plan approved by the operator (${ANSWER})." ;;
+      esac
+    else
+      # question — no native answer field on this Claude Code version (SCRUM-1375 spike), so the
+      # operator's pick is delivered as a STEER via deny + reason.
+      emit deny "Operator selected: '${ANSWER}'. Proceed with that choice and do not ask again."
+    fi
+  fi
+
+  # Resolved with no answer = closed on the desktop / by Stop. Stop polling; let it proceed.
+  [ "$STATUS" = "resolved" ] && exit 0
+  # open / pending — the server already blocked ~${WAIT_PER}s; loop until the budget runs out.
+done
+exit 0                                             # timeout → no output → tool proceeds (desktop fallback)
+AWAITEOF
+chmod +x "$AGENT_HOME/.local/bin/sb-await-decision.sh"
+
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
