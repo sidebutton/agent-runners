@@ -25,12 +25,23 @@ TOK="${SIDEBUTTON_AGENT_TOKEN:-${AGENT_TOKEN:-}}"
 NAME="${SIDEBUTTON_AGENT_NAME:-${AGENT_NAME:-}}"
 URL="${PORTAL_URL:-https://sidebutton.com}"
 [ -n "$TOK" ] && [ -n "$NAME" ] || exit 0
+# Effective base-artifacts ref + fingerprint so serverless agents also report
+# base-script drift (SCRUM-1380): prefer the post-refresh marker, else the
+# provision marker. Both markers are root-written world-readable (0644).
+REF="$(sed -n 's/^runners_ref=//p' /etc/sidebutton/updated 2>/dev/null | tail -1)"
+[ -n "$REF" ] || REF="$(sed -n 's/^runners_ref=//p' /etc/sidebutton/installed 2>/dev/null | tail -1)"
+[ -n "$REF" ] || REF="unknown"
+BSHA="$(sed -n 's/^base_artifacts_sha=//p' /etc/sidebutton/updated 2>/dev/null | tail -1)"
+[ -n "$BSHA" ] || BSHA="$(sed -n 's/^base_artifacts_sha=//p' /etc/sidebutton/installed 2>/dev/null | tail -1)"
+[ -n "$BSHA" ] || BSHA="unknown"
 BODY=$(jq -n \
   --arg node "$(node --version 2>/dev/null || echo unknown)" \
   --arg chrome "$(google-chrome-stable --version 2>/dev/null | awk '{print $3}')" \
   --arg sb "not-installed" \
   --arg claude "$(claude --version 2>/dev/null || echo unknown)" \
-  '{dependency_versions:{node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude}}' 2>/dev/null || echo '{}')
+  --arg runners_ref "$REF" \
+  --arg base_artifacts_sha "$BSHA" \
+  '{dependency_versions:{node:$node, chrome:$chrome, sidebutton:$sb, claude_code:$claude, runners_ref:$runners_ref, base_artifacts_sha:$base_artifacts_sha}}' 2>/dev/null || echo '{}')
 curl -4 -sf -X POST "${URL}/api/agents/heartbeat" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${TOK}" \

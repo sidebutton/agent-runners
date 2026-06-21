@@ -1,0 +1,35 @@
+# base/refresh-manifest.txt — base steps that are safe to RE-RUN on a live agent
+# to refresh its deployed artifacts (SCRUM-1380).
+#
+# Consumed by base/lib-refresh.sh (sb_refresh_base_artifacts), which is sourced by
+# both the fleet self-service path (base/assets/sb-self-update.sh) and the operator
+# break-glass path (the-assistant agent-redeploy.sh). It REPLACES the previously
+# hard-coded "14 19c 19d 19e" list, which silently dropped any base step added
+# later (e.g. 18c-git-telemetry-timer.sh — added in SCRUM-513 but never refreshed
+# onto existing agents). New refresh-safe steps must be added here so they reach
+# the fleet automatically.
+#
+# Format: one step filename per line (relative to base/). Blank lines and
+# `#` comments (whole-line or trailing) are ignored. Order is preserved and is
+# also the order the fingerprint hashes them in, so keep it stable.
+#
+# Each listed step MUST be idempotent and re-runnable as root with the env
+# contract base/run.sh provides (lib.sh helpers, AGENT_USER/AGENT_HOME, BASE_DIR,
+# the SKIP_*/INSTALL_* gates, and a sourced ~/.agent-env). They write artifacts
+# (~/.local/bin scripts, /opt helpers, systemd timers) and self-gate their own
+# component flags, so re-running them only rewrites what changed.
+#
+# DELIBERATELY EXCLUDED — these are NOT safe to re-run on a running box and must
+# stay provision/break-glass only:
+#   19-secrets.sh      rotates the bootstrap token (swaps AGENT_TOKEN in .agent-env)
+#   18-heartbeat.sh    re-registers the agent + swaps in a fresh sb_token
+#   18b-heartbeat-timer / 20-mark-installed  install-lifecycle, not artifacts
+#   01..13, 15..17     OS/toolchain/desktop install + one-time user/workspace setup
+# The Claude hooks block (assets/claude-hooks.json) is re-merged separately by
+# sb_refresh_base_artifacts — it is an asset, not a step, so it is not listed here.
+
+14-claude-stop-hook.sh
+18c-git-telemetry-timer.sh
+19c-health-report.sh
+19d-account-registry.sh
+19e-session-reaper.sh
