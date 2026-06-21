@@ -62,17 +62,31 @@ fi
 run_variant_hook "pre-services"
 
 . "$BASE_DIR/17-services-start.sh"   # chrome enable/start gated on INSTALL_CHROME
-
-# ── post-services phase ─────────────────────────────────────────────────────
-if [ "${INSTALL_EXTENSION:-0}" = "1" ] && [ -f "$BASE_DIR/components/sidebutton-extension/post-services.sh" ]; then
-  . "$BASE_DIR/components/sidebutton-extension/post-services.sh"
-fi
+# NOTE: 17 only ENABLES sidebutton.service; its single start is deferred to 19b
+# (so it boots once with a complete ~/.agent-env). The extension handshake-wait
+# therefore cannot run here — it lives in the post-services phase below, after 19b.
 run_variant_hook "post-services"
 
 . "$BASE_DIR/18-heartbeat.sh"
 . "$BASE_DIR/18b-heartbeat-timer.sh"  # recurring online beat when serverless
 . "$BASE_DIR/19-secrets.sh"
 . "$BASE_DIR/19b-plugins.sh"         # installs SIDEBUTTON_PLUGINS; starts SB server
+
+# ── post-services phase (extension handshake) ───────────────────────────────
+# Chrome force-installs the extension back at step 17, but browser_connected can
+# only flip true once the server on :9876 is listening — which 19b just started.
+# Running this wait BEFORE 19b (its previous position) could never succeed: it
+# always exhausted its retry budget, logged a false "browser_connected did not
+# become true" WARN, and wasted ~4min bouncing Chrome, recovering only
+# incidentally ~5s after 19b. Waiting HERE — after the server start and before
+# 19c starts the health reporter — means the first health POST already carries
+# browser_connected=true (no transient portal 'error'), and the restart-retry
+# inside post-services.sh becomes meaningful (it can now reach a live server).
+if [ "${INSTALL_EXTENSION:-0}" = "1" ] && [ -f "$BASE_DIR/components/sidebutton-extension/post-services.sh" ]; then
+  . "$BASE_DIR/components/sidebutton-extension/post-services.sh"
+fi
+
+. "$BASE_DIR/18c-git-telemetry-timer.sh"  # git-telemetry reconcile timer (SCRUM-513) — never sourced before
 . "$BASE_DIR/19c-health-report.sh"   # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/19d-account-registry.sh"
 . "$BASE_DIR/19e-session-reaper.sh"  # close Claude Code sessions idle >1h after finish (SCRUM-1250)
