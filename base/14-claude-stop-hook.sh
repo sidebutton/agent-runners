@@ -196,23 +196,23 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
 # --- Needs-input answer return (SCRUM-1375) -----------------------------------
 # Referenced from base/assets/claude-hooks.json as the SECOND PreToolUse command on
 # AskUserQuestion|ExitPlanMode (it runs right after sb-post-request.sh opens the row).
-# This is the RETURN half of the loop: it long-polls GET /api/agents/requests/:key for
-# the operator's decision (recorded via POST …/:key/resolve), then maps it onto a Claude
-# Code PreToolUse permission decision so the portal pick unblocks the run WITHOUT the
-# operator opening the Live desktop.
+# This is the RETURN half of the loop: it long-polls GET /api/agents/requests/:key for the
+# operator's answer (recorded via POST /api/agents/requests/:id/resolve, SCRUM-1374), then maps
+# that answer string onto a Claude Code PreToolUse permission decision so the portal pick unblocks
+# the run WITHOUT the operator opening the Live desktop.
 #
-#   plan (ExitPlanMode):  allow_*/option -> allow (approve plan-exit);  deny -> deny (keep planning)
+#   plan (ExitPlanMode):  "Keep planning"/reject -> deny (keep planning);  anything else (Approved) -> allow
 #   question (AskUserQuestion):  the v2.1.175 hook contract has NO field that injects a tool
-#     answer (SCRUM-1375 spike), so the pick is delivered through deny + permissionDecisionReason
-#     — i.e. the model is STEERED with "Operator selected: '<label>'" rather than the tool being
+#     answer (SCRUM-1375 spike), so the chosen option is delivered through deny + permissionDecisionReason
+#     — i.e. the model is STEERED with "Operator selected: '<answer>'" rather than the tool being
 #     natively answered. Honoring it is therefore model-dependent (verify in QA).
 #
 # Strictly gated to THIS job's session (JOB_SID == SID): a manual/operator Claude on the box,
 # or any non-job session, exits 0 immediately so its prompts render normally and are never
-# blocked. On any miss — no decision within the budget, network error, missing token, the row
+# blocked. On any miss — no answer within the budget, network error, missing token, the row
 # resolved on the desktop instead — it exits 0 with NO output, so the tool proceeds exactly as
 # today (AC: free-form / idle / timeout still route to the Live desktop). It NEVER denies on
-# uncertainty; a deny is emitted only when a real operator decision says so.
+# uncertainty; a deny is emitted only when a real operator answer says so.
 cat > "$AGENT_HOME/.local/bin/sb-await-decision.sh" <<'AWAITEOF'
 #!/usr/bin/env bash
 # stdin: Claude Code PreToolUse hook JSON (AskUserQuestion | ExitPlanMode).
@@ -264,30 +264,24 @@ while [ $((SECONDS - START)) -lt "$TOTAL" ]; do
     --connect-timeout 5 --max-time $((WAIT_PER + 10)) 2>/dev/null || true)
   [ -z "$RESP" ] && { sleep 1; continue; }        # network blip — retry within the budget
 
-  DTYPE=$(echo "$RESP" | jq -r '.decision.type // empty' 2>/dev/null || true)
+  ANSWER=$(echo "$RESP" | jq -r '.answer // empty' 2>/dev/null || true)
   STATUS=$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null || true)
 
-  if [ -n "$DTYPE" ]; then
-    LABEL=$(echo "$RESP" | jq -r '.decision.label // empty' 2>/dev/null || true)
-    TEXT=$(echo "$RESP"  | jq -r '.decision.text  // empty' 2>/dev/null || true)
-    OPT=$(echo "$RESP"   | jq -r '.decision.optionIndex // empty' 2>/dev/null || true)
-    [ -z "$LABEL" ] && [ -n "$OPT" ] && LABEL="option #${OPT}"
+  if [ -n "$ANSWER" ]; then
     if [ "$KIND" = "plan" ]; then
-      case "$DTYPE" in
-        deny) emit deny  "${TEXT:-Operator asked to keep planning.}" ;;
-        *)    emit allow "${TEXT:-Plan approved by the operator.}" ;;
+      # ExitPlanMode: "Keep planning"/reject -> deny (keep planning); anything else (Approved) -> allow.
+      case "$(printf '%s' "$ANSWER" | tr '[:upper:]' '[:lower:]')" in
+        *"keep planning"*|*reject*|*denied*|*deny*) emit deny  "Operator asked to keep planning (${ANSWER}). Do not exit plan mode yet." ;;
+        *)                                          emit allow "Plan approved by the operator (${ANSWER})." ;;
       esac
     else
-      # question — steer via deny + reason (no native answer field on this Claude Code version).
-      case "$DTYPE" in
-        option) emit deny "Operator selected: '${LABEL}'.${TEXT:+ ${TEXT}} Proceed with that choice and do not ask again." ;;
-        deny)   emit deny "${TEXT:-Operator declined — reconsider and proceed without asking again.}" ;;
-        *)      emit deny "${TEXT:-Operator approved — proceed with your recommended option without asking again.}" ;;
-      esac
+      # question — no native answer field on this Claude Code version (SCRUM-1375 spike), so the
+      # operator's pick is delivered as a STEER via deny + reason.
+      emit deny "Operator selected: '${ANSWER}'. Proceed with that choice and do not ask again."
     fi
   fi
 
-  # Resolved with no decision = closed on the desktop / by Stop. Stop polling; let it proceed.
+  # Resolved with no answer = closed on the desktop / by Stop. Stop polling; let it proceed.
   [ "$STATUS" = "resolved" ] && exit 0
   # open / pending — the server already blocked ~${WAIT_PER}s; loop until the budget runs out.
 done
