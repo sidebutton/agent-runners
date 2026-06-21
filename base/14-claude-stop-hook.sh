@@ -96,6 +96,103 @@ exit 0
 PTEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 
+# --- Needs-input request forwarder (SCRUM-1373) -------------------------------
+# Referenced from base/assets/claude-hooks.json (PreToolUse + PostToolUse
+# AskUserQuestion|ExitPlanMode, the catch-all Notification, and the Stop entry).
+# Makes a BLOCKED agent visible in the portal: when Claude blocks on an
+# AskUserQuestion / ExitPlanMode prompt, or a permission / idle Notification fires,
+# this opens an agent_requests row (POST /api/agents/requests, action=open); the
+# matching PostToolUse and the Stop hook resolve it. Same job-session gate as the
+# liveness marker / tool-event forwarder so a lingering or operator session can't
+# pollute job-attributed signals (with no job-context session id the signal still
+# posts — an idle operator box is exactly when "needs you" matters). Only a REDUCED,
+# clipped payload leaves the box (question text + option labels / plan / message —
+# never raw tool_input). curl is backgrounded + fully silent: Claude Code must never
+# see this hook fail, and it must never add latency to a blocking prompt.
+cat > "$AGENT_HOME/.local/bin/sb-post-request.sh" <<'PREOF'
+#!/usr/bin/env bash
+# stdin: Claude Code hook JSON (PreToolUse | PostToolUse | Notification | Stop).
+IN=$(cat 2>/dev/null || true)
+[ -z "$IN" ] && exit 0
+EVENT=$(echo "$IN" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
+[ -z "$EVENT" ] && exit 0
+SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -z "$SID" ] && exit 0
+
+# Job-session gate (mirrors sb-mark-tool-use / sb-post-tool-event): while a job
+# session is known, a different session's signal is dropped; with none known, post.
+JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
+if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+
+TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
+
+# Map the firing hook event -> (ACTION, KIND, TUID). Exit for anything we don't capture.
+ACTION=""; KIND=""; TUID=""
+case "$EVENT" in
+  PreToolUse|PostToolUse)
+    case "$TOOL" in
+      AskUserQuestion) KIND=question ;;
+      ExitPlanMode)    KIND=plan ;;
+      *) exit 0 ;;
+    esac
+    if [ "$EVENT" = "PreToolUse" ]; then ACTION=open; else ACTION=resolve; fi
+    TUID=$(echo "$IN" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
+    [ -z "$TUID" ] && TUID="$TOOL"   # stable fallback so the open/resolve pair still correlates
+    ;;
+  Notification)
+    case "$(echo "$IN" | jq -r '.notification_type // empty' 2>/dev/null || true)" in
+      permission_prompt) ACTION=open; KIND=permission; TUID="notif-permission" ;;
+      idle_prompt)       ACTION=open; KIND=idle;       TUID="notif-idle" ;;
+      *) exit 0 ;;   # auth_success / elicitation_* — not a needs-you state
+    esac
+    ;;
+  Stop)
+    ACTION=resolve   # bulk-resolve every open request for this session (no tool_use_id)
+    ;;
+  *) exit 0 ;;
+esac
+
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
+AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
+
+if [ "$ACTION" = "open" ]; then
+  PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" '
+    def clip($s): ($s // "") | tostring | .[0:2000];
+    {
+      action: "open", session_id: $sid, tool_use_id: $tuid, kind: $kind,
+      payload: (
+        if $kind == "question" then
+          { questions: [ (.tool_input.questions // [])[] | {
+              question: clip(.question),
+              options: [ (.options // [])[] | (.label // .) ]
+          } ] }
+        elif $kind == "plan" then
+          { plan: clip(.tool_input.plan // .tool_input.allowedPrompts // "") }
+        else
+          { message: clip(.message), title: clip(.title) }
+        end
+      )
+    }' 2>/dev/null || true)
+elif [ "$EVENT" = "Stop" ]; then
+  PAYLOAD=$(jq -nc --arg sid "$SID" '{action:"resolve", session_id:$sid}' 2>/dev/null || true)
+else
+  PAYLOAD=$(jq -nc --arg sid "$SID" --arg tuid "$TUID" --arg kind "$KIND" \
+    '{action:"resolve", session_id:$sid, tool_use_id:$tuid, kind:$kind}' 2>/dev/null || true)
+fi
+[ -z "$PAYLOAD" ] && exit 0
+
+curl -4 -sf -X POST "${PORTAL_URL}/api/agents/requests" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${AGENT_TOKEN}" \
+  -H "X-Agent-Name: ${AGENT_NAME}" \
+  -d "$PAYLOAD" --connect-timeout 2 --max-time 5 >/dev/null 2>&1 &
+exit 0
+PREOF
+chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
+
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
