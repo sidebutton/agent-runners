@@ -229,12 +229,15 @@ esac
 SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
 [ -z "$SID" ] && exit 0
 
-# Block ONLY this job's session. No active job, or a different (lingering/operator) session:
-# don't long-poll — let the prompt render normally. (Stricter than the capture forwarder, which
-# posts even with no job session; a blocking hook must never freeze an interactive operator box.)
+# Symmetric with the capture forwarder (sb-post-request.sh): while a job session is known, a
+# DIFFERENT session's prompt is left to render normally; with none known (operator/manual session)
+# we still serve it — the capture already opened a portal request ungated, so an operator's portal
+# pick MUST be able to reach the agent. Previously this skipped whenever no job-context existed,
+# which silently dropped every portal answer for operator/manual sessions (the agent never polled).
+# The wait budget below is shorter for non-job sessions so an interactive desktop isn't frozen long
+# before the prompt falls through to the terminal.
 JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
-[ -z "$JOB_SID" ] && exit 0
-[ "$SID" != "$JOB_SID" ] && exit 0
+if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
 
 TUID=$(echo "$IN" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
 [ -z "$TUID" ] && TUID="$TOOL"          # same stable fallback the capture forwarder uses
@@ -246,9 +249,20 @@ AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
 PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
 if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
 
-KEY_ENC=$(jq -rn --arg s "$KEY" '$s|@uri' 2>/dev/null || echo "$KEY")
-WAIT_PER=25                                       # server long-poll seconds (<= endpoint cap 30)
-TOTAL="${SB_REQUEST_WAIT_TOTAL:-100}"             # total seconds to wait before the desktop fallback
+# Send the request_key RAW. It is session_id:tool_use_id — both URL-safe (UUID + toolu_*), and the
+# colon is a legal path char. The portal route matches request_key literally and does NOT %-decode
+# the path param, so %-encoding the colon (the previous '$s|@uri' → "%3A") never matched the stored
+# key: the agent saw status:pending forever and fell through to the terminal ("declined"). Raw matches.
+KEY_ENC="$KEY"
+# A portal answer is delivered within ~1s either way (the server returns the moment the row leaves
+# 'open'); WAIT_PER/TOTAL only bound the *fallthrough* when nobody answers. Job sessions (operator
+# away) poll in long cycles up to a long budget; operator/manual sessions use short cycles + a small
+# budget so an interactive desktop isn't frozen — the prompt falls through to the terminal quickly.
+if [ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ]; then
+  WAIT_PER=25; TOTAL="${SB_REQUEST_WAIT_TOTAL:-100}"          # job: long-poll <= endpoint cap 30
+else
+  WAIT_PER=8;  TOTAL="${SB_REQUEST_WAIT_TOTAL_OPERATOR:-30}"  # operator: responsive fallthrough
+fi
 START=$SECONDS
 
 emit() {  # $1=allow|deny  $2=reason
