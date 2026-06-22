@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# base/lib-refresh.sh — shared, change-gated base-artifact refresh (SCRUM-1380).
+# base/lib-refresh.sh — shared, change-gated refresh of a live agent's deployed
+# artifacts: the agent-runners BASE ARTIFACTS (SCRUM-1380) AND the universal
+# "agents" CATALOG OPS PACK (the default ops workflows — companion to SCRUM-1380,
+# closing the knowledge-pack half of the same fleet-drift story).
 #
 # Single source of truth for "re-apply the idempotent base artifacts on a live
 # agent" so the fleet self-service path and the operator break-glass path can
@@ -105,6 +108,92 @@ _sb_reinstall_wrapper() {
   fi
 }
 
+# _sb_run_as_agent <user> <cmd> — run <cmd> as the agent user. In the prod wrapper
+# context we are root, so drop to the agent user (the pack lives under its HOME);
+# in tests / already-agent contexts run it directly so it needs no tty/su.
+_sb_run_as_agent() {
+  local user="$1" cmd="$2"
+  if [ "$(id -u)" -eq 0 ] && [ "$(id -un)" != "$user" ]; then
+    su - "$user" -c "$cmd"
+  else
+    eval "$cmd"
+  fi
+}
+
+# sb_refresh_knowledge_packs [pack] — reconcile the universal "agents" catalog ops
+# pack (the default ops workflows: agent_pull_repos, agent_se_*, agent_qa_*, …) so
+# workflows added or changed after this agent was provisioned actually reach it.
+#
+# WHY this is SEPARATE from the base-artifact refresh and NOT a manifest step: the
+# default workflows live in the sidebutton-skill-packs CATALOG, not in agent-runners,
+# so they move on a different cadence and must not be gated on the agent-runners
+# fingerprint. They reach an agent ONLY via `sidebutton install` against the public
+# catalog; nothing else refreshes them — `sidebutton registry update` pulls only git
+# REGISTRIES (base/19d), and the base-artifact manifest deliberately excludes the
+# one-time provisioning step that installs this pack (base/13). Left unaddressed, a
+# newly published default workflow 404s ("Workflow not found") on every already-
+# provisioned agent when the orchestrator dispatches it by id.
+#
+# CHANGE-GATE = the CLI's own version compare (installSkillPack), so we need no
+# version math here and an unchanged catalog rewrites nothing:
+#   - same version already installed  -> plain install is a no-op (exit 0, "skipped")
+#   - catalog moved to a new version  -> plain install refuses    (exit 1, "Use --force")
+#   - not installed at all            -> plain install would install it — but the
+#                                        refresh-only gate below skips this case first
+# A plain install, then --force only on its failure, converges to the catalog version
+# while staying a TRUE no-op when nothing changed (one cheap catalog GET, no rewrite).
+#
+# REFRESH-ONLY: reconciles a pack this agent ALREADY has; it never fresh-installs one
+# the agent was provisioned without — components.sh allows a sidebutton-server agent
+# with knowledge-packs OFF (SKIP_KNOWLEDGE_PACKS=1 ⇒ base/13 skipped), and that
+# choice must be respected even though the CLI is present.
+#
+# Best-effort: never aborts the caller (always returns 0); a catalog-unreachable tick
+# just logs and is retried on the next pull_repos. Gated off on serverless boxes (no
+# `sidebutton` CLI) and by SKIP_KNOWLEDGE_PACKS=1 (parity with base/13; also the test
+# kill-switch). Detail goes to log() (stderr/logfile); a one-line status is echoed to
+# stdout only when it actually acts, so it surfaces in the pull_repos report.
+sb_refresh_knowledge_packs() {
+  local pack="${1:-agents}"
+  local user="${AGENT_USER:-agent}"
+  local home="${AGENT_HOME:-/home/${user}}"
+
+  if [ "${SKIP_KNOWLEDGE_PACKS:-}" = "1" ]; then
+    log "knowledge packs: skipped (SKIP_KNOWLEDGE_PACKS=1)"
+    return 0
+  fi
+  if ! command -v sidebutton >/dev/null 2>&1; then
+    log "knowledge packs: sidebutton CLI absent (serverless) — skipped"
+    return 0
+  fi
+  # Refresh only what is already installed (CLI getConfigDir = ~/.sidebutton, packs
+  # under skills/<domain>) — never fresh-install onto a deliberately packs-less agent.
+  if [ ! -d "${home}/.sidebutton/skills/${pack}" ]; then
+    log "knowledge packs: '${pack}' not installed on this agent — skipped (not fresh-installing)"
+    return 0
+  fi
+
+  # Plain install first: exit 0 when already current, non-zero when a DIFFERENT
+  # version is installed (the CLI's "Use --force" refusal).
+  if _sb_run_as_agent "$user" "sidebutton install ${pack}" >/dev/null 2>&1; then
+    log "knowledge packs: '${pack}' already at catalog version (no change)"
+    echo "knowledge packs: ${pack} current"
+    return 0
+  fi
+
+  # Non-zero — most commonly catalog drift; converge by forcing. (A genuine error,
+  # e.g. the catalog unreachable, also lands here; the forced retry then fails too
+  # and we log it without aborting the rest of the refresh.)
+  if _sb_run_as_agent "$user" "sidebutton install ${pack} --force" >/dev/null 2>&1; then
+    log "knowledge packs: '${pack}' refreshed to catalog version (--force)"
+    echo "knowledge packs: ${pack} refreshed"
+  else
+    log "WARN: knowledge packs: '${pack}' refresh failed (catalog unreachable?) — retry next pull_repos"
+    echo "knowledge packs: ${pack} refresh FAILED"
+  fi
+  return 0
+}
+
 # sb_refresh_base_artifacts <base_dir> <runners_ref> — the change-gated apply.
 # Returns 0 on success or no-op; 1 only on an unusable tree. Individual step
 # failures are logged (status=partial) but never abort, matching the break-glass
@@ -115,6 +204,14 @@ sb_refresh_base_artifacts() {
     log "ERROR: no refresh-manifest.txt under ${base} — base artifacts not refreshed"
     return 1
   fi
+
+  # Catalog ops pack — reconciled on EVERY call, BEFORE (and independent of) the
+  # base-artifact change-gate below: the default workflows live in the skill-packs
+  # catalog and move on their own cadence, and an agent still on a pre-this wrapper
+  # only ever calls THIS function, so doing it here makes a catalog bump land on the
+  # same pull_repos pass. It self-gates (CLI version compare), so this is a no-op
+  # when the pack is already current.
+  sb_refresh_knowledge_packs
 
   local fp; fp=$(sb_base_artifacts_fingerprint "$base")
   if sb_artifacts_current "$fp" "$ref"; then

@@ -29,6 +29,12 @@ export AGENT_USER="$(id -un)"
 export AGENT_HOME="$TMP/home"
 mkdir -p "$AGENT_HOME/.claude" "$AGENT_HOME/.local/bin"  # base/09 makes these in prod
 
+# Keep the catalog ops-pack refresh (sb_refresh_knowledge_packs, called inside
+# sb_refresh_base_artifacts) inert for the base-artifact sections — otherwise, on a
+# machine that happens to have the `sidebutton` CLI, it would hit the network and
+# write the real ~/.sidebutton. Section 4c re-enables it against a local stub.
+export SKIP_KNOWLEDGE_PACKS=1
+
 # shellcheck source=../lib-refresh.sh
 . "$BASE/lib-refresh.sh"
 
@@ -116,6 +122,56 @@ rm -f "$SB_UPDATED_MARKER" "$SB_SELF_UPDATE_BIN"
 grep -q '^runners_ref=fix/test-ref$' "$SB_UPDATED_MARKER" 2>/dev/null \
   && grep -qE '^base_artifacts_sha=[0-9a-f]{64}$' "$SB_UPDATED_MARKER" 2>/dev/null \
   && ok "proceed path records the effective ref + fingerprint marker" || bad "marker not written correctly"
+
+# ── 4c. catalog ops-pack refresh: version-compare change-gate (no network) ────
+# Stub `sidebutton` so the PLAIN install's exit code drives force-vs-skip without
+# touching the catalog: rc 0 = already current, rc 1 = "Use --force" refusal. The
+# stub records its args so we can assert whether --force was issued.
+PKGBIN="$TMP/pkgbin"; mkdir -p "$PKGBIN"
+cat > "$PKGBIN/sidebutton" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$SB_STUB_CALLS"
+case "$*" in
+  *--force*)        exit 0 ;;                      # force always succeeds
+  "install agents") exit "${SB_STUB_PLAIN_RC:-0}" ;;
+  *)                exit 0 ;;
+esac
+STUB
+chmod +x "$PKGBIN/sidebutton"
+mkdir -p "$AGENT_HOME/.sidebutton/skills/agents"  # agent HAS the pack (refresh-only gate)
+
+# A: plain install succeeds (already current) => no --force, status "current".
+( export PATH="$PKGBIN:$PATH" SB_STUB_CALLS="$TMP/callsA" SB_STUB_PLAIN_RC=0
+  unset SKIP_KNOWLEDGE_PACKS
+  out="$(sb_refresh_knowledge_packs agents 2>/dev/null)"
+  echo "$out" | grep -q 'agents current' || exit 1
+  ! grep -q -- '--force' "$TMP/callsA" ) \
+  && ok "pack refresh: unchanged version => no --force (true no-op)" \
+  || bad "pack refresh no-op gate failed"
+
+# B: plain install refuses (drift, rc 1) => helper forces, status "refreshed".
+( export PATH="$PKGBIN:$PATH" SB_STUB_CALLS="$TMP/callsB" SB_STUB_PLAIN_RC=1
+  unset SKIP_KNOWLEDGE_PACKS
+  out="$(sb_refresh_knowledge_packs agents 2>/dev/null)"
+  echo "$out" | grep -q 'agents refreshed' || exit 1
+  grep -qx 'install agents --force' "$TMP/callsB" ) \
+  && ok "pack refresh: version drift => converges via --force" \
+  || bad "pack refresh force-on-drift failed"
+
+# C: SKIP_KNOWLEDGE_PACKS=1 => never even invokes the CLI.
+( export PATH="$PKGBIN:$PATH" SB_STUB_CALLS="$TMP/callsC" SKIP_KNOWLEDGE_PACKS=1
+  out="$(sb_refresh_knowledge_packs agents 2>/dev/null)"
+  [ -z "$out" ] && [ ! -s "$TMP/callsC" ] ) \
+  && ok "pack refresh: SKIP_KNOWLEDGE_PACKS=1 => no install attempted" \
+  || bad "pack refresh SKIP gate failed"
+
+# D: a pack NOT installed on this agent => never fresh-install (respect provisioning).
+( export PATH="$PKGBIN:$PATH" SB_STUB_CALLS="$TMP/callsD"
+  unset SKIP_KNOWLEDGE_PACKS
+  out="$(sb_refresh_knowledge_packs neverinstalled 2>/dev/null)"
+  [ -z "$out" ] && [ ! -s "$TMP/callsD" ] ) \
+  && ok "pack refresh: pack not installed => no fresh-install (respects provisioning)" \
+  || bad "pack refresh not-installed gate failed"
 
 # ── 5. Claude hooks re-merge preserves other keys, replaces .hooks ───────────
 cat > "$AGENT_HOME/.claude/settings.json" <<'JSON'
