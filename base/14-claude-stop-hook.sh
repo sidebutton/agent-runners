@@ -407,6 +407,7 @@ normalize_repo_url() {
 capture_git_prs() {
   set +e
   local entry="$1"
+  entry="${entry/#\~/$HOME}"            # expand a leading ~ — git -C / globs never expand it (SCRUM-513 capture bug)
   [ -z "$entry" ] && { echo '[]'; return 0; }
   local -a roots=() uniq=()
   local top sub r u seen
@@ -559,6 +560,7 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
   # Best-effort — capture_git_prs returns [] on any failure, and [] is dropped below.
   ENTRY_PATH=$(jq -r '.entry_path // empty' "$JOB_CONTEXT" 2>/dev/null || true)
   [ -z "$ENTRY_PATH" ] && ENTRY_PATH="${HOME}/workspace"
+  ENTRY_PATH="${ENTRY_PATH/#\~/$HOME}"   # job-context stores the workspace as "~/workspace"; expand so the log + capture see a real path
   PRS_JSON=$(capture_git_prs "$ENTRY_PATH" 2>/dev/null || echo '[]')
   case "$PRS_JSON" in ''|'[]') PRS_JSON='[]' ;; esac
   log "git telemetry: $(echo "$PRS_JSON" | jq -c 'length') PR(s) from $ENTRY_PATH"
