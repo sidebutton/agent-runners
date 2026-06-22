@@ -305,6 +305,75 @@ exit 0                                             # timeout → no output → t
 AWAITEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-await-decision.sh"
 
+# --- Operator steer drain (SCRUM-1378) ----------------------------------------
+# Referenced from base/assets/claude-hooks.json as a PostToolUse `.*` command. THE agent-side
+# CONSUMER of the steer queue — the missing half of SCRUM-1376. An operator types a free-form hint in
+# the Workspace Overview composer (POST /api/agents/:id/steer → agent_steers, stamped with the agent's
+# live session_id + a TTL); at the next tool boundary this hook drains GET /api/agents/steer scoped to
+# THIS session and feeds the hint(s) to the running Claude as hookSpecificOutput.additionalContext,
+# then acks them. No tmux/VNC keystroke injection — it rides Claude Code's native hook-output channel,
+# exactly like sb-await-decision.sh returns the operator's ANSWER. PostToolUse fires on every tool
+# call, so the portal poll is throttled to once / ~12s via a timestamp file (hint lands at the next
+# tool boundary after that window — seconds for a working run). Same job-session gate as the sibling
+# PostToolUse hooks. Fully guarded + IPv4: every miss exits 0 with NO stdout so Claude Code is never
+# disturbed; only a real hint emits the JSON.
+cat > "$AGENT_HOME/.local/bin/sb-drain-steer.sh" <<'STEEREOF'
+#!/usr/bin/env bash
+# stdin: Claude Code PostToolUse hook JSON (carries the firing session's session_id).
+IN=$(cat 2>/dev/null || true)
+[ -z "$IN" ] && exit 0
+SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -z "$SID" ] && exit 0
+
+# Job-session gate (mirrors sb-mark-tool-use / sb-post-tool-event): while a job session is known, a
+# different session's tool calls must not drain this job's steer queue. With none known, fall through
+# (an operator/manual session steering itself is fine — the hint was enqueued against its own session).
+JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
+if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+
+# Throttle: PostToolUse fires on EVERY tool call; hit the portal at most once per ~12s.
+TS_FILE="${HOME}/.sidebutton/last-steer-poll"
+now=$(date +%s 2>/dev/null || echo 0)
+last=$(cat "$TS_FILE" 2>/dev/null || echo 0)
+case "$last" in ''|*[!0-9]*) last=0 ;; esac
+[ $((now - last)) -lt 12 ] && exit 0
+mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+echo "$now" > "$TS_FILE" 2>/dev/null || true
+
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
+AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
+
+# Drain hints scoped to THIS session (fast, no long-poll — must never stall the tool).
+RESP=$(curl -4 -sf "${PORTAL_URL}/api/agents/steer?session_id=${SID}" \
+  -H "Authorization: Bearer ${AGENT_TOKEN}" -H "X-Agent-Name: ${AGENT_NAME}" \
+  --connect-timeout 2 --max-time 5 2>/dev/null || true)
+[ -z "$RESP" ] && exit 0
+
+IDS=$(echo "$RESP" | jq -c '[.steers[].id]' 2>/dev/null || echo '[]')
+if [ -z "$IDS" ] || [ "$IDS" = "[]" ]; then exit 0; fi
+
+# Compose the steer as additionalContext the model reads on its next turn (ASCII only).
+CTX=$(echo "$RESP" | jq -r '
+  "Operator steer (live hint from your operator - incorporate into your current work now):\n"
+  + ([.steers[].hint] | map("- " + .) | join("\n"))
+' 2>/dev/null || true)
+[ -z "$CTX" ] && exit 0
+
+# Ack delivered (best-effort, backgrounded — never blocks the tool).
+curl -4 -sf -X POST "${PORTAL_URL}/api/agents/steer" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${AGENT_TOKEN}" -H "X-Agent-Name: ${AGENT_NAME}" \
+  -d "{\"ack\":${IDS}}" --connect-timeout 2 --max-time 5 >/dev/null 2>&1 &
+
+# Emit to Claude Code (the ONLY stdout this script ever produces).
+jq -nc --arg c "$CTX" '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}' 2>/dev/null || true
+exit 0
+STEEREOF
+chmod +x "$AGENT_HOME/.local/bin/sb-drain-steer.sh"
+
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
