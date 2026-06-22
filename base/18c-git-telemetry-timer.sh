@@ -38,8 +38,8 @@ COUNT=$(echo "$WORKLIST" | jq -r '.count // 0' 2>/dev/null || echo 0)
 [ "${COUNT:-0}" = "0" ] && { log "worklist empty"; exit 0; }
 log "worklist: $COUNT item(s)"
 
-# owner/repo from a github PR url: https://github.com/<owner>/<repo>/pull/<n>
-parse_slug() { echo "$1" | sed -nE 's#https?://[^/]+/([^/]+/[^/]+)/pull/[0-9]+.*#\1#p'; }
+# owner/repo (or Bitbucket workspace/repo) from a PR url — GitHub /pull/<n> or Bitbucket /pull-requests/<n>
+parse_slug() { echo "$1" | sed -nE 's#https?://[^/]+/([^/]+/[^/]+)/(pull|pull-requests)/[0-9]+.*#\1#p'; }
 
 echo "$WORKLIST" | jq -c '.worklist[]' 2>/dev/null | while IFS= read -r item; do
   PR_URL=$(echo "$item"   | jq -r '.pr_url // ""')
@@ -50,7 +50,43 @@ echo "$WORKLIST" | jq -c '.worklist[]' 2>/dev/null | while IFS= read -r item; do
   SLUG=$(parse_slug "$PR_URL")
 
   STATE=""; MERGED_AT=""; REVERTED_AT=""
-  if [ "$NEEDS" = "merge" ]; then
+  if [[ "$PR_URL" == *//bitbucket.org/* ]]; then
+    # Bitbucket reconcile via REST — gh speaks only GitHub. Atlassian token → Basic base64(email:token)
+    # (= $BITBUCKET_AUTH_HEADER, per base/12). No creds / unreachable → skip this item (best-effort).
+    BB_AUTH="${BITBUCKET_AUTH_HEADER:-}"
+    if [ -z "$BB_AUTH" ] && [ -n "${BITBUCKET_USER_EMAIL:-}" ] && [ -n "${BITBUCKET_API_TOKEN:-}" ]; then
+      BB_AUTH=$(printf '%s' "${BITBUCKET_USER_EMAIL}:${BITBUCKET_API_TOKEN}" | base64 -w0 2>/dev/null)
+    fi
+    [ -n "$BB_AUTH" ] && [ -n "$SLUG" ] || { log "bitbucket: no creds/slug for $PR_URL"; continue; }
+    [ -z "$PR_NUM" ] && PR_NUM=$(echo "$PR_URL" | sed -nE 's#.*/pull-requests/([0-9]+).*#\1#p')
+    [ -z "$PR_NUM" ] && continue
+    PRJ=$(curl -4 -sf "https://api.bitbucket.org/2.0/repositories/${SLUG}/pullrequests/${PR_NUM}" \
+      -H "Authorization: Basic ${BB_AUTH}" --connect-timeout 10 --max-time 30 2>/dev/null || echo '')
+    [ -z "$PRJ" ] && continue
+    if [ "$NEEDS" = "merge" ]; then
+      [ "$(echo "$PRJ" | jq -r '.state // ""')" = "MERGED" ] || continue
+      STATE="MERGED"
+      MERGED_AT=$(echo "$PRJ" | jq -r '.updated_on // ""')   # no native merged_on; best-effort
+    elif [ "$NEEDS" = "revert" ]; then
+      BASE=$(echo "$PRJ" | jq -r '.destination.branch.name // ""')
+      MSHA=$(echo "$PRJ" | jq -r '.merge_commit.hash // ""')
+      [ -z "$BASE" ] && continue
+      # Scan recent destination-branch commits for a revert of this PR's merge hash / number.
+      COMMITS=$(curl -4 -sf "https://api.bitbucket.org/2.0/repositories/${SLUG}/commits/${BASE}?pagelen=100" \
+        -H "Authorization: Basic ${BB_AUTH}" --connect-timeout 10 --max-time 30 2>/dev/null || echo '')
+      [ -z "$COMMITS" ] && continue
+      REVERTED_AT=$(echo "$COMMITS" | jq -r --arg sha "$MSHA" --arg num "#${PR_NUM}" '
+        [ .values[]
+          | (.message // "") as $m
+          | select(($m | ascii_downcase | contains("revert"))
+                   and (($sha != "" and ($m | contains($sha))) or ($m | contains($num))))
+          | .date ] | .[0] // empty' 2>/dev/null || echo '')
+      [ -z "$REVERTED_AT" ] && continue
+      STATE="CLOSED"
+    else
+      continue
+    fi
+  elif [ "$NEEDS" = "merge" ]; then
     INFO=$(gh pr view "$PR_URL" --json state,mergedAt 2>/dev/null || echo '')
     [ -z "$INFO" ] && continue
     STATE=$(echo "$INFO" | jq -r '.state // ""')
