@@ -27,6 +27,11 @@
 #   01..13, 15..17     OS/toolchain/desktop install + one-time user/workspace setup
 # The Claude hooks block (assets/claude-hooks.json) is re-merged separately by
 # sb_refresh_base_artifacts — it is an asset, not a step, so it is not listed here.
+#
+# NOTE on 13-knowledge-packs.sh: do NOT add it here. The universal "agents" catalog
+# ops pack IS refreshed on a live agent — but by sb_refresh_knowledge_packs (gated on
+# the CATALOG version), NOT as a manifest step (which would wrongly gate the pack on
+# the agent-runners fingerprint and re-run the heavy provisioning chown/install).
 
 14-claude-stop-hook.sh
 18c-git-telemetry-timer.sh

@@ -4,7 +4,7 @@
 # narrow NOPASSWD sudoers rule scoped to ONLY this wrapper, by the agent_pull_repos
 # ops job (`sudo sb-self-update`). It is the ONE privileged action the fleet has.
 #
-# It does two idempotent, change-gated things:
+# It does three idempotent, change-gated things:
 #   1. Upgrade the global SideButton CLI/server npm package, restarting the
 #      service ONLY when the version actually changed. Self-gated on
 #      `command -v sidebutton`, so it is a no-op (not an install) on serverless
@@ -17,6 +17,12 @@
 #      /etc/sidebutton/updated: a routine tick with nothing new upstream is a true
 #      no-op. The shared apply logic lives in base/lib-refresh.sh (also used by the
 #      operator break-glass agent-redeploy.sh) so the two paths can't drift.
+#   3. Reconcile the universal "agents" CATALOG OPS PACK — re-pull the default ops
+#      workflows from the public catalog so ones added/changed after this agent was
+#      provisioned stop 404-ing on dispatch. This rides step 2 (sb_refresh_base_
+#      artifacts calls sb_refresh_knowledge_packs), so an agent still on a pre-this
+#      wrapper picks it up on the very next pull_repos. Change-gated by the CLI's own
+#      version compare — a no-op when the pack is already current.
 #
 # A root sudo wrapper inherits no agent env, so it resolves the repo/ref itself
 # from /etc/sidebutton/{updated,installed} and hands artifacts back to the agent.
