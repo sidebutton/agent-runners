@@ -84,6 +84,37 @@ else
     || bad "jq-free: literal tilde unexpectedly matched a repo"
 fi
 
+# ── Bitbucket capture: no creds → graceful churn-only element (SCRUM-1392 AC5) ───
+# A bitbucket.org origin with no BITBUCKET_* creds must NOT error and must still emit a
+# churn-only element (repo_url + git-derived churn, empty PR fields) — which the portal
+# now persists/aggregates by repo_url#sha_start (the-assistant side of SCRUM-1392). With
+# creds present the same branch fills pr_url/pr_number/state via the Bitbucket REST API.
+if command -v jq >/dev/null 2>&1; then
+  BBWS="$HOME/bbws"; BBREPO="$BBWS/bbrepo"
+  mkdir -p "$BBREPO"
+  git -C "$BBREPO" init -q
+  git -C "$BBREPO" config user.email t@t.io; git -C "$BBREPO" config user.name t
+  git -C "$BBREPO" remote add origin git@bitbucket.org:acme/bbrepo.git   # scp-style → normalize to https
+  printf 'x\n' > "$BBREPO/g"; git -C "$BBREPO" add g; git -C "$BBREPO" commit -qm base
+  git -C "$BBREPO" update-ref refs/remotes/origin/HEAD HEAD
+  printf 'x\ny\nz\n' > "$BBREPO/g"; git -C "$BBREPO" add g; git -C "$BBREPO" commit -qm change
+  BB_JSON="$( unset BITBUCKET_AUTH_HEADER BITBUCKET_USER_EMAIL BITBUCKET_API_TOKEN; capture_git_prs "$BBWS" 2>/dev/null )"
+  bb_n="$(printf  '%s' "$BB_JSON" | jq 'length'           2>/dev/null || echo x)"
+  bb_url="$(printf '%s' "$BB_JSON" | jq -r '.[0].repo_url'   2>/dev/null)"
+  bb_pr="$(printf  '%s' "$BB_JSON" | jq -r '.[0].pr_url'     2>/dev/null)"
+  bb_la="$(printf  '%s' "$BB_JSON" | jq -r '.[0].lines_added' 2>/dev/null)"
+  [ "$bb_n" = "1" ] && ok "bitbucket origin captured as 1 element (no crash without creds)" \
+    || bad "bitbucket capture returned '$bb_n' elements, expected 1"
+  [ "$bb_url" = "https://bitbucket.org/acme/bbrepo" ] && ok "bitbucket repo_url normalized (scp→https, .git stripped)" \
+    || bad "bitbucket repo_url wrong: '$bb_url'"
+  [ "$bb_pr" = "" ] && ok "no creds → empty pr_url, churn-only (graceful degradation, AC5)" \
+    || bad "expected empty pr_url without creds, got '$bb_pr'"
+  [ "$bb_la" = "2" ] && ok "churn computed host-agnostically for bitbucket (lines_added=2)" \
+    || bad "expected lines_added=2 for bitbucket, got '$bb_la'"
+else
+  skip "jq not installed — skipping bitbucket churn-only assertions"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
 exit "$fail"

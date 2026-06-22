@@ -427,6 +427,7 @@ capture_git_prs() {
   [ ${#uniq[@]} -eq 0 ] && { echo '[]'; return 0; }
   local -a elems=()
   local repo_url sha_end sha_start ss la ld fc co pr_url pr_number state merged_at ghj elem
+  local bb_auth bb_slug branch bbj bbpr
   for r in "${uniq[@]}"; do
     repo_url=$(normalize_repo_url "$(git -C "$r" remote get-url origin 2>/dev/null)")
     sha_end=$(git -C "$r" rev-parse HEAD 2>/dev/null)
@@ -454,6 +455,31 @@ capture_git_prs() {
       ld=$(echo "$ghj"         | jq -r '.deletions // empty')
       fc=$(echo "$ghj"         | jq -r '.changedFiles // empty')
       co=$(echo "$ghj"         | jq -r '(.commits | length) // empty')
+    fi
+    # Bitbucket has no `gh`. When gh found no PR and origin is bitbucket.org, resolve PR identity +
+    # state via the Bitbucket REST API with the agent's own Atlassian token (Basic base64(email:token)
+    # = $BITBUCKET_AUTH_HEADER, per base/12). The git-derived churn above is kept either way; any miss
+    # → churn-only with empty PR fields, never an error (SCRUM-1392 / SCRUM-1367 AC #7).
+    bb_auth="${BITBUCKET_AUTH_HEADER:-}"
+    if [ -z "$bb_auth" ] && [ -n "${BITBUCKET_USER_EMAIL:-}" ] && [ -n "${BITBUCKET_API_TOKEN:-}" ]; then
+      bb_auth=$(printf '%s' "${BITBUCKET_USER_EMAIL}:${BITBUCKET_API_TOKEN}" | base64 -w0 2>/dev/null)
+    fi
+    if [ -z "$pr_url" ] && [ -n "$bb_auth" ] && [[ "$repo_url" == *//bitbucket.org/* ]]; then
+      bb_slug="${repo_url#*bitbucket.org/}"; bb_slug="${bb_slug%/}"   # {workspace}/{repo}
+      branch=$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null)
+      if [ -n "$bb_slug" ] && [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+        bbj=$(curl -4 -sfG "https://api.bitbucket.org/2.0/repositories/${bb_slug}/pullrequests" \
+          --data-urlencode "q=source.branch.name=\"${branch}\"" --data-urlencode "sort=-updated_on" \
+          -H "Authorization: Basic ${bb_auth}" --connect-timeout 10 --max-time 30 2>/dev/null || echo '')
+        bbpr=$(echo "$bbj" | jq -c '.values[0] // empty' 2>/dev/null)
+        if [ -n "$bbpr" ]; then
+          pr_url=$(echo "$bbpr"    | jq -r '.links.html.href // ""')
+          pr_number=$(echo "$bbpr" | jq -r '.id // empty')
+          state=$(echo "$bbpr"     | jq -r '.state // ""')        # OPEN | MERGED | DECLINED | SUPERSEDED
+          # Bitbucket has no native merged_on; updated_on ≈ merge time when MERGED (best-effort).
+          [ "$state" = "MERGED" ] && merged_at=$(echo "$bbpr" | jq -r '.updated_on // ""')
+        fi
+      fi
     fi
     # Skip a repo we couldn't identify at all (no repo_url AND no pr_url).
     [ -z "$repo_url" ] && [ -z "$pr_url" ] && continue
