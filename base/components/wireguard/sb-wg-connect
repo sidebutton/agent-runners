@@ -71,7 +71,13 @@ if grep -iE '^[[:space:]]*AllowedIPs[[:space:]]*=' "$DEST" \
 fi
 
 systemctl enable "$UNIT" >/dev/null 2>&1 || true
-systemctl restart "$UNIT"   # restart (not just start) so a replace re-reads the new conf
+# restart (not just start) so a replace re-reads the new conf. wg-quick@ is a
+# synchronous oneshot: an invalid .conf makes `restart` exit non-zero, which under
+# `set -e` would abort BEFORE the diagnostics below (written to explain exactly
+# this failure) and skip a caller's `&& shred` of the secret temp file. Warn and
+# fall through to the status block instead of dying.
+systemctl restart "$UNIT" \
+  || echo "WARN: 'systemctl restart ${UNIT}' failed — wg-quick up did not succeed; see diagnostics below."
 
 echo "Waiting for a WireGuard handshake on '${NAME}'..."
 _handshake=0
