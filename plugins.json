@@ -21,6 +21,16 @@
       "submodules": false,
       "system_deps": ["ffmpeg"],
       "default_roles": ["*"]
+    },
+    {
+      "slug": "computer-use",
+      "name": "Computer Use",
+      "description": "Screenshot + mouse/keyboard control of the agent's X desktop (DISPLAY=:10) for driving local GUI/RDP windows — capture, click, move, type, clipboard, batch. Opt-in, no role.",
+      "repo": "sidebutton/plugin-computer-use",
+      "ref": "main",
+      "submodules": false,
+      "system_deps": ["xdotool", "scrot", "maim", "xclip", "wmctrl"],
+      "default_roles": []
     }
   ]
 }
