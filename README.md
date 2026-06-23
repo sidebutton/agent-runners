@@ -38,6 +38,7 @@ not dispatchable** — it's a manual / RDP agent.
 | `docker` | toolchain | — | Docker engine (+ agent in `docker` group) |
 | `postgres-client` | toolchain | — | `psql` |
 | `openvpn` | toolchain | — | OpenVPN client + `sb-vpn-connect` helper (.ovpn applied manually post-provision — see [`docs/OPENVPN.md`](./docs/OPENVPN.md)) |
+| `rdp-client` | toolchain | — | FreeRDP (`xfreerdp`) + `sb-rdp-connect` helper; renders an outbound RDP session as a fixed-geometry window on `:10` for computer-use (creds applied post-provision — see [`docs/RDP.md`](./docs/RDP.md)) |
 
 `base/components.sh` resolves `AGENT_COMPONENTS` (comma- or space-separated) into
 the `has_component` helper + the `SKIP_*` / `INSTALL_*` gates the step scripts
@@ -114,6 +115,7 @@ agent-runners/
 │   │   ├── docker/install.sh
 │   │   ├── postgres-client/install.sh
 │   │   ├── openvpn/{install.sh,sb-vpn-connect}
+│   │   ├── rdp-client/{install.sh,sb-rdp-connect}
 │   │   └── sidebutton-extension/{pre,post}-services.sh
 │   ├── assets/                   # wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh, sb-self-update.sh
 │   ├── tests/                    # pure bash+jq regression guards (run directly)
