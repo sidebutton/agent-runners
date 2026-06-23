@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# sb-wg-connect — deploy a WireGuard client profile and autoconnect (idempotent).
+#
+# MVP helper installed by the `wireguard` component. The customer .conf is a SECRET
+# (inline private key + optional preshared key), so it is NOT stored in the
+# portal/repo — an operator copies it to the agent post-provision and runs once:
+#
+#     sudo sb-wg-connect /path/to/profile.conf [name]     # connect / replace
+#     sudo sb-wg-connect remove [name]                    # tear down
+#
+# It installs the profile as /etc/wireguard/<name>.conf (chmod 600) and brings it
+# up via systemd (wg-quick@<name>, so it RECONNECTS ON BOOT), waits for a
+# handshake, and verifies a route into each AllowedIPs subnet.
+#
+# This MVP targets SPLIT-TUNNEL profiles (AllowedIPs = a LAN subnet, e.g.
+# 192.168.1.0/24): the portal heartbeat/secrets/dispatch stay off-tunnel BY
+# CONSTRUCTION, so — unlike sb-vpn-connect — there are NO net_gateway carve-outs.
+# A full-tunnel profile (AllowedIPs 0.0.0.0/0 or ::/0) would route the heartbeat
+# into the tunnel; WireGuard has no net_gateway equivalent, so that case is NOT
+# handled here — the helper WARNs and proceeds.
+#
+# Re-running with a new .conf cleanly replaces the profile.
+set -euo pipefail
+
+usage() {
+  echo "usage: sudo sb-wg-connect <profile.conf> [name]   (default name: wg)" >&2
+  echo "       sudo sb-wg-connect remove [name]" >&2
+  exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || { echo "must run as root (use sudo)" >&2; exit 1; }
+command -v wg       >/dev/null 2>&1 || { echo "wg not installed (select the 'wireguard' component)" >&2; exit 1; }
+command -v wg-quick >/dev/null 2>&1 || { echo "wg-quick not installed (select the 'wireguard' component)" >&2; exit 1; }
+
+PORTAL_HOST="$(printf '%s' "${PORTAL_URL:-https://sidebutton.com}" | sed -E 's#^[a-z]+://##; s#/.*$##; s#:.*$##')"
+
+# ── remove form ──────────────────────────────────────────────────────────────
+if [ "${1:-}" = "remove" ]; then
+  NAME="${2:-wg}"
+  systemctl disable --now "wg-quick@${NAME}" >/dev/null 2>&1 || true
+  rm -f "/etc/wireguard/${NAME}.conf"
+  echo "removed: wg-quick@${NAME} disabled + /etc/wireguard/${NAME}.conf deleted"
+  exit 0
+fi
+
+# ── connect / replace form ───────────────────────────────────────────────────
+SRC="${1:-}"; [ -n "$SRC" ] || usage
+NAME="${2:-wg}"
+[ -r "$SRC" ] || { echo "no such readable file: $SRC" >&2; exit 1; }
+# wg-quick names the interface after <name>; it must be a valid iface name
+# (<=15 chars, [A-Za-z0-9_=+.-]) — NOT tun0 like OpenVPN.
+printf '%s' "$NAME" | grep -qE '^[A-Za-z0-9_=+.-]{1,15}$' \
+  || { echo "invalid tunnel name '$NAME' (<=15 chars, chars [A-Za-z0-9_=+.-]); wg-quick uses it as the interface name" >&2; exit 1; }
+
+DEST="/etc/wireguard/${NAME}.conf"
+UNIT="wg-quick@${NAME}.service"
+
+# Tear down any prior peer via the OLD conf BEFORE overwriting, so wg-quick down
+# cleanly removes the previous peer + routes (idempotent replace).
+systemctl stop "$UNIT" >/dev/null 2>&1 || true
+
+install -D -m 600 -o root -g root "$SRC" "$DEST"
+
+# Full-tunnel guard — this MVP is split-tunnel only.
+if grep -iE '^[[:space:]]*AllowedIPs[[:space:]]*=' "$DEST" \
+     | grep -qE '(^|[ ,=])(0\.0\.0\.0/0|::/0)([ ,]|$)'; then
+  echo "WARN: profile has a full-tunnel AllowedIPs (0.0.0.0/0 and/or ::/0)."
+  echo "      This MVP is SPLIT-TUNNEL only — the portal heartbeat is NOT carved"
+  echo "      out of the tunnel and may be black-holed (the agent could show"
+  echo "      offline). Proceeding anyway; verify portal reachability below."
+fi
+
+systemctl enable "$UNIT" >/dev/null 2>&1 || true
+# restart (not just start) so a replace re-reads the new conf. wg-quick@ is a
+# synchronous oneshot: an invalid .conf makes `restart` exit non-zero, which under
+# `set -e` would abort BEFORE the diagnostics below (written to explain exactly
+# this failure) and skip a caller's `&& shred` of the secret temp file. Warn and
+# fall through to the status block instead of dying.
+systemctl restart "$UNIT" \
+  || echo "WARN: 'systemctl restart ${UNIT}' failed — wg-quick up did not succeed; see diagnostics below."
+
+echo "Waiting for a WireGuard handshake on '${NAME}'..."
+_handshake=0
+for _i in $(seq 1 30); do
+  _hs="$(wg show "$NAME" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -nr | head -n1 || true)"
+  if [ -n "${_hs:-}" ] && [ "${_hs:-0}" -gt 0 ] 2>/dev/null; then _handshake=1; break; fi
+  sleep 2
+done
+
+echo "──────── result ────────"
+if ip -br addr show "$NAME" >/dev/null 2>&1; then
+  echo "iface ${NAME}: $(ip -br addr show "$NAME" | awk '{$1=$1};1' | cut -d' ' -f3- )"
+else
+  echo "iface ${NAME}: NOT up — inspect: journalctl -u ${UNIT} -n 50 --no-pager"
+fi
+
+if [ "$_handshake" = "1" ]; then
+  echo "handshake: ✓ ($(wg show "$NAME" latest-handshakes 2>/dev/null | wc -l) peer(s) up)"
+else
+  echo "handshake: ✗ none within ~60s — inspect: wg show ${NAME}; journalctl -u ${UNIT} -n 50 --no-pager"
+fi
+
+# Verify each AllowedIPs subnet routes INTO the tunnel device (the point of a
+# split tunnel: only the LAN goes over WireGuard).
+_allowed="$(wg show "$NAME" allowed-ips 2>/dev/null | tr '\t ' '\n\n' | grep -E '/[0-9]+$' | sort -u || true)"
+if [ -n "$_allowed" ]; then
+  while IFS= read -r _cidr; do
+    [ -n "$_cidr" ] || continue
+    case "$_cidr" in 0.0.0.0/0|::/0) continue;; esac   # skip default routes (full tunnel)
+    _net="${_cidr%/*}"
+    if printf '%s' "$_net" | grep -q ':'; then _fam=-6; else _fam=-4; fi
+    if ip "$_fam" route get "$_net" 2>/dev/null | grep -q "dev ${NAME}"; then
+      echo "route ${_cidr}: ✓ via ${NAME}"
+    else
+      echo "route ${_cidr}: ✗ not via ${NAME} (inspect: ip ${_fam} route get ${_net})"
+    fi
+  done <<EOF
+$_allowed
+EOF
+else
+  echo "route: (no AllowedIPs reported — is the tunnel up? wg show ${NAME})"
+fi
+
+# Split tunnel ⇒ the portal must stay reachable off-tunnel (heartbeat safe).
+if curl -fsS -o /dev/null -m 10 "https://${PORTAL_HOST}/" 2>/dev/null; then
+  echo "portal ${PORTAL_HOST}: reachable ✓ (heartbeat safe — split tunnel)"
+else
+  echo "portal ${PORTAL_HOST}: NOT reachable ✗ — confirm the profile's AllowedIPs is split-tunnel (a full tunnel would black-hole the portal)"
+fi
+echo "unit ${UNIT}: $(systemctl is-active "$UNIT" 2>/dev/null), $(systemctl is-enabled "$UNIT" 2>/dev/null) (reconnects on boot)"

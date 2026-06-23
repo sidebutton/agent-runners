@@ -66,6 +66,14 @@
       "description": "OpenVPN client + the sb-vpn-connect helper. The .ovpn profile is applied manually post-provision (MVP): sudo sb-vpn-connect <profile.ovpn>. Autoconnects on boot via openvpn-client@.",
       "requires": [],
       "chip": { "label": "VPN", "live": false }
+    },
+    {
+      "slug": "wireguard",
+      "kind": "toolchain",
+      "title": "WireGuard client",
+      "description": "WireGuard client (wireguard-tools) + the sb-wg-connect helper. The .conf profile is applied manually post-provision (MVP): sudo sb-wg-connect <profile.conf> [name]. Autoconnects on boot via wg-quick@. Split-tunnel; no heartbeat carve-outs.",
+      "requires": [],
+      "chip": { "label": "VPN", "live": false }
     }
   ]
 }
