@@ -115,6 +115,68 @@ else
   skip "jq not installed — skipping bitbucket churn-only assertions"
 fi
 
+# ── SCRUM-1394: a session-start HEAD baseline scopes capture to repos THIS session advanced ──────
+# Before this, capture emitted EVERY repo with a remote — a planning/QA job on the persistent VM
+# inherited whatever feature branch (and already-merged PR) a prior SE job left checked out — and
+# collapsed sha_start==sha_end on an up-to-date checkout. base/14 now installs a SessionStart writer
+# (sb-session-start.sh) that snapshots each repo's HEAD; capture SKIPS repos whose HEAD did not move
+# and takes sha_start from the snapshot. With no baseline it falls back to the legacy path (asserted
+# above with the 1-arg calls), so the change is non-regressive.
+grep -qF 'session-heads-${sid}.json' "$HOOK" \
+  && ok "capture_git_prs reads the per-session HEAD baseline" \
+  || bad "capture_git_prs is missing the SCRUM-1394 baseline read"
+grep -qF 'sb-session-start.sh' "$HOOK" \
+  && ok "base/14 installs the SessionStart baseline writer" \
+  || bad "sb-session-start.sh writer is missing from base/14"
+
+# Extract + syntax-check the SessionStart writer from its heredoc.
+awk "/cat > .*sb-session-start.sh.*<<'SESSIONEOF'/{f=1;next} /^SESSIONEOF\$/{f=0} f" "$HOOK" > "$TMP/sb-session-start.sh"
+bash -n "$TMP/sb-session-start.sh" && ok "bash -n: sb-session-start.sh" || bad "bash -n failed on sb-session-start.sh"
+
+if command -v jq >/dev/null 2>&1; then
+  R_HEAD="$(git -C "$REPO" rev-parse HEAD)"
+  R_PARENT="$(git -C "$REPO" rev-parse HEAD~1)"
+  R_KEY="$(git -C "$REPO" rev-parse --show-toplevel)"
+  mkdir -p "$HOME/.sidebutton"
+  printf '{"session_id":"sidT","entry_path":"~/workspace"}' > "$HOME/.sidebutton/job-context.json"
+
+  # 1. the writer snapshots the workspace repo's current HEAD under its toplevel path
+  printf '{"session_id":"sidT","source":"startup"}' | bash "$TMP/sb-session-start.sh" 2>/dev/null
+  base_head="$(jq -r --arg k "$R_KEY" '.[$k] // ""' "$HOME/.sidebutton/session-heads-sidT.json" 2>/dev/null)"
+  [ "$base_head" = "$R_HEAD" ] && ok "SessionStart writer snapshots toplevel->HEAD" \
+    || bad "SessionStart baseline wrong: '$base_head' != '$R_HEAD'"
+
+  # 1b. SCRUM-1394: resume/(auto-)compact re-fire SessionStart with the SAME session_id. The writer must
+  # NOT overwrite an existing baseline — re-snapshotting would move it past this session's own commits and
+  # the Stop hook would then drop a repo the session DID advance. First write wins.
+  printf '{"sentinel":"keep"}' > "$HOME/.sidebutton/session-heads-sidT.json"
+  printf '{"session_id":"sidT","source":"compact"}' | bash "$TMP/sb-session-start.sh" 2>/dev/null
+  kept="$(jq -r '.sentinel // ""' "$HOME/.sidebutton/session-heads-sidT.json" 2>/dev/null)"
+  [ "$kept" = "keep" ] && ok "SessionStart is idempotent — resume/compact does not overwrite the baseline" \
+    || bad "SessionStart overwrote an existing baseline (would lose the original job-start HEAD)"
+
+  # 2. baseline == current HEAD (session committed nothing here) => repo SKIPPED (over-scope fix)
+  printf '{"%s":"%s"}' "$R_KEY" "$R_HEAD" > "$HOME/.sidebutton/session-heads-sidT.json"
+  n="$(capture_git_prs "$WS" sidT 2>/dev/null | jq 'length' 2>/dev/null || echo x)"
+  [ "$n" = "0" ] && ok "HEAD unchanged vs baseline => repo dropped (len=0)" \
+    || bad "expected 0 elements for an un-advanced repo, got '$n'"
+
+  # 3. baseline == parent (session advanced HEAD) => emit with sha_start=baseline, distinct from sha_end
+  printf '{"%s":"%s"}' "$R_KEY" "$R_PARENT" > "$HOME/.sidebutton/session-heads-sidT.json"
+  ADV="$(capture_git_prs "$WS" sidT 2>/dev/null)"
+  n="$(printf  '%s' "$ADV" | jq 'length'           2>/dev/null || echo x)"
+  ss="$(printf '%s' "$ADV" | jq -r '.[0].sha_start' 2>/dev/null)"
+  se="$(printf '%s' "$ADV" | jq -r '.[0].sha_end'   2>/dev/null)"
+  [ "$n" = "1" ] && ok "advanced repo still captured (len=1)" || bad "expected 1 element for an advanced repo, got '$n'"
+  [ "$ss" = "$R_PARENT" ] && ok "sha_start taken from the session baseline" \
+    || bad "sha_start '$ss' != baseline '$R_PARENT'"
+  [ "$ss" != "$se" ] && ok "sha_start != sha_end — no collapsed range (BUG 4 fix)" \
+    || bad "sha_start==sha_end collapsed range persists"
+  rm -f "$HOME/.sidebutton/job-context.json" "$HOME/.sidebutton/session-heads-sidT.json"
+else
+  skip "jq not installed — skipping SCRUM-1394 baseline-scoping assertions"
+fi
+
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
 exit "$fail"
