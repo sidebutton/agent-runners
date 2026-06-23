@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# sb-rdp-connect — open an auto-reconnecting, FIXED-GEOMETRY RDP session to a
+# customer host and render it onto the agent's base display (:10), where the
+# computer-use plugin drives it and operators watch via LiveDesktop.
+#
+# Installed by the `rdp-client` component and run by sb-rdp.service
+# (User=agent, DISPLAY=:10, Restart=always). It can also be run by hand for
+# testing: `DISPLAY=:10 sb-rdp-connect`.
+#
+# The target host + credentials are a per-customer SECRET, delivered out-of-band
+# (like the VPN .ovpn) — NOT baked into cloud-init or the portal. Drop them at
+# /etc/sidebutton/rdp.env (mode 600), e.g.:
+#
+#     RDP_HOST=10.20.0.5
+#     RDP_USER=KIAgent
+#     RDP_PASS=********
+#     RDP_DOMAIN=CORP            # optional
+#     RDP_GEOMETRY=1600x1000     # optional (default 1600x1000; must fit :10 = 1920x1080)
+#     RDP_EXTRA=                 # optional extra xfreerdp flags (e.g. /sec:tls /network:lan)
+#
+# then: sudo systemctl enable --now sb-rdp
+#
+# Geometry is PINNED — fixed /size + /scale:100 + dynamic-resolution OFF, and no
+# /f (fullscreen) or /smart-sizing — so the window's pixel dimensions (and thus
+# screenshots/coordinates for computer-use) stay identical across reconnects.
+set -euo pipefail
+
+ENV_FILE="${RDP_ENV_FILE:-/etc/sidebutton/rdp.env}"
+export DISPLAY="${DISPLAY:-:10}"
+
+log()  { printf '[sb-rdp] %s\n' "$*"; }
+idle() { log "$1"; sleep "${2:-15}"; }   # never tight-loop under Restart=always
+
+# Pick the installed FreeRDP binary (freerdp2 → xfreerdp, freerdp3 → xfreerdp3).
+RDP_BIN=""
+for _b in xfreerdp xfreerdp3; do
+  if command -v "$_b" >/dev/null 2>&1; then RDP_BIN="$_b"; break; fi
+done
+if [ -z "$RDP_BIN" ]; then
+  log "FreeRDP not installed (select the 'rdp-client' component) — idling"
+  while true; do sleep 3600; done
+fi
+
+while true; do
+  if [ ! -r "$ENV_FILE" ]; then
+    idle "waiting for ${ENV_FILE} (drop RDP_HOST/RDP_USER/RDP_PASS there, mode 600)" 15
+    continue
+  fi
+
+  # Load creds (best-effort; the required-var check below is the real gate).
+  RDP_HOST="" RDP_USER="" RDP_PASS="" RDP_DOMAIN="" RDP_GEOMETRY="" RDP_EXTRA=""
+  # shellcheck disable=SC1090
+  . "$ENV_FILE" 2>/dev/null || { idle "could not source ${ENV_FILE} (check syntax)" 15; continue; }
+
+  if [ -z "${RDP_HOST:-}" ] || [ -z "${RDP_USER:-}" ] || [ -z "${RDP_PASS:-}" ]; then
+    idle "${ENV_FILE} present but RDP_HOST/RDP_USER/RDP_PASS not all set — idling" 30
+    continue
+  fi
+
+  geometry="${RDP_GEOMETRY:-1600x1000}"
+  args=(
+    "/v:${RDP_HOST}"
+    "/u:${RDP_USER}"
+    "/p:${RDP_PASS}"
+    "/size:${geometry}"     # fixed window size — pins screenshot dimensions
+    /scale:100              # no desktop scaling
+    -dynamic-resolution     # do NOT resize the session to the window (keeps dims stable)
+    /cert:ignore            # accept the customer host cert unattended
+    +auto-reconnect         # FreeRDP-level reconnect on transient drops
+    /auto-reconnect-max-retries:20
+    -grab-keyboard          # don't grab the X keyboard (computer-use sends synthetic keys)
+    /log-level:WARN
+  )
+  [ -n "${RDP_DOMAIN:-}" ] && args+=("/d:${RDP_DOMAIN}")
+  # Optional field-tuning flags, word-split intentionally.
+  if [ -n "${RDP_EXTRA:-}" ]; then
+    # shellcheck disable=SC2206
+    args+=(${RDP_EXTRA})
+  fi
+
+  log "connecting to ${RDP_USER}@${RDP_HOST} (${geometry}) via ${RDP_BIN} on ${DISPLAY}"
+  "$RDP_BIN" "${args[@]}" || log "${RDP_BIN} exited ($?) — reconnecting in 5s"
+  # Outer loop handles hard drops / process exit that FreeRDP's own +auto-reconnect
+  # couldn't recover (host reboot, credential expiry, retry budget exhausted).
+  sleep 5
+done

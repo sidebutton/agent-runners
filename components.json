@@ -74,6 +74,14 @@
       "description": "WireGuard client (wireguard-tools) + the sb-wg-connect helper. The .conf profile is applied manually post-provision (MVP): sudo sb-wg-connect <profile.conf> [name]. Autoconnects on boot via wg-quick@. Split-tunnel; no heartbeat carve-outs.",
       "requires": [],
       "chip": { "label": "VPN", "live": false }
+    },
+    {
+      "slug": "rdp-client",
+      "kind": "toolchain",
+      "title": "RDP client (FreeRDP)",
+      "description": "FreeRDP (xfreerdp) + the sb-rdp-connect helper. Opens an outbound RDP session to a customer host (e.g. an on-prem Windows ERP with no API) and renders it as a fixed-geometry window on the agent desktop (:10) — driveable by computer-use, visible in LiveDesktop, auto-reconnecting on drop. Target host + credentials are applied manually post-provision via /etc/sidebutton/rdp.env (out-of-band, never in cloud-init), then: systemctl enable --now sb-rdp.",
+      "requires": [],
+      "chip": { "label": "RDP", "live": false }
     }
   ]
 }
