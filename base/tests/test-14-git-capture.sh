@@ -146,6 +146,15 @@ if command -v jq >/dev/null 2>&1; then
   [ "$base_head" = "$R_HEAD" ] && ok "SessionStart writer snapshots toplevel->HEAD" \
     || bad "SessionStart baseline wrong: '$base_head' != '$R_HEAD'"
 
+  # 1b. SCRUM-1394: resume/(auto-)compact re-fire SessionStart with the SAME session_id. The writer must
+  # NOT overwrite an existing baseline — re-snapshotting would move it past this session's own commits and
+  # the Stop hook would then drop a repo the session DID advance. First write wins.
+  printf '{"sentinel":"keep"}' > "$HOME/.sidebutton/session-heads-sidT.json"
+  printf '{"session_id":"sidT","source":"compact"}' | bash "$TMP/sb-session-start.sh" 2>/dev/null
+  kept="$(jq -r '.sentinel // ""' "$HOME/.sidebutton/session-heads-sidT.json" 2>/dev/null)"
+  [ "$kept" = "keep" ] && ok "SessionStart is idempotent — resume/compact does not overwrite the baseline" \
+    || bad "SessionStart overwrote an existing baseline (would lose the original job-start HEAD)"
+
   # 2. baseline == current HEAD (session committed nothing here) => repo SKIPPED (over-scope fix)
   printf '{"%s":"%s"}' "$R_KEY" "$R_HEAD" > "$HOME/.sidebutton/session-heads-sidT.json"
   n="$(capture_git_prs "$WS" sidT 2>/dev/null | jq 'length' 2>/dev/null || echo x)"

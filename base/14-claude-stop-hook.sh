@@ -399,6 +399,11 @@ ENTRY=$(jq -r '.entry_path // empty' "$JC" 2>/dev/null || true)
 ENTRY="${ENTRY/#\~/$HOME}"
 mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
 OUT="${HOME}/.sidebutton/session-heads-${SID}.json"
+# First SessionStart of a session wins. SessionStart re-fires with the SAME session_id on resume and on
+# (auto-)compact; a long SE job that has already committed would then re-snapshot the baseline forward
+# onto its own commits, the Stop hook would see HEAD unchanged vs that baseline and DROP the repo —
+# regressing the very over-scope fix this writer exists for (SCRUM-1394). Keep the original job-start HEAD.
+[ -f "$OUT" ] && exit 0
 # Discover repo roots — workspace toplevel + each immediate subdir repo (same set capture_git_prs walks).
 roots=()
 top=$(git -C "$ENTRY" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && roots+=("$top")
