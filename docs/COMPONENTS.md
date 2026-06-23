@@ -92,6 +92,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | `docker` | toolchain | **new** — `docker-ce` + `systemctl enable --now docker` + `usermod -aG docker $AGENT_USER` | — | Docker (live) |
 | `postgres-client` | toolchain | **new** — `postgresql-client` | — | psql |
 | `openvpn` | toolchain | **new** — `openvpn` + `sb-vpn-connect` helper; .ovpn applied manually post-provision (MVP — see [`OPENVPN.md`](./OPENVPN.md)) | — | VPN |
+| `wireguard` | toolchain | **new** — `wireguard-tools` + `sb-wg-connect` helper; .conf applied manually post-provision (split-tunnel MVP — see [`WIREGUARD.md`](./WIREGUARD.md)) | — | VPN |
 | `rdp-client` | toolchain | **new** — `freerdp2-x11` (`xfreerdp`) + `sb-rdp-connect` helper + `sb-rdp.service`; outbound RDP session rendered as a fixed-geometry window on `:10` (computer-use driveable), creds applied post-provision (see [`RDP.md`](./RDP.md)) | — | RDP |
 
 ### `components.json` shape
