@@ -374,6 +374,50 @@ exit 0
 STEEREOF
 chmod +x "$AGENT_HOME/.local/bin/sb-drain-steer.sh"
 
+# --- SessionStart git baseline (SCRUM-1394) -----------------------------------
+# Snapshot each workspace repo's HEAD at session start so the Stop hook's git capture can scope to the
+# repos THIS session actually advanced — and derive a real sha_start. Without it, capture_git_prs
+# emitted EVERY repo with a remote (a planning/QA job inheriting whatever feature branch + already-merged
+# PR a prior SE job left checked out on the persistent VM) and collapsed sha_start==sha_end on an
+# up-to-date checkout. Referenced from base/assets/claude-hooks.json (SessionStart). Best-effort: any
+# miss leaves no baseline file and capture falls back to its legacy behavior, so this is non-regressive.
+cat > "$AGENT_HOME/.local/bin/sb-session-start.sh" <<'SESSIONEOF'
+#!/usr/bin/env bash
+# stdin: Claude Code SessionStart hook JSON (carries this session's session_id + source).
+IN=$(cat 2>/dev/null || true)
+SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -z "$SID" ] && exit 0
+command -v git >/dev/null 2>&1 || exit 0
+command -v jq  >/dev/null 2>&1 || exit 0
+JC="${HOME}/.sidebutton/job-context.json"
+# Baseline only the JOB session (same gating as the other hooks) so a lingering/operator session cannot
+# overwrite it. No job-context session id (no active job / old runtime) => proceed (legacy-safe).
+JOB_SID=$(jq -r '.session_id // empty' "$JC" 2>/dev/null || true)
+if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+ENTRY=$(jq -r '.entry_path // empty' "$JC" 2>/dev/null || true)
+[ -z "$ENTRY" ] && ENTRY="${HOME}/workspace"
+ENTRY="${ENTRY/#\~/$HOME}"
+mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+OUT="${HOME}/.sidebutton/session-heads-${SID}.json"
+# Discover repo roots — workspace toplevel + each immediate subdir repo (same set capture_git_prs walks).
+roots=()
+top=$(git -C "$ENTRY" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && roots+=("$top")
+for sub in "$ENTRY"/*/; do
+  [ -d "$sub" ] || continue
+  top=$(git -C "$sub" rev-parse --show-toplevel 2>/dev/null) || continue
+  roots+=("$top")
+done
+obj='{}'
+for r in "${roots[@]}"; do
+  sha=$(git -C "$r" rev-parse HEAD 2>/dev/null) || continue
+  [ -n "$sha" ] || continue
+  obj=$(echo "$obj" | jq -c --arg k "$r" --arg v "$sha" '.[$k]=$v' 2>/dev/null) || obj='{}'
+done
+echo "$obj" > "$OUT" 2>/dev/null || true
+exit 0
+SESSIONEOF
+chmod +x "$AGENT_HOME/.local/bin/sb-session-start.sh"
+
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
@@ -407,8 +451,11 @@ normalize_repo_url() {
 capture_git_prs() {
   set +e
   local entry="$1"
+  local sid="${2:-}"                    # SCRUM-1394: session id → per-session HEAD baseline (scope to repos this session advanced)
   entry="${entry/#\~/$HOME}"            # expand a leading ~ — git -C / globs never expand it (SCRUM-513 capture bug)
   [ -z "$entry" ] && { echo '[]'; return 0; }
+  local baseline_file=""
+  [ -n "$sid" ] && baseline_file="${HOME}/.sidebutton/session-heads-${sid}.json"
   local -a roots=() uniq=()
   local top sub r u seen
   # entry_path is the WORKSPACE (~/workspace); the repo is a SUBDIR. Resolve the
@@ -426,13 +473,25 @@ capture_git_prs() {
   done
   [ ${#uniq[@]} -eq 0 ] && { echo '[]'; return 0; }
   local -a elems=()
-  local repo_url sha_end sha_start ss la ld fc co pr_url pr_number state merged_at ghj elem
+  local repo_url sha_end sha_start base_sha ss la ld fc co pr_url pr_number state merged_at ghj elem
   local bb_auth bb_slug branch bbj bbpr
   for r in "${uniq[@]}"; do
     repo_url=$(normalize_repo_url "$(git -C "$r" remote get-url origin 2>/dev/null)")
     sha_end=$(git -C "$r" rev-parse HEAD 2>/dev/null)
-    sha_start=$(git -C "$r" merge-base origin/HEAD HEAD 2>/dev/null)
-    [ -z "$sha_start" ] && sha_start=$(git -C "$r" rev-parse HEAD~1 2>/dev/null)
+    # SCRUM-1394: when a session-start HEAD baseline exists for this repo, scope to THIS session —
+    # SKIP repos whose HEAD did not advance (a planning/QA job must not inherit a prior job's leftover
+    # branch + PR), and take sha_start FROM the baseline so the range spans only this session's commits
+    # (never collapses to a single SHA). No baseline entry (old box / non-job session / repo cloned
+    # mid-session) => legacy merge-base behavior, so capture is never worse than before.
+    base_sha=""
+    [ -n "$baseline_file" ] && [ -f "$baseline_file" ] && base_sha=$(jq -r --arg k "$r" '.[$k] // ""' "$baseline_file" 2>/dev/null)
+    if [ -n "$base_sha" ]; then
+      [ "$base_sha" = "$sha_end" ] && continue
+      sha_start="$base_sha"
+    else
+      sha_start=$(git -C "$r" merge-base origin/HEAD HEAD 2>/dev/null)
+      [ -z "$sha_start" ] && sha_start=$(git -C "$r" rev-parse HEAD~1 2>/dev/null)
+    fi
     # churn from the diff range (fallback / non-GitHub hosts)
     la=""; ld=""; fc=""; co=""
     if [ -n "$sha_start" ]; then
@@ -587,7 +646,7 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
   ENTRY_PATH=$(jq -r '.entry_path // empty' "$JOB_CONTEXT" 2>/dev/null || true)
   [ -z "$ENTRY_PATH" ] && ENTRY_PATH="${HOME}/workspace"
   ENTRY_PATH="${ENTRY_PATH/#\~/$HOME}"   # job-context stores the workspace as "~/workspace"; expand so the log + capture see a real path
-  PRS_JSON=$(capture_git_prs "$ENTRY_PATH" 2>/dev/null || echo '[]')
+  PRS_JSON=$(capture_git_prs "$ENTRY_PATH" "$SESSION_ID" 2>/dev/null || echo '[]')
   case "$PRS_JSON" in ''|'[]') PRS_JSON='[]' ;; esac
   log "git telemetry: $(echo "$PRS_JSON" | jq -c 'length') PR(s) from $ENTRY_PATH"
   STEP_COMPLETE_PAYLOAD=$(jq -n --argjson job_id "${JOB_ID:-null}" --argjson step "${STEP_INDEX:-null}" \

@@ -71,15 +71,18 @@ echo "$WORKLIST" | jq -c '.worklist[]' 2>/dev/null | while IFS= read -r item; do
       BASE=$(echo "$PRJ" | jq -r '.destination.branch.name // ""')
       MSHA=$(echo "$PRJ" | jq -r '.merge_commit.hash // ""')
       [ -z "$BASE" ] && continue
-      # Scan recent destination-branch commits for a revert of this PR's merge hash / number.
+      [ -z "$MSHA" ] && continue
+      # Same canonical-revert match as the GitHub path below: a destination-branch commit (NOT the PR's
+      # own merge commit) whose body carries git's "This reverts commit <mergeSHA>" line. The old
+      # revert-word + #num heuristic mis-read the squash-merge commit itself as a self-revert (its title
+      # held the word "revert" and ended with "(#<num>)") — SCRUM-1394 BUG 2.
       COMMITS=$(curl -4 -sf "https://api.bitbucket.org/2.0/repositories/${SLUG}/commits/${BASE}?pagelen=100" \
         -H "Authorization: Basic ${BB_AUTH}" --connect-timeout 10 --max-time 30 2>/dev/null || echo '')
       [ -z "$COMMITS" ] && continue
-      REVERTED_AT=$(echo "$COMMITS" | jq -r --arg sha "$MSHA" --arg num "#${PR_NUM}" '
+      REVERTED_AT=$(echo "$COMMITS" | jq -r --arg sha "$MSHA" '
         [ .values[]
-          | (.message // "") as $m
-          | select(($m | ascii_downcase | contains("revert"))
-                   and (($sha != "" and ($m | contains($sha))) or ($m | contains($num))))
+          | select(.hash != $sha)
+          | select((.message // "") | contains("This reverts commit " + $sha))
           | .date ] | .[0] // empty' 2>/dev/null || echo '')
       [ -z "$REVERTED_AT" ] && continue
       STATE="CLOSED"
@@ -98,17 +101,20 @@ echo "$WORKLIST" | jq -c '.worklist[]' 2>/dev/null | while IFS= read -r item; do
     [ -z "$INFO" ] && continue
     BASE=$(echo "$INFO"  | jq -r '.baseRefName // ""')
     MSHA=$(echo "$INFO"  | jq -r '.mergeCommit.oid // ""')
-    NUM=$(echo "$INFO"   | jq -r '.number // empty')
     [ -z "$SLUG" ] && continue
-    # Scan recent base-branch commits for a revert of this PR's merge commit / number.
+    [ -z "$MSHA" ] && continue   # no merge SHA → cannot identify a revert; report none (never a false positive)
+    # A revert is a NEW base-branch commit whose body carries git's canonical "This reverts commit
+    # <mergeSHA>" line (also what GitHub's "Revert" button emits). Match THAT, and exclude the PR's own
+    # squash-merge commit: its title can contain the word "revert" and ends with "(#<num>)", which the
+    # old revert-word + #num heuristic mis-read as the PR reverting itself (SCRUM-1394 BUG 2 — every
+    # squash-merge whose title mentioned revert, e.g. #55, was flagged reverted at reverted_at=merged_at).
     COMMITS=$(gh api "repos/${SLUG}/commits?sha=${BASE}&per_page=100" 2>/dev/null || echo '')
     [ -z "$COMMITS" ] && continue
-    REVERTED_AT=$(echo "$COMMITS" | jq -r --arg sha "$MSHA" --arg num "#${NUM}" '
+    REVERTED_AT=$(echo "$COMMITS" | jq -r --arg sha "$MSHA" '
       [ .[]
+        | select(.sha != $sha)
         | .commit as $c
-        | ($c.message // "") as $m
-        | select(($m | ascii_downcase | contains("revert"))
-                 and (($sha != "" and ($m | contains($sha))) or ($m | contains($num))))
+        | select(($c.message // "") | contains("This reverts commit " + $sha))
         | $c.committer.date ] | .[0] // empty' 2>/dev/null || echo '')
     [ -z "$REVERTED_AT" ] && continue
     STATE="CLOSED"
