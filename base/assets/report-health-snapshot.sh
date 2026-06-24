@@ -1,21 +1,27 @@
 #!/bin/bash
 # /opt/report-health-snapshot.sh
 #
-# Collects agent health metrics, X11 screenshot, and Claude Code session log.
-# Reports to sidebutton.com/api/agents/health-report.
+# Collects agent health metrics, X11 screenshot, a per-session terminal-window
+# crop, and the Claude Code session log. Reports to
+# sidebutton.com/api/agents/health-report.
 #
 # Usage: report-health-snapshot.sh [--full|--light|--auto]
-#   --full   Metrics + screenshot + session log
+#   --full   Metrics + desktop screenshot + terminal-window crop + session log
 #   --light  Metrics only
 #   --auto   Full if active (Claude CPU>5%); if idle, full every 15min, skip in between
 #
 # Crontab:
 #   */5 * * * * /opt/report-health-snapshot.sh --auto >>/tmp/health-snapshot.log 2>&1
 #
-# Requires: python3, curl, imagemagick (import), coreutils
+# Requires: python3, curl, imagemagick (import), xdotool (window capture), coreutils
 # Agent env vars: SIDEBUTTON_AGENT_TOKEN, SIDEBUTTON_AGENT_NAME (from .agent-env)
 
 set -uo pipefail
+
+# X display for the `import`/`xdotool` window capture. The sb-health.service unit
+# sets DISPLAY=:10; default it here too so a cron/manual invocation (no unit env)
+# still targets the agent desktop instead of failing to connect.
+: "${DISPLAY:=:10}"; export DISPLAY
 
 MODE="${1:---auto}"
 # API_URL is derived from PORTAL_URL once .agent-env is sourced (see below).
@@ -36,6 +42,64 @@ if [ -z "${SIDEBUTTON_AGENT_TOKEN:-}" ] || [ -z "${SIDEBUTTON_AGENT_NAME:-}" ]; 
 fi
 
 mkdir -p "$TMP"
+
+# ── Session → window helpers (SCRUM-1414) ────────────────────────
+# A dispatched job runs Claude Code in a desktop terminal launched (by the
+# SideButton OSS GUI step) as:
+#   xfce4-terminal --disable-server --title="Agent: <action>" \
+#       -x tmux new-session -s sbjob-<session_id> claude --session-id <session_id> …
+# so the active session's terminal is the xfce4-terminal whose argv carries
+# `sbjob-<session_id>`. Titles are NON-unique across concurrent sessions, so we
+# key on the session id, never the title. --disable-server ⇒ 1 process = 1 window.
+
+# Echo the active Claude session id, or nothing. Primary source is the dispatch
+# job-context (the id base/14 + base/19e also key on); fallback mirrors 19e — the
+# running `claude --session-id <uuid>` whose transcript was written most recently.
+resolve_active_session() {
+  local jc="${HOME:-/home/agent}/.sidebutton/job-context.json" sid=""
+  if [ -r "$jc" ]; then
+    sid="$(jq -r '.session_id // empty' "$jc" 2>/dev/null || true)"
+  fi
+  if [ -n "$sid" ]; then printf '%s' "$sid"; return 0; fi
+
+  local projects="${HOME:-/home/agent}/.claude/projects"
+  local pid args cand transcript mt f best="" best_mt=0
+  for pid in $(pgrep -u "$(id -u)" -x claude 2>/dev/null || true); do
+    args="$(ps -ww -o args= -p "$pid" 2>/dev/null || true)"
+    case "$args" in
+      *--session-id*) cand="$(printf '%s\n' "$args" \
+        | sed -n 's/.*--session-id[ =]\([0-9a-fA-F][0-9a-fA-F-]\{34,35\}\).*/\1/p')" ;;
+      *) cand="" ;;
+    esac
+    [ -n "$cand" ] || continue
+    transcript=""
+    for f in "$projects"/*/"$cand".jsonl; do [ -e "$f" ] || continue; transcript="$f"; break; done
+    [ -n "$transcript" ] || continue
+    mt="$(stat -c %Y "$transcript" 2>/dev/null || echo 0)"
+    if [ "$mt" -gt "$best_mt" ]; then best_mt="$mt"; best="$cand"; fi
+  done
+  printf '%s' "$best"
+}
+
+# capture_terminal_window <session_id> <out.png> — crop that session's terminal
+# window to <out.png>. Returns non-zero (writing nothing usable) on any miss so
+# the caller cleanly omits the terminal frame; the desktop frame is unaffected.
+capture_terminal_window() {
+  local sid="$1" out="$2" pid term_pid="" wid
+  command -v xdotool >/dev/null 2>&1 || return 1
+  [ -n "$sid" ] || return 1
+  for pid in $(pgrep -u "$(id -u)" -f "sbjob-${sid}" 2>/dev/null || true); do
+    case "$(ps -ww -o comm= -p "$pid" 2>/dev/null || true)" in
+      xfce4-terminal) term_pid="$pid"; break ;;
+    esac
+  done
+  [ -n "$term_pid" ] || return 1
+  wid="$(xdotool search --pid "$term_pid" 2>/dev/null | head -n1 || true)"
+  [ -n "$wid" ] || return 1
+  import -window "$wid" png:"$out" 2>/dev/null || return 1
+  [ -s "$out" ] || return 1
+  return 0
+}
 
 # ── Activity detection ───────────────────────────────────────────
 export CLAUDE_CPU=$(ps aux 2>/dev/null | awk '/[c]laude/ {s+=$3} END {printf "%d",s+0}')
@@ -93,6 +157,21 @@ if b64:
   fi
 fi
 
+# ── Terminal-window crop for the active session (full mode only; SCRUM-1414) ──
+# Resolve the active session id (also sent on its own so the portal can key the
+# desktop frame), then crop that session's Claude Code window. Every hop degrades
+# to "omit terminal frame": no session / no xdotool / no window / empty file all
+# leave terminal_b64 absent while metrics + the desktop screenshot still post.
+export SESSION_ID=""
+export TERM_FILE="$TMP/terminal.png"
+rm -f "$TERM_FILE"
+if [ "$MODE" = "--full" ]; then
+  SESSION_ID="$(resolve_active_session || true)"
+  if [ -n "$SESSION_ID" ]; then
+    capture_terminal_window "$SESSION_ID" "$TERM_FILE" || rm -f "$TERM_FILE"
+  fi
+fi
+
 # ── Session log (full mode only) ─────────────────────────────────
 export SESSION_FILE="$TMP/session.txt"
 rm -f "$SESSION_FILE"
@@ -137,6 +216,18 @@ ss = os.environ.get("SS_FILE", "")
 if ss and os.path.isfile(ss) and os.path.getsize(ss) > 0:
     with open(ss, "rb") as f:
         payload["screenshot_b64"] = base64.b64encode(f.read()).decode()
+
+# Terminal-window crop (base64-encoded PNG) — only when a frame was captured
+# (xdotool present, session resolved, window found). Absent otherwise. (SCRUM-1414)
+tf = os.environ.get("TERM_FILE", "")
+if tf and os.path.isfile(tf) and os.path.getsize(tf) > 0:
+    with open(tf, "rb") as f:
+        payload["terminal_b64"] = base64.b64encode(f.read()).decode()
+
+# Active Claude session id — keys the terminal (and desktop) frame to a session.
+sid = os.environ.get("SESSION_ID", "")
+if sid:
+    payload["session_id"] = sid
 
 # Session log (plain text, last 50 lines of task events)
 sf = os.environ.get("SESSION_FILE", "")

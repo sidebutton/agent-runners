@@ -24,6 +24,18 @@ step "Step 19c/16: Health + screenshot reporter (sb-health timer)"
 if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
   log "sb-health reporter skipped (SKIP_SIDEBUTTON_SERVER=1 — variant has no /api/screenshot)"
 else
+  # The reporter crops the focused Claude Code window (per-session terminal frame)
+  # with xdotool + import (SCRUM-1414). xdotool is installed at provision in
+  # base/02-system.sh, but this step is refresh-safe (refresh-manifest.txt) so it
+  # also runs on already-provisioned boxes where 02 never re-runs. Idempotent
+  # guard: install xdotool once on those boxes so the terminal frame lights up on
+  # the next sb-self-update tick. Never fatal — a missing tool just skips the frame.
+  if ! command -v xdotool >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y xdotool >/dev/null 2>&1 \
+      && log "xdotool installed (terminal-window capture dep)" \
+      || log "WARN: xdotool install failed — terminal frame skipped until reprovision"
+  fi
+
   REPORTER_SRC="${BASE_DIR}/assets/report-health-snapshot.sh"
   REPORTER_DEST="/opt/report-health-snapshot.sh"
 

@@ -11,4 +11,4 @@ apt-get install "${APT_OPTS[@]}" \
   software-properties-common apt-transport-https \
   openssh-client net-tools nano htop tmux tree \
   python3 python3-pip python3-venv \
-  ripgrep fd-find xclip bc imagemagick
+  ripgrep fd-find xclip bc imagemagick xdotool
