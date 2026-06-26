@@ -423,6 +423,23 @@ exit 0
 SESSIONEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-session-start.sh"
 
+# --- UserPromptSubmit hook: clear the session-done sentinel (SCRUM-1433) -------
+# Referenced from base/assets/claude-hooks.json (UserPromptSubmit). The reaper
+# (base/19e) reaps a session ~1h after its stop hook drops
+# ~/.sidebutton/session-done/<sid>. A new prompt means the session is working
+# again, so remove its sentinel: the reaper then reads "absent = still running" and
+# leaves an actively-engaged session alone (AC3). The next Stop re-creates the
+# sentinel with a fresh mtime, restarting the grace. Self-scoped to the prompt's own
+# session_id, so no job-context gate is needed; best-effort, never disturbs the prompt.
+cat > "$AGENT_HOME/.local/bin/sb-clear-session-done.sh" <<'CLEAREOF'
+#!/usr/bin/env bash
+IN=$(cat 2>/dev/null || true)
+SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+[ -n "$SID" ] && rm -f "${HOME}/.sidebutton/session-done/${SID}" 2>/dev/null || true
+exit 0
+CLEAREOF
+chmod +x "$AGENT_HOME/.local/bin/sb-clear-session-done.sh"
+
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
 #!/usr/bin/env bash
@@ -574,6 +591,26 @@ if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then
 fi
 SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty')
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty')
+HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
+
+# SCRUM-1433: write the session-done sentinel the reaper (base/19e) reads, BEFORE the
+# job-session gate below. The sentinel is a LOCAL lifecycle marker, not a portal post,
+# so it must be dropped for EVERY finished session — including one that is no longer
+# the current job-context session (a newer job can be dispatched while this one is
+# still running; concurrent ops sessions, SCRUM-1434). Gating it like the portal posts
+# would leave such a session with no sentinel, so the reaper would read it as "still
+# running" forever — the very ghost accumulation this ticket fixes. The reaper keys off
+# this file's mtime, immune to the idle-TUI/steer transcript writes that defeated the
+# old mtime signal; sb-clear-session-done.sh (UserPromptSubmit) removes it on
+# re-engagement so an active session is never reaped. Only the final Stop (never
+# SubagentStop) marks completion. Best-effort under set -e: if-guarded, never aborts.
+if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$SESSION_ID" ]; then
+  SDONE_DIR="${HOME}/.sidebutton/session-done"
+  if mkdir -p "$SDONE_DIR" 2>/dev/null; then
+    : > "${SDONE_DIR}/${SESSION_ID}" 2>/dev/null || true
+    log "session-done sentinel written for $SESSION_ID"
+  fi
+fi
 
 # Session identity (v3): job-context carries the dispatch-assigned Claude
 # session UUID (`claude --session-id`); this hook's stdin carries its own.
@@ -599,9 +636,8 @@ fi
 # SCRUM-1178: only the MAIN agent Stop completes the job. This hook runs on BOTH
 # Stop and SubagentStop (usage accumulates on both); SubagentStop fires when a
 # sub-agent returns while the main agent is still working, so it must NOT trigger
-# completion. final=true only for hook_event_name == "Stop". (Reused below to
-# gate the transcript upload too.)
-HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
+# completion. final=true only for hook_event_name == "Stop". (HOOK_EVENT is parsed
+# once up top, near SESSION_ID; reused here and to gate the transcript upload below.)
 if [ "$HOOK_EVENT" = "Stop" ]; then IS_FINAL=true; else IS_FINAL=false; fi
 USAGE='{}'
 if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
