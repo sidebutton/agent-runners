@@ -34,7 +34,12 @@ run_variant_hook "early-setup"
 . "$BASE_DIR/04-desktop.sh"
 . "$BASE_DIR/05-node.sh"
 . "$BASE_DIR/06-chrome.sh"           # gated on INSTALL_CHROME
-. "$BASE_DIR/07-claude-code.sh"
+# Claude Code CLI — componentized (gated on INSTALL_CLAUDE_CODE; default-on for
+# manual / back-compat sets). Position unchanged: before 08/09 and the
+# 14/15/15b/19e steps that configure Claude (which stay in base, ungated).
+if [ "${INSTALL_CLAUDE_CODE:-0}" = "1" ] && [ -f "$BASE_DIR/components/claude-code/install.sh" ]; then
+  . "$BASE_DIR/components/claude-code/install.sh"
+fi
 . "$BASE_DIR/08-sidebutton.sh"       # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/09-agent-user.sh"
 
