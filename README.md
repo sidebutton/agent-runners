@@ -74,9 +74,9 @@ wizard pre-checks; the user may uncheck or add any component.
 
 | Profile | Components | Roles |
 |---|---|---|
-| **SideButton SWE Full Stack** (default) | `chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
+| **SideButton SWE Full Stack** (default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
 | **SideButton SWE .NET** | Full Stack + `dotnet9` | se, qa, sd, pm |
-| **SideButton SWE Native** | `chrome, sidebutton-server, knowledge-packs` | se, qa |
+| **SideButton SWE Native** | `claude-code, chrome, sidebutton-server, knowledge-packs` | se, qa |
 
 Plugins are selected separately, by role (see Plugins above) — not baked into profile presets.
 

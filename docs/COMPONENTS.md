@@ -144,9 +144,9 @@ are optional and require the server.
 
 | Profile (slug) | Pre-checked components | Default roles |
 |---|---|---|
-| **SideButton SWE Full Stack** (`swe-full-stack`, default) | `chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
+| **SideButton SWE Full Stack** (`swe-full-stack`, default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
 | **SideButton SWE .NET** (`swe-dotnet`, new) | Full Stack **+ `dotnet9`** | se, qa, sd, pm |
-| **SideButton SWE Native** (`swe-native`) | `chrome, sidebutton-server, knowledge-packs` (no extension) | se, qa |
+| **SideButton SWE Native** (`swe-native`) | `claude-code, chrome, sidebutton-server, knowledge-packs` (no extension) | se, qa |
 
 Plugins are selected separately, by role (§4b): `screen-record` for every role, `writing-quality` for `smm`.
 
@@ -161,13 +161,13 @@ Dropped: `qa-generalist`, `swe-bare`.
   "profiles": [
     { "slug": "swe-full-stack", "name": "SideButton SWE Full Stack",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
-      "components": ["chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs"] },
+      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs"] },
     { "slug": "swe-dotnet", "name": "SideButton SWE .NET",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
-      "components": ["chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "dotnet9"] },
+      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "dotnet9"] },
     { "slug": "swe-native", "name": "SideButton SWE Native",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa"],
-      "components": ["chrome", "sidebutton-server", "knowledge-packs"] }
+      "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] }
   ]
 }
 ```
