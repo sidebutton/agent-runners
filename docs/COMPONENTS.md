@@ -85,6 +85,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | slug | kind | Installs (migrated from) | requires | chip (live?) |
 |---|---|---|---|---|
 | `claude-code` | runtime | `components/claude-code/install.sh` (was `07-claude-code`) — **default-on**: installs when selected OR when `AGENT_COMPONENTS` is empty/unset | — | Claude Code (lead — hardcoded in portal) |
+| `claude-code-router` | runtime | **new** — `components/claude-code-router/install.sh`: pinned `@musistudio/claude-code-router` on a loopback proxy `127.0.0.1:3456` + `~/.claude-code-router/config.json` (literal `$VAR` placeholders, env-interpolated at runtime) + `ccr.service` (enabled at install, first-started in `post-services.sh`) + logrotate; routes Claude Code to a configured provider via `~/.agent-env` (see env contract below) | `claude-code` | Router |
 | `chrome` | runtime | `06-chrome` + `chrome.service` | — | Chrome (live) |
 | `sidebutton-server` | runtime | `08-sidebutton` + `sidebutton.service` + `15-claude-mcp` + `14-claude-stop-hook` + `19c-health-report` + server start (`19b`) | — | SB server (live) — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | ext `pre-services` (Chrome managed-policy force-install) + `post-services` (browser_connected wait) | `chrome`, `sidebutton-server` | Extension (live) |
@@ -126,6 +127,31 @@ Each component owns phase scripts under `base/components/<slug>/`:
 `install.sh` (kind-specific), optional `pre-services.sh`, optional
 `post-services.sh` — matching today's variant hook phases (so the extension's
 policy-before-`chrome.service`-start ordering is preserved exactly).
+
+### `claude-code-router` env contract (owned here; values delivered by the operator / T6)
+
+`~/.claude-code-router/config.json` holds **literal `$VAR` placeholders** that CCR
+interpolates at RUNTIME from its process env (systemd `EnvironmentFile=~/.agent-env`),
+so the routing secrets are delivered AFTER install — written into `agents.agent_env`
+by the portal/operator, pushed to `~/.agent-env` by `19-secrets`, and read by CCR on
+(re)start in `post-services.sh`. `claude-code-router` **owns these variable names**;
+the portal-side delivery (T6 / SCRUM-1449) only has to populate them:
+
+| Var | Purpose |
+|---|---|
+| `ANTHROPIC_BASE_URL` | points Claude Code at the proxy — `http://127.0.0.1:3456` |
+| `ANTHROPIC_AUTH_TOKEN` | token Claude Code presents to CCR; reused as the proxy `APIKEY` gate |
+| `CCR_PROVIDER_NAME` | upstream provider id (e.g. `deepseek`) — also the `Router.default` provider |
+| `CCR_PROVIDER_API_BASE_URL` | upstream provider base URL |
+| `CCR_PROVIDER_API_KEY` | upstream provider key |
+| `CCR_PROVIDER_MODEL` | upstream model id — also the `Router.default` model |
+| `CCR_CONFIG_B64` | optional base64 of a whole `config.json` that OVERRIDES the template (honored in both `install.sh` and `post-services.sh`) |
+
+systemd's `EnvironmentFile` does **not** interpolate, so `~/.agent-env` values must be
+plain literals — CCR alone resolves `$VAR`. The template keeps `Router.default` =
+`"$CCR_PROVIDER_NAME,$CCR_PROVIDER_MODEL"` plus `Providers[0].{name,models[0]}` so
+`base/14`'s `detect_effective_route` (T9 routed-job telemetry) stays correct.
+`claude-code-router` **requires `claude-code`** (`base/components.sh` force-enables it).
 
 ## 4b. Plugins (separate role-driven catalog — `plugins.json`)
 

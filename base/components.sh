@@ -45,6 +45,9 @@ if has_component sidebutton-extension; then
   [ "$INSTALL_CHROME" = 1 ]            || { log "components: sidebutton-extension requires chrome — enabling"; export INSTALL_CHROME=1; }
   [ "$SKIP_SIDEBUTTON_SERVER" = 0 ]    || { log "components: sidebutton-extension requires sidebutton-server — enabling"; export SKIP_SIDEBUTTON_SERVER=0; }
 fi
+if has_component claude-code-router; then
+  [ "$INSTALL_CLAUDE_CODE" = 1 ]       || { log "components: claude-code-router requires claude-code — enabling"; export INSTALL_CLAUDE_CODE=1; }
+fi
 if [ "$SKIP_KNOWLEDGE_PACKS" = 0 ] && [ "$SKIP_SIDEBUTTON_SERVER" != 0 ]; then
   log "components: knowledge-packs requires sidebutton-server — enabling"; export SKIP_SIDEBUTTON_SERVER=0
 fi
