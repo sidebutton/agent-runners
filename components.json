@@ -3,6 +3,21 @@
   "version": 1,
   "components": [
     {
+      "slug": "claude-code",
+      "kind": "runtime",
+      "title": "Claude Code",
+      "description": "The Claude Code agentic CLI — the default agent runtime (installed on every agent).",
+      "requires": []
+    },
+    {
+      "slug": "claude-code-router",
+      "kind": "runtime",
+      "title": "Claude Code Router",
+      "description": "Local CCR proxy on 127.0.0.1:3456 that routes Claude Code to a configured provider via ANTHROPIC_BASE_URL in ~/.agent-env. Requires Claude Code.",
+      "requires": ["claude-code"],
+      "chip": { "label": "Router", "live": false }
+    },
+    {
       "slug": "chrome",
       "kind": "runtime",
       "title": "Google Chrome",
