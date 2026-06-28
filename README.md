@@ -30,6 +30,8 @@ not dispatchable** — it's a manual / RDP agent.
 
 | slug | kind | requires | notes |
 |---|---|---|---|
+| `claude-code` | runtime | — | Claude Code agentic CLI — the default agent runtime (base always installs it; no `chip` — the portal hardcodes a lead "Claude Code" chip) |
+| `claude-code-router` | runtime | `claude-code` | CCR proxy on `127.0.0.1:3456` routing Claude Code to a configured provider via `ANTHROPIC_BASE_URL` in `~/.agent-env` |
 | `chrome` | runtime | — | Chrome browser |
 | `sidebutton-server` | runtime | — | MCP server on :9876 — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | `chrome`, `sidebutton-server` | Chrome managed-policy force-install + handshake wait |
