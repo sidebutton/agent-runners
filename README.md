@@ -51,7 +51,8 @@ runtime/toolchain installs; `pre-services.sh` / `post-services.sh` for lifecycle
 phases — e.g. the extension's managed-policy + handshake).
 
 `components.json` is validated against
-[`components.schema.json`](./components.schema.json).
+[`components.schema.json`](./components.schema.json), enforced by
+[`base/tests/test-components-schema.sh`](./base/tests) (see **Testing / CI** below).
 
 ### Plugins (`plugins.json`) — separate, role-driven
 
@@ -122,7 +123,7 @@ agent-runners/
 │   │   ├── rdp-client/{install.sh,sb-rdp-connect}
 │   │   └── sidebutton-extension/{pre,post}-services.sh
 │   ├── assets/                   # wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh, sb-self-update.sh
-│   ├── tests/                    # pure bash+jq regression guards (run directly)
+│   ├── tests/                    # pure bash+jq regression guards + run-all.sh runner
 │   └── run.sh                    # orchestrator
 └── variants/
     └── ubuntu-claude-code/       # the single base variant (manifest + README; no hooks)
@@ -216,6 +217,34 @@ including a `base_artifacts_sha` fingerprint + `runners_repo`). The bootstrapper
 short-circuits with a service-health summary when present; remove the marker to
 force a reinstall. `/etc/sidebutton/updated` records the effective ref +
 fingerprint after each `sb-self-update` base-artifact refresh.
+
+## Testing / CI
+
+`base/tests/` holds pure **bash + jq** regression guards (no bats, no network) — each
+runnable directly (`bash base/tests/<name>.sh`) and together via the runner:
+
+```
+bash base/tests/run-all.sh          # discover + run the suite (CI mode); SUITE GREEN on success
+bash base/tests/run-all.sh --all    # also run host-dependent guards (only green on a clean box)
+```
+
+`run-all.sh` auto-discovers every `test-*.sh` (a new guard needs no wiring), prints a
+per-file PASS/FAIL + tally, and exits non-zero on any failure. It skips the guards
+listed in [`base/tests/ci-exclude.txt`](./base/tests/ci-exclude.txt) — currently only
+`test-sb-self-update.sh`, which false-fails on a host that already has a global
+`sidebutton` CLI (every provisioned agent VM); each exclusion carries its reason.
+
+Component-model coverage (the catalog ↔ schema ↔ on-disk ↔ `run.sh` wiring contract):
+
+| Guard | Asserts |
+|---|---|
+| `test-components-schema.sh` | `components.json` is valid against `components.schema.json` (structure, enums, slug pattern, `additionalProperties:false`) + unique slugs + every `requires[]` resolves |
+| `test-component-resolution.sh` | every `base/components/<dir>` is a catalog slug **and** wired into `run.sh`; every non-base-installed slug has a dir; the base-installed allowlist (`chrome`/`sidebutton-server`/`knowledge-packs`) is justified by its `06`/`08`/`13` step; all `*.sh` parse |
+| `test-default-install-parity.sh` | default / empty / back-compat + every profile resolves to a byte-identical gate vector vs a committed snapshot (re-bless: `BLESS=1 bash …`) |
+| `test-claude-code-*` / `test-claude-code-router-component.sh` | the claude-code + CCR components' catalog shape, install dir, and `run.sh` wiring |
+
+CI (`.github/workflows/tests.yml`) runs `run-all.sh` on every push to `main` + PR
+(`ubuntu-latest` + `jq`).
 
 ## License
 
