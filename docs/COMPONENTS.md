@@ -55,7 +55,7 @@ workspace repos (credential helpers are pre-wired), and run `claude` manually.
 | Preflight, apt essentials, Node 22 | `01-preflight`, `02-system`, `05-node` |
 | GitHub CLI | `03-gh-cli` |
 | Desktop + RDP/VNC (xfce4, xrdp, x11vnc, Xvfb) + units | `04-desktop`, desktop units in `16/17` |
-| Claude Code CLI + onboarding/trust seed | `07-claude-code`, `15b-claude-onboarding` |
+| Claude Code CLI + onboarding/trust seed | `components/claude-code/install.sh` (default-on component), `15b-claude-onboarding` |
 | Agent user, RDP password, `~/.claude/settings.json`, dirs | `09-agent-user` |
 | Polkit (RDP auth popups) | `11-polkit` |
 | `~/.agent-env` template + `.bashrc` + **git credential helpers** + `~/workspace` | `12-workspace` |
@@ -84,6 +84,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 
 | slug | kind | Installs (migrated from) | requires | chip (live?) |
 |---|---|---|---|---|
+| `claude-code` | runtime | `components/claude-code/install.sh` (was `07-claude-code`) — **default-on**: installs when selected OR when `AGENT_COMPONENTS` is empty/unset | — | Claude Code (lead — hardcoded in portal) |
 | `chrome` | runtime | `06-chrome` + `chrome.service` | — | Chrome (live) |
 | `sidebutton-server` | runtime | `08-sidebutton` + `sidebutton.service` + `15-claude-mcp` + `14-claude-stop-hook` + `19c-health-report` + server start (`19b`) | — | SB server (live) — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | ext `pre-services` (Chrome managed-policy force-install) + `post-services` (browser_connected wait) | `chrome`, `sidebutton-server` | Extension (live) |

@@ -22,6 +22,17 @@ has_component knowledge-packs   && export SKIP_KNOWLEDGE_PACKS=0   || export SKI
 has_component chrome            && export INSTALL_CHROME=1         || export INSTALL_CHROME=0
 has_component sidebutton-extension && export INSTALL_EXTENSION=1   || export INSTALL_EXTENSION=0
 
+# claude-code: DEFAULT-ON. Install when `claude-code` is selected OR when the set
+# is empty/unset (manual / back-compat), so a base agent always ships Claude Code.
+# An explicit non-empty set that omits it (e.g. a future Codex-only agent) resolves
+# to 0 and skips the install. Uses the trimmed $COMPONENTS so a whitespace-only
+# AGENT_COMPONENTS still counts as empty.
+if has_component claude-code || [ -z "$(echo $COMPONENTS | xargs)" ]; then
+  export INSTALL_CLAUDE_CODE=1
+else
+  export INSTALL_CLAUDE_CODE=0
+fi
+
 # SIDEBUTTON_PLUGINS is selected by the portal (role-driven, from plugins.json)
 # and passed explicitly in cloud-init; 19b-plugins.sh consumes it. Nothing to
 # derive here — plugins are no longer components.
@@ -42,4 +53,4 @@ if [ -n "${SIDEBUTTON_PLUGINS:-}" ] && [ "$SKIP_SIDEBUTTON_SERVER" != 0 ]; then
 fi
 
 log "components: [$(echo $COMPONENTS | xargs)]"
-log "  gates: server=$([ "$SKIP_SIDEBUTTON_SERVER" = 0 ] && echo on || echo off) chrome=${INSTALL_CHROME} extension=${INSTALL_EXTENSION} packs=$([ "$SKIP_KNOWLEDGE_PACKS" = 0 ] && echo on || echo off) plugins=[${SIDEBUTTON_PLUGINS:-}]"
+log "  gates: server=$([ "$SKIP_SIDEBUTTON_SERVER" = 0 ] && echo on || echo off) chrome=${INSTALL_CHROME} claude-code=${INSTALL_CLAUDE_CODE} extension=${INSTALL_EXTENSION} packs=$([ "$SKIP_KNOWLEDGE_PACKS" = 0 ] && echo on || echo off) plugins=[${SIDEBUTTON_PLUGINS:-}]"
