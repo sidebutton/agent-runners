@@ -106,6 +106,30 @@ grep -q 'systemctl restart ccr.service' "$POST" \
 grep -q '127.0.0.1:3456' "$POST" && ok "post-services health-checks 127.0.0.1:3456" || bad "post-services missing 127.0.0.1:3456 probe"
 grep -q 'WARN' "$POST" && ok "post-services WARNs (does not die) on a failed probe" || bad "post-services has no WARN path (would die under set -e)"
 
+# ── AC1/AC4 runtime guard: post-services.sh is SOURCED into run.sh's `set -euo
+#    pipefail` shell. The CCR_CONFIG_B64 lookup is a `grep|...|sed` pipeline whose
+#    exit status, under pipefail, is grep's — which is 1 when the (optional) key is
+#    absent (the common case). An unguarded `var=$(that pipeline)` therefore aborts
+#    the whole provision before ccr.service is ever started. bash -n cannot see this;
+#    actually source the script (externals stubbed) and assert it completes.
+_guard_home="$(mktemp -d)"
+printf 'SOMEKEY="x"\n' > "$_guard_home/.agent-env"   # deliberately no CCR_CONFIG_B64
+# NB: the subshell MUST be a standalone statement whose exit status we capture in
+# $? — NOT an `if (...)` / `(...) ||` test. bash ignores `set -e` inside a subshell
+# that is itself the condition of if/while/&&/||, which would make this guard
+# false-pass on the very abort it checks for.
+(
+  set -euo pipefail
+  step() { :; }; log() { :; }; systemctl() { :; }; curl() { :; }; sleep() { :; }
+  AGENT_HOME="$_guard_home"; AGENT_USER="$(id -un)"
+  . "$POST"
+) >/dev/null 2>&1
+_guard_rc=$?
+rm -rf "$_guard_home"
+[ "$_guard_rc" -eq 0 ] \
+  && ok "post-services.sh survives set -euo pipefail when CCR_CONFIG_B64 is absent (no grep/pipefail abort)" \
+  || bad "post-services.sh ABORTS under set -euo pipefail when CCR_CONFIG_B64 absent (unguarded grep|...|sed assignment)"
+
 # ── AC5: components.sh force-enables claude-code when CCR is selected ─────────
 grep -q 'claude-code-router requires claude-code' "$COMPONENTS_SH" \
   && ok "components.sh enforces claude-code-router requires claude-code" \

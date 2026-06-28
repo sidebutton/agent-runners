@@ -14,9 +14,13 @@ ENV_FILE="$AGENT_HOME/.agent-env"
 # CCR_CONFIG_B64 can arrive two ways: cloud-init env (already in this shell) or
 # delivered into ~/.agent-env by 19-secrets (this root shell never sourced it).
 # Pick up the latter WITHOUT importing every secret into run.sh's environment —
-# read just this one key and strip the surrounding quotes 19-secrets writes.
+# read just this one key and strip the surrounding quotes 19-secrets writes. The
+# trailing `|| true` is REQUIRED: this script is sourced into run.sh's `set -euo
+# pipefail` shell, so when the key is absent (the common case — CCR_CONFIG_B64 is
+# optional) grep exits 1, pipefail propagates it to the assignment, and set -e
+# would abort the whole provision. `|| true` keeps the no-match → empty path.
 if [ -z "${CCR_CONFIG_B64:-}" ] && [ -f "$ENV_FILE" ]; then
-  CCR_CONFIG_B64="$(grep -E '^CCR_CONFIG_B64=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//')"
+  CCR_CONFIG_B64="$(grep -E '^CCR_CONFIG_B64=' "$ENV_FILE" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' || true)"
 fi
 
 # If a whole-config override was delivered post-install, decode it now (install.sh
