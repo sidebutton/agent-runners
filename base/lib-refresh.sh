@@ -120,6 +120,111 @@ _sb_run_as_agent() {
   fi
 }
 
+# ── SideButton server CLI (npm global) — hardened, self-repairing upgrade ─────
+# Powers sidebutton.service (:9876). `npm install -g sidebutton@latest` mutates the
+# global prefix IN PLACE: npm "retires" the live package dir AND the
+# /usr/bin/sidebutton bin link to temp names, extracts the new version, then swaps.
+# If the disk fills mid-extract (ENOSPC) npm aborts and its rollback can leave the
+# bin link stranded and the dep tree half-extracted — the package is present but
+# `sidebutton` no longer execs (systemd 203/EXEC) or dies ERR_MODULE_NOT_FOUND. The
+# running server masks it until the next restart/reboot, then crash-loops. So we
+# (1) DISK-PREFLIGHT before ever attempting the install, and (2) VERIFY + REPAIR
+# (relink, else one clean reinstall) so a corrupted install self-heals on the next
+# pull_repos instead of bricking the agent. The server-variant gate is the STABLE
+# sidebutton.service unit, NOT `command -v sidebutton`: a lost bin link must trigger
+# repair, not be mistaken for a serverless box (that latch is what made the original
+# breakage permanent — RCA 2026-06-28, agent-awsdjo-lamport).
+SB_MIN_FREE_MB="${SB_MIN_FREE_MB:-1024}"   # refuse the in-place npm -g below this headroom
+
+_sb_have_unit() { [ -n "$(systemctl list-unit-files "$1" --no-legend 2>/dev/null)" ]; }
+
+# Healthy = the bin resolves on PATH AND actually runs (its deps load). hash -r so a
+# freshly (re)created symlink is seen rather than a stale PATH cache.
+_sb_server_cli_healthy() {
+  hash -r 2>/dev/null || true
+  command -v sidebutton >/dev/null 2>&1 && sidebutton --version >/dev/null 2>&1
+}
+
+# Network-free repair: when the package dir is intact but the bin link is gone,
+# recreate <bindir>/sidebutton from the package's own bin field. Returns healthy?
+_sb_relink_server_bin() {
+  local pkgroot="$1" bindir="$2" pkg="$1/sidebutton" rel binpath
+  [ -f "$pkg/package.json" ] || return 1
+  rel="$(node -e 'try{const b=require(process.argv[1]+"/package.json").bin;process.stdout.write(typeof b==="string"?b:(b&&b.sidebutton)||"")}catch(e){}' "$pkg" 2>/dev/null)"
+  [ -n "$rel" ] || return 1
+  binpath="$pkg/${rel#./}"
+  [ -f "$binpath" ] || return 1
+  ln -sfn "$binpath" "$bindir/sidebutton" 2>/dev/null || return 1
+  chmod +x "$binpath" 2>/dev/null || true
+  _sb_server_cli_healthy
+}
+
+# sb_refresh_server_cli — upgrade the global SideButton CLI/server, prevented from
+# bricking the agent and self-healing if it finds (or produces) a broken install.
+# Best-effort: returns 0 on upgrade/no-op/serverless/low-disk; returns 1 only when
+# the install is broken AND unrepairable (and then it does NOT restart the service,
+# leaving the running process alone rather than bouncing it into a crash-loop).
+# Detail -> log(); a one-line status -> stdout (surfaces in the pull_repos report).
+sb_refresh_server_cli() {
+  if ! _sb_have_unit sidebutton.service; then
+    log "server CLI: no sidebutton.service (serverless) — skipped"
+    return 0
+  fi
+
+  local prefix pkgroot bindir
+  prefix="$(npm prefix -g 2>/dev/null)"; [ -n "$prefix" ] || prefix="/usr"
+  pkgroot="$prefix/lib/node_modules"
+  bindir="$prefix/bin"
+
+  # (1) disk preflight — a full disk is exactly what corrupts an in-place npm -g.
+  local free_mb
+  free_mb="$(df -Pm "$pkgroot" 2>/dev/null | awk 'NR==2 {print $4+0}')"
+  if [ -n "$free_mb" ] && [ "$free_mb" -lt "$SB_MIN_FREE_MB" ]; then
+    log "WARN: server CLI: only ${free_mb}MB free at ${pkgroot} (<${SB_MIN_FREE_MB}MB) — skipping npm upgrade to avoid a partial install"
+    echo "sidebutton CLI: upgrade skipped (low disk ${free_mb}MB)"
+    return 0
+  fi
+
+  local before after
+  before="$(sidebutton --version 2>/dev/null || echo none)"
+  npm install -g sidebutton@latest >/dev/null 2>&1 || log "WARN: server CLI: npm install returned non-zero"
+
+  # (2) verify + repair the ENOSPC-class corruption (stranded bin / half-extracted deps).
+  if ! _sb_server_cli_healthy; then
+    log "server CLI: install unhealthy after upgrade — repairing (relink)"
+    if ! _sb_relink_server_bin "$pkgroot" "$bindir"; then
+      log "server CLI: relink insufficient — one clean reinstall (disk known-OK)"
+      npm install -g sidebutton@latest >/dev/null 2>&1 || true
+    fi
+    if ! _sb_server_cli_healthy; then
+      log "WARN: server CLI: STILL broken after repair — leaving sidebutton.service untouched (manual fix / reprovision needed)"
+      echo "sidebutton CLI: BROKEN after repair — not restarting"
+      return 1
+    fi
+    log "server CLI: repaired"
+  fi
+
+  after="$(sidebutton --version 2>/dev/null || echo none)"
+  if [ "$before" != "$after" ]; then
+    systemctl restart sidebutton 2>/dev/null || log "WARN: server CLI: restart failed"
+    local i up=0
+    for i in $(seq 1 15); do
+      curl -sf --max-time 2 http://localhost:9876/health >/dev/null 2>&1 && { up=1; break; }
+      sleep 1
+    done
+    if [ "$up" = 1 ]; then
+      log "server CLI: ${before} -> ${after} (restarted, :9876 up)"
+    else
+      log "WARN: server CLI: ${before} -> ${after} (restarted, :9876 NOT up within 15s)"
+    fi
+    echo "sidebutton CLI: ${before} -> ${after}"
+  else
+    log "server CLI: already at ${after} (no change)"
+    echo "sidebutton CLI: ${after} current"
+  fi
+  return 0
+}
+
 # sb_refresh_knowledge_packs [pack] — reconcile the universal "agents" catalog ops
 # pack (the default ops workflows: agent_pull_repos, agent_se_*, agent_qa_*, …) so
 # workflows added or changed after this agent was provisioned actually reach it.

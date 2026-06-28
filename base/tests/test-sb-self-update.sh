@@ -173,6 +173,106 @@ mkdir -p "$AGENT_HOME/.sidebutton/skills/agents"  # agent HAS the pack (refresh-
   && ok "pack refresh: pack not installed => no fresh-install (respects provisioning)" \
   || bad "pack refresh not-installed gate failed"
 
+# ── 4d. sb_refresh_server_cli: latch fix + disk preflight + verify/repair ─────
+# Exercises the hardened CLI upgrade with stubbed npm/sidebutton/systemctl/df/curl
+# (no root, no network). Guards the three defects behind the ENOSPC brick (RCA
+# 2026-06-28): the server-variant gate is the UNIT (not `command -v sidebutton`), a
+# low disk skips the in-place install, and a stranded bin link is repaired by relink.
+SRV="$TMP/srv"
+mkdir -p "$SRV/stub" "$SRV/prefix/bin" "$SRV/prefix/lib/node_modules/sidebutton/bin"
+cat > "$SRV/prefix/lib/node_modules/sidebutton/package.json" <<'JSON'
+{ "name": "sidebutton", "version": "9.9.9", "bin": { "sidebutton": "./bin/sidebutton.js" } }
+JSON
+cat > "$SRV/prefix/lib/node_modules/sidebutton/bin/sidebutton.js" <<'JS'
+#!/usr/bin/env node
+const fs = require('fs');
+let v = '9.9.9';
+try { v = fs.readFileSync(process.env.SB_T_VERFILE, 'utf8').trim(); } catch (e) {}
+console.log(v);
+JS
+chmod +x "$SRV/prefix/lib/node_modules/sidebutton/bin/sidebutton.js"
+
+cat > "$SRV/stub/systemctl" <<'ST'
+#!/usr/bin/env bash
+case "$*" in
+  "list-unit-files sidebutton.service --no-legend")
+     [ "${SB_T_HAVE_UNIT:-1}" = 1 ] && echo "sidebutton.service enabled enabled" || true ;;
+  "restart sidebutton") echo restart >> "${SB_T_CALLS:-/dev/null}" ;;
+esac
+ST
+cat > "$SRV/stub/npm" <<'ST'
+#!/usr/bin/env bash
+case "$*" in
+  "prefix -g") printf '%s\n' "$SB_T_PREFIX" ;;
+  "install -g sidebutton@latest")
+     echo npm-install >> "${SB_T_CALLS:-/dev/null}"
+     [ "${SB_T_NPM_BREAKS:-0}" = 1 ] && rm -f "$SB_T_PREFIX/bin/sidebutton"
+     [ "${SB_T_BUMP:-0}" = 1 ] && echo 9.9.10 > "$SB_T_VERFILE" ;;
+esac
+exit 0
+ST
+cat > "$SRV/stub/df" <<'ST'
+#!/usr/bin/env bash
+echo "Filesystem 1M-blocks Used Avail Cap Mounted"
+echo "/dev/root 38000 1000 ${SB_T_FREE_MB:-30000} 5% /"
+ST
+cat > "$SRV/stub/curl" <<'ST'
+#!/usr/bin/env bash
+exit 0
+ST
+chmod +x "$SRV"/stub/*
+
+VERFILE="$SRV/ver"
+srv_path="$SRV/stub:$SRV/prefix/bin:$PATH"
+relink_initial() { ln -sfn ../lib/node_modules/sidebutton/bin/sidebutton.js "$SRV/prefix/bin/sidebutton"; }
+
+# A: serverless (no unit) => skip, npm install never invoked (latch fix: gate=unit).
+relink_initial; echo 9.9.9 > "$VERFILE"
+( export PATH="$srv_path" SB_T_PREFIX="$SRV/prefix" SB_T_VERFILE="$VERFILE" \
+         SB_T_HAVE_UNIT=0 SB_T_CALLS="$TMP/srvA"
+  out="$(sb_refresh_server_cli 2>&1)"; echo "$out" | grep -qi serverless ) \
+  && [ ! -e "$TMP/srvA" ] \
+  && ok "server CLI: no sidebutton.service => skipped, no npm install (unit-gated, not command -v)" \
+  || bad "server CLI serverless gate failed"
+
+# B: server box but low disk => skip the in-place install entirely (corruption guard).
+relink_initial; echo 9.9.9 > "$VERFILE"
+( export PATH="$srv_path" SB_T_PREFIX="$SRV/prefix" SB_T_VERFILE="$VERFILE" \
+         SB_T_HAVE_UNIT=1 SB_T_FREE_MB=200 SB_T_CALLS="$TMP/srvB"
+  out="$(sb_refresh_server_cli 2>&1)"; echo "$out" | grep -qi 'low disk' ) \
+  && [ ! -e "$TMP/srvB" ] \
+  && ok "server CLI: low disk => npm upgrade skipped (no partial install)" \
+  || bad "server CLI disk-preflight failed"
+
+# C: healthy install, version unchanged => installs but does NOT restart.
+relink_initial; echo 9.9.9 > "$VERFILE"
+( export PATH="$srv_path" SB_T_PREFIX="$SRV/prefix" SB_T_VERFILE="$VERFILE" \
+         SB_T_HAVE_UNIT=1 SB_T_FREE_MB=30000 SB_T_CALLS="$TMP/srvC"
+  out="$(sb_refresh_server_cli 2>&1)"; echo "$out" | grep -qi current ) \
+  && grep -qx npm-install "$TMP/srvC" && ! grep -qx restart "$TMP/srvC" \
+  && ok "server CLI: same version => no needless restart" \
+  || bad "server CLI no-change path failed"
+
+# D: healthy install, version changes => restart issued.
+relink_initial; echo 9.9.9 > "$VERFILE"
+( export PATH="$srv_path" SB_T_PREFIX="$SRV/prefix" SB_T_VERFILE="$VERFILE" \
+         SB_T_HAVE_UNIT=1 SB_T_FREE_MB=30000 SB_T_BUMP=1 SB_T_CALLS="$TMP/srvD"
+  sb_refresh_server_cli >/dev/null 2>&1 )
+grep -qx restart "$TMP/srvD" 2>/dev/null \
+  && ok "server CLI: healthy version change => restart" \
+  || bad "server CLI restart-on-change failed"
+
+# E: npm strands the bin link (the ENOSPC brick) => relink repairs it, rc 0, no
+# "BROKEN", and the bin link is present again (self-heal, no manual fix).
+relink_initial; echo 9.9.9 > "$VERFILE"
+( export PATH="$srv_path" SB_T_PREFIX="$SRV/prefix" SB_T_VERFILE="$VERFILE" \
+         SB_T_HAVE_UNIT=1 SB_T_FREE_MB=30000 SB_T_NPM_BREAKS=1 SB_T_CALLS="$TMP/srvE"
+  out="$(sb_refresh_server_cli 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && ! echo "$out" | grep -qi broken ) \
+  && [ -e "$SRV/prefix/bin/sidebutton" ] \
+  && ok "server CLI: stranded bin link => repaired by relink (self-heal)" \
+  || bad "server CLI repair path failed"
+
 # ── 5. Claude hooks re-merge preserves other keys, replaces .hooks ───────────
 cat > "$AGENT_HOME/.claude/settings.json" <<'JSON'
 { "mcpServers": {"sidebutton": {"command": "sidebutton"}},
