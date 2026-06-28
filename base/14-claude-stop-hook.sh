@@ -581,6 +581,47 @@ capture_git_prs() {
   printf '%s\n' "${elems[@]}" | jq -s '.' 2>/dev/null || echo '[]'
 }
 
+# --- Effective-route detection (SCRUM-1471 / T9) ------------------------------
+# Echo a compact JSON triple {agentic_app, provider, effective_model} naming which agentic
+# app + backend actually served this session, so a forked experiment branch (Jobs Experiments,
+# SCRUM-1443/1473) can be labelled by route. Native Claude Code => claude-code / anthropic /
+# <reported model>. Claude Code Router (CCR) re-points ANTHROPIC_BASE_URL at a local proxy
+# (127.0.0.1:3456) and selects a real backend in ~/.claude-code-router/config.json — `model`
+# (the transcript id) then stays an Anthropic id while the true route lives in that config.
+# The LIVE ANTHROPIC_BASE_URL is authoritative (an installed-but-unrouted CCR still hits
+# Anthropic), cross-checked by the config's existence. Only non-secret keys are read
+# (.Router.default / provider name / model id) — NEVER api_key or env interpolation. Best-effort:
+# any miss => native fallback. Pure + side-effect-free so base/tests can source and call it.
+# $1 = reported (transcript) model id.
+detect_effective_route() {
+  local reported="${1:-}"
+  local app="claude-code" provider="anthropic" emodel="$reported"
+  local cfg="${HOME}/.claude-code-router/config.json"
+  case "${ANTHROPIC_BASE_URL:-}" in
+    *127.0.0.1:3456*|*localhost:3456*)
+      if [ -f "$cfg" ]; then
+        app="claude-code-router"
+        provider=""          # resolved from config below; '' = CCR active but backend unknown
+        local def="" prov="" mdl=""
+        def=$(jq -r '.Router.default // ""' "$cfg" 2>/dev/null || echo "")
+        if printf '%s' "$def" | grep -q ','; then
+          # ".Router.default" is "provider,model" — strip whitespace each side may carry
+          prov=$(printf '%s' "${def%%,*}" | tr -d '[:space:]')
+          mdl=$(printf '%s' "${def#*,}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+        else
+          prov=$(jq -r '(.Providers[0].name // .Providers[0].provider) // ""' "$cfg" 2>/dev/null || echo "")
+          mdl=$(jq -r '.Providers[0].models[0] // ""' "$cfg" 2>/dev/null || echo "")
+        fi
+        if [ -n "$prov" ]; then provider="$prov"; fi
+        if [ -n "$mdl" ]; then emodel="$mdl"; fi
+      fi
+      ;;
+  esac
+  jq -nc --arg a "$app" --arg p "$provider" --arg m "$emodel" \
+    '{agentic_app:$a, provider:$p, effective_model:$m}' 2>/dev/null \
+    || printf '{"agentic_app":"%s","provider":"%s","effective_model":"%s"}\n' "$app" "$provider" "$emodel"
+}
+
 HOOK_INPUT=$(cat)
 [ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
 AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
@@ -652,12 +693,21 @@ if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
 fi
 DURATION_MS=$(echo "$HOOK_INPUT" | jq -r '.duration_ms // 0')
 TOTAL_COST=$(echo "$HOOK_INPUT" | jq -r '.total_cost_usd // .cost_usd // 0')
+# Effective route (SCRUM-1471 / T9): tag this session's usage with the agentic app + provider +
+# effective model that actually served it. Carried INSIDE `usage` alongside `model`; the portal
+# persists it to job_steps and rolls it up to jobs (most-recent non-empty). Best-effort: a broken
+# detection degrades to '{}' and the portal keeps the empty defaults. NOT added to the step-complete
+# POST below — that carries no `usage`, so a partial object there would clobber model/tokens.
+REPORTED_MODEL=$(printf '%s' "$USAGE" | jq -r '.model // ""' 2>/dev/null || echo "")
+ROUTE_JSON=$(detect_effective_route "$REPORTED_MODEL" 2>/dev/null || echo '{}')
+case "$ROUTE_JSON" in ''|null) ROUTE_JSON='{}' ;; esac
+log "effective route: $ROUTE_JSON (base=${ANTHROPIC_BASE_URL:-unset})"
 PAYLOAD=$(jq -n --argjson job_id "${JOB_ID:-null}" --argjson step "${STEP_INDEX:-null}" \
   --arg sid "$SESSION_ID" --argjson u "$USAGE" \
   --argjson dur "$DURATION_MS" --arg cost "$TOTAL_COST" \
-  --argjson final "$IS_FINAL" \
+  --argjson final "$IS_FINAL" --argjson route "$ROUTE_JSON" \
   '{job_id:$job_id, step_index:$step, session_id:$sid, final:$final,
-    usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)})}')
+    usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)} + $route)}')
 curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
