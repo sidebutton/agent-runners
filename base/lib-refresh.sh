@@ -171,6 +171,18 @@ sb_refresh_server_cli() {
     return 0
   fi
 
+  # The server now defaults to a loopback bind and refuses a wide bind without a
+  # token (SCRUM-1490). Backfill SIDEBUTTON_HOST=0.0.0.0 into .agent-env BEFORE
+  # the (possibly newly upgraded) server restarts below, so existing fleet agents
+  # — provisioned before this knob existed — keep binding the VM's private IP for
+  # the relay/Temporal path instead of silently dropping to loopback. Idempotent;
+  # append preserves the file's agent ownership + 0600 mode.
+  local _env="${AGENT_HOME:-/home/agent}/.agent-env"
+  if [ -f "$_env" ] && ! grep -q '^SIDEBUTTON_HOST=' "$_env"; then
+    printf 'SIDEBUTTON_HOST=0.0.0.0\n' >> "$_env"
+    log "server CLI: backfilled SIDEBUTTON_HOST=0.0.0.0 into .agent-env (loopback-default upgrade compat)"
+  fi
+
   local prefix pkgroot bindir
   prefix="$(npm prefix -g 2>/dev/null)"; [ -n "$prefix" ] || prefix="/usr"
   pkgroot="$prefix/lib/node_modules"

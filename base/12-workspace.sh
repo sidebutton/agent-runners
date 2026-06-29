@@ -23,6 +23,14 @@ PORTAL_URL="${PORTAL_URL}"
 SIDEBUTTON_AGENT_TOKEN="${AGENT_TOKEN}"
 SIDEBUTTON_AGENT_NAME="${AGENT_NAME}"
 
+# Bind the API on all interfaces so the relay/Temporal worker can reach it at
+# the VM's private IP (firewall locks 9876 to the relay — see cloud/aws-sg.ts).
+# The server now defaults to loopback and refuses a wide bind without a token,
+# so this explicit opt-in pairs with the provisioned SIDEBUTTON_AGENT_TOKEN; if
+# the token isn't written yet the server fails safe rather than running tokenless
+# on 0.0.0.0 (SCRUM-1490).
+SIDEBUTTON_HOST=0.0.0.0
+
 # Required: Anthropic API key for Claude
 ANTHROPIC_API_KEY=
 
@@ -56,6 +64,13 @@ JIRA_PROJECT_KEY=SCRUM
 AGENT_DNS=
 EOF
   chmod 600 "$ENV_FILE"
+fi
+
+# Backfill SIDEBUTTON_HOST for agents provisioned before this knob existed, so a
+# server upgrade that now defaults to loopback keeps binding wide on the existing
+# fleet (idempotent — new installs already have it from the template above).
+if [ -f "$ENV_FILE" ] && ! grep -q '^SIDEBUTTON_HOST=' "$ENV_FILE"; then
+  printf 'SIDEBUTTON_HOST=0.0.0.0\n' >> "$ENV_FILE"
 fi
 
 if ! grep -q 'agent-env' "$AGENT_HOME/.bashrc" 2>/dev/null; then
