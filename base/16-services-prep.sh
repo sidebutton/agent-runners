@@ -102,6 +102,11 @@ if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
   rm -f /etc/systemd/system/sidebutton.service
   log "sidebutton.service unit not written (SKIP_SIDEBUTTON_SERVER=1)"
 else
+  # `serve` defaults --host to 127.0.0.1 as of sidebutton 1.3.0 (a wide bind now
+  # requires SIDEBUTTON_AGENT_TOKEN — present in ~/.agent-env by base/18, before this
+  # unit's first start in base/19b). Cloud agents MUST bind 0.0.0.0 so the relay can
+  # reach :9876 (job dispatch, live-desktop, health probe); without --host the whole
+  # fleet goes "offline" after self-updating to 1.3.x even though the server is healthy.
   cat > /etc/systemd/system/sidebutton.service <<'EOF'
 [Unit]
 Description=SideButton MCP Server
@@ -114,7 +119,7 @@ User=agent
 WorkingDirectory=/home/agent/workspace
 EnvironmentFile=/home/agent/.agent-env
 Environment=DISPLAY=:10
-ExecStart=/usr/bin/sidebutton serve
+ExecStart=/usr/bin/sidebutton serve --host 0.0.0.0
 Restart=always
 RestartSec=5
 
