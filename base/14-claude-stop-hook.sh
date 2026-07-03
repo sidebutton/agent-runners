@@ -589,9 +589,12 @@ capture_git_prs() {
 # (127.0.0.1:3456) and selects a real backend in ~/.claude-code-router/config.json — `model`
 # (the transcript id) then stays an Anthropic id while the true route lives in that config.
 # The LIVE ANTHROPIC_BASE_URL is authoritative (an installed-but-unrouted CCR still hits
-# Anthropic), cross-checked by the config's existence. Only non-secret keys are read
-# (.Router.default / provider name / model id) — NEVER api_key or env interpolation. Best-effort:
-# any miss => native fallback. Pure + side-effect-free so base/tests can source and call it.
+# Anthropic), cross-checked by the config's existence. Native cloud-Claude (AAP-N, SCRUM-1611:
+# Bedrock/Vertex/Foundry) instead speaks the Anthropic wire directly via CLAUDE_CODE_USE_* with NO
+# proxy => provider = bedrock|vertex|foundry, effective_model = ANTHROPIC_MODEL || reported. Only
+# non-secret keys are read (.Router.default / provider name / model id / CLAUDE_CODE_USE_* flags) —
+# NEVER api_key, AWS/GCP/Azure creds, or env interpolation. Best-effort: any miss => native
+# fallback. Pure + side-effect-free so base/tests can source and call it.
 # $1 = reported (transcript) model id.
 detect_effective_route() {
   local reported="${1:-}"
@@ -614,6 +617,22 @@ detect_effective_route() {
         fi
         if [ -n "$prov" ]; then provider="$prov"; fi
         if [ -n "$mdl" ]; then emodel="$mdl"; fi
+      fi
+      ;;
+    *)
+      # Native cloud-Claude (AAP-N, SCRUM-1611): Bedrock/Vertex/Foundry speak the Anthropic wire
+      # DIRECTLY (no proxy) — chosen by CLAUDE_CODE_USE_*, so ANTHROPIC_BASE_URL is unset (or a plain
+      # gateway) and the run would otherwise mislabel as bare `anthropic`. Tag the real cloud backend
+      # so cost is provider-metered, not mis-attributed. A valid native-cloud app sets exactly one
+      # USE_* flag; ANTHROPIC_MODEL (the operator-pinned inference-profile / model id) is the
+      # authoritative route id, else the transcript model. Non-secret env only (flags + model id) —
+      # never AWS/GCP/Azure credentials.
+      if [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ]; then
+        provider="bedrock"; emodel="${ANTHROPIC_MODEL:-$reported}"
+      elif [ "${CLAUDE_CODE_USE_VERTEX:-}" = "1" ]; then
+        provider="vertex"; emodel="${ANTHROPIC_MODEL:-$reported}"
+      elif [ "${CLAUDE_CODE_USE_FOUNDRY:-}" = "1" ]; then
+        provider="foundry"; emodel="${ANTHROPIC_MODEL:-$reported}"
       fi
       ;;
   esac
