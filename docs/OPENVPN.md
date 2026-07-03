@@ -124,8 +124,25 @@ sudo systemctl disable --now openvpn-client@gostudent && sudo rm /etc/openvpn/cl
 - It is never stored in the portal DB or cloud-init in this MVP.
 - One profile per agent (the AUTOLOGIN cert is user-locked).
 
-## Future (automated delivery)
+## Automated delivery — default-path consumption (SCRUM-1599)
 
-Per-account encrypted profile storage + a `sb_token`-authed, component-gated
-`GET /api/agents/vpn-profile`, fetched by a `19e-openvpn` step that calls the same
-`sb-vpn-connect`. Tracked separately; not required for the MVP.
+The component now **auto-consumes** any `*.ovpn` at its default path
+**`/etc/sidebutton/config/openvpn/`**, declared in the runner catalog
+(`components.json` → `config_files[]`, id `ovpn-profile`). A profile that lands there —
+dropped over SSH, or pushed by the portal once that half ships — is applied by
+`sb-vpn-connect` at boot and on change; removing it disables `openvpn-client@` and tears
+the tunnel down. Manual placement and portal delivery converge on identical behaviour,
+and `sudo sb-vpn-connect …` stays break-glass.
+
+- Base step `19f` installs a systemd path-unit (`sb-config-watch-openvpn.path`) that
+  watches the dir and triggers a per-slug reconcile (`sb-config-reconcile openvpn`); each
+  `<name>.ovpn` → `openvpn-client@<name>` (the `remove` form added to `sb-vpn-connect`
+  handles teardown).
+- The reconcile is **sha-gated** (a routine `sb-self-update` never bounces a live tunnel)
+  and only tears down clients **it** brought up.
+- Portal→agent writes go through one narrow-sudoers wrapper, `sb-config-place`, which
+  installs the file `root:600` and confines every write to this declared path.
+
+Portal-side storage/UI (encrypted per-account/workspace store + Files-hub dropzone) is
+tracked separately (epic SCRUM-1597, tickets A2–A5); the agent side above is complete and
+reaches the existing fleet via `sb-self-update` (`refresh-manifest.txt`).

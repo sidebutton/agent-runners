@@ -39,9 +39,9 @@ not dispatchable** — it's a manual / RDP agent.
 | `dotnet9` | toolchain | — | .NET 9 SDK |
 | `docker` | toolchain | — | Docker engine (+ agent in `docker` group) |
 | `postgres-client` | toolchain | — | `psql` |
-| `openvpn` | toolchain | — | OpenVPN client + `sb-vpn-connect` helper (.ovpn applied manually post-provision — see [`docs/OPENVPN.md`](./docs/OPENVPN.md)) |
-| `wireguard` | toolchain | — | WireGuard client + `sb-wg-connect` helper (.conf applied manually post-provision; split-tunnel — see [`docs/WIREGUARD.md`](./docs/WIREGUARD.md)) |
-| `rdp-client` | toolchain | — | FreeRDP (`xfreerdp`) + `sb-rdp-connect` helper; renders an outbound RDP session as a fixed-geometry window on `:10` for computer-use (creds applied post-provision — see [`docs/RDP.md`](./docs/RDP.md)) |
+| `openvpn` | toolchain | — | OpenVPN client + `sb-vpn-connect` helper; auto-consumes `.ovpn` at `/etc/sidebutton/config/openvpn/` (see [`docs/OPENVPN.md`](./docs/OPENVPN.md)) |
+| `wireguard` | toolchain | — | WireGuard client + `sb-wg-connect` helper (split-tunnel); auto-consumes `.conf` at `/etc/sidebutton/config/wireguard/` (see [`docs/WIREGUARD.md`](./docs/WIREGUARD.md)) |
+| `rdp-client` | toolchain | — | FreeRDP (`xfreerdp`) + `sb-rdp-connect` helper; renders an outbound RDP session as a fixed-geometry window on `:10` for computer-use; auto-consumes `/etc/sidebutton/rdp.env` (see [`docs/RDP.md`](./docs/RDP.md)) |
 
 `base/components.sh` resolves `AGENT_COMPONENTS` (comma- or space-separated) into
 the `has_component` helper + the `SKIP_*` / `INSTALL_*` gates the step scripts
@@ -53,6 +53,17 @@ phases — e.g. the extension's managed-policy + handshake).
 `components.json` is validated against
 [`components.schema.json`](./components.schema.json), enforced by
 [`base/tests/test-components-schema.sh`](./base/tests) (see **Testing / CI** below).
+
+A component may also declare **`config_files[]`** — runtime config files it consumes
+from a declared **`target_path`** (e.g. WireGuard `.conf` → `/etc/sidebutton/config/wireguard/`).
+Base step `19f-component-config.sh` (refresh-safe; detects each config-declaring component
+by its installed helper) installs a per-slug systemd path-unit watcher that applies files
+landing at that path — at boot and on change — and tears down what is removed, so manual
+SSH placement and (future) portal push converge on identical behaviour. The one privileged
+write hop is `sb-config-place` (narrow NOPASSWD sudoers, same pattern as `sb-self-update`),
+which confines every write to the installed component's declared `target_path` (`root:600`).
+See [`docs/WIREGUARD.md`](./docs/WIREGUARD.md) / [`OPENVPN.md`](./docs/OPENVPN.md) /
+[`RDP.md`](./docs/RDP.md).
 
 ### Plugins (`plugins.json`) — separate, role-driven
 
@@ -242,6 +253,7 @@ Component-model coverage (the catalog ↔ schema ↔ on-disk ↔ `run.sh` wiring
 | `test-component-resolution.sh` | every `base/components/<dir>` is a catalog slug **and** wired into `run.sh`; every non-base-installed slug has a dir; the base-installed allowlist (`chrome`/`sidebutton-server`/`knowledge-packs`) is justified by its `06`/`08`/`13` step; all `*.sh` parse |
 | `test-default-install-parity.sh` | default / empty / back-compat + every profile resolves to a byte-identical gate vector vs a committed snapshot (re-bless: `BLESS=1 bash …`) |
 | `test-claude-code-*` / `test-claude-code-router-component.sh` | the claude-code + CCR components' catalog shape, install dir, and `run.sh` wiring |
+| `test-component-config.sh` | `config_files[]` schema + the 3 declarations; `19f` refresh-safety (helper-signal detection, `run.sh`/manifest/fingerprint wiring); `sb-config-place` traversal/confinement rejection; `sb-config-reconcile` apply/sha-gate/teardown + service dispatch |
 
 CI (`.github/workflows/tests.yml`) runs `run-all.sh` on every push to `main` + PR
 (`ubuntu-latest` + `jq`).

@@ -139,5 +139,30 @@ none "component slugs are unique" \
 none "every requires[] target resolves to a catalog slug" \
   '[.components[].slug] as $s | .components[] | .slug as $sl | (.requires[]? as $r | select(($s|index($r))|not) | "\($sl) requires unknown \($r)")'
 
+# ── 17. config_files[] sub-schema (SCRUM-1599) ───────────────────────────────
+# The schema references config_files[] -> $defs/config_file; validate the catalog's
+# entries the same schema-driven way (required keys, additionalProperties, enum).
+jq -e '.["$defs"].config_file.additionalProperties==false' "$SCHEMA" >/dev/null 2>&1 \
+  && ok "schema pins config_file.additionalProperties:false (validator assumption holds)" \
+  || bad "schema no longer pins config_file.additionalProperties:false — update this validator"
+CF_REQ="$(jq -c '.["$defs"].config_file.required' "$SCHEMA")"
+CF_ALLOWED="$(jq -c '[.["$defs"].config_file.properties|keys[]]' "$SCHEMA")"
+SD_ENUM="$(jq -c '.["$defs"].config_file.properties.scope_default.enum' "$SCHEMA")"
+none "every config_files[] entry has the required keys $(printf '%s' "$CF_REQ" | jq -r 'join(",")')" \
+  --argjson req "$CF_REQ" \
+  '.components[] | .slug as $s | (.config_files // [])[] | . as $c | ($req-($c|keys)) as $m | select($m|length>0) | "\($s): config_file missing \($m|join(","))"'
+none "no unknown keys on any config_files[] entry (additionalProperties:false)" \
+  --argjson ok "$CF_ALLOWED" \
+  '.components[] | .slug as $s | (.config_files // [])[] | . as $c | (($c|keys)-$ok) as $x | select($x|length>0) | "\($s): config_file unknown \($x|join(","))"'
+none "every config_file.scope_default in $SD_ENUM (when present)" \
+  --argjson e "$SD_ENUM" \
+  '.components[] | .slug as $s | (.config_files // [])[] | select(has("scope_default")) | select((.scope_default) as $v | ($e|index($v))|not) | "\($s): scope_default=\(.scope_default)"'
+none "every config_file.target_path is a non-empty string" \
+  '.components[] | .slug as $s | (.config_files // [])[] | select((.target_path|type)!="string" or (.target_path=="")) | "\($s): bad target_path"'
+none "every config_file.id matches ^[a-z0-9][a-z0-9-]*$ + is unique per component" \
+  '.components[] | .slug as $s | (.config_files // []) as $cf |
+     (($cf[]|select((.id|type)!="string" or (.id|test("^[a-z0-9][a-z0-9-]*$")|not))|"\($s): bad config id \(.id|tostring)"),
+      ([$cf[].id]|group_by(.)[]|select(length>1)|"\($s): duplicate config id \(.[0])"))'
+
 if [ "$fail" -ne 0 ]; then echo "TEST FAILED"; exit 1; fi
 echo "All checks passed."

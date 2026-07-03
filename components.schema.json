@@ -52,6 +52,48 @@
             "versionKey": { "type": "string", "enum": ["sidebutton", "claude_code"] }
           },
           "additionalProperties": false
+        },
+        "config_files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/config_file" },
+          "description": "Runtime config files this component consumes from a declared default path (SCRUM-1597). Each entry pins a target_path the component auto-applies from at boot and via a systemd path-unit watcher; delivery (manual SSH placement or, later, portal push) validates against this same declaration. Absence ⇒ the component needs no operator-supplied config file."
+        }
+      },
+      "additionalProperties": false
+    },
+    "config_file": {
+      "type": "object",
+      "description": "One config-file slot a component declares + auto-consumes from its target_path. The component's contract: delivery is validated against target_path on the agent (no arbitrary paths).",
+      "required": ["id", "target_path"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Stable id for this slot within the component (persisted on the delivery row + apply state). Unique per component."
+        },
+        "label": { "type": "string", "description": "Files-hub / wizard dropzone label." },
+        "description": { "type": "string", "description": "One-line helper text: what the file is and how it is applied." },
+        "accept": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Accepted filename suffixes (e.g. [\".conf\"]). A client-side hint AND a defence-in-depth check in sb-config-place."
+        },
+        "secret": {
+          "type": "boolean",
+          "description": "Payload is a secret (encrypted at rest; never returned to the client). VPN/RDP profiles carry private keys ⇒ true."
+        },
+        "scope_default": {
+          "type": "string",
+          "enum": ["workspace", "agent"],
+          "description": "Default delivery scope in the Files hub (D1). Agent-scoped rows override workspace-scoped rows for the same file."
+        },
+        "target_path": {
+          "type": "string",
+          "description": "Path the component consumes from on the agent. A trailing '/' (or multiple:true) is a directory that accepts several files; otherwise a single pinned file. The uniform convention is /etc/sidebutton/config/<slug>/; components may keep an existing path for back-compat."
+        },
+        "multiple": {
+          "type": "boolean",
+          "description": "target_path accepts multiple files (directory) vs a single file."
         }
       },
       "additionalProperties": false
