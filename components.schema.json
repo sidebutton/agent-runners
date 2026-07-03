@@ -52,6 +52,48 @@
             "versionKey": { "type": "string", "enum": ["sidebutton", "claude_code"] }
           },
           "additionalProperties": false
+        },
+        "config_files": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/config_file" },
+          "description": "Runtime config files this component consumes from a default target path on the agent (e.g. a WireGuard .conf). The portal surfaces these as drop-zones; the agent auto-applies whatever lands at target_path (boot-time + a systemd path-unit watcher). Absent ⇒ the component needs no operator-supplied config."
+        }
+      },
+      "additionalProperties": false
+    },
+    "config_file": {
+      "type": "object",
+      "description": "A single config-file need declared by a component. The agent is pre-configured to consume files from target_path whenever they exist there; delivery (portal or manual SSH) validates against this declaration.",
+      "required": ["id", "target_path"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Stable id for this config within the component (e.g. 'wg-profile'). Unique per component."
+        },
+        "label": { "type": "string", "description": "Human label for the portal drop-zone." },
+        "description": { "type": "string", "description": "One-line helper text explaining what the file is." },
+        "accept": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Accepted filename suffixes, incl. the dot (e.g. ['.conf']). Empty/absent ⇒ any."
+        },
+        "secret": {
+          "type": "boolean",
+          "description": "true ⇒ the file carries a secret (private key/credentials); the store encrypts it and never returns it to the client after save."
+        },
+        "scope_default": {
+          "type": "string",
+          "enum": ["workspace", "agent"],
+          "description": "Default delivery scope in the portal Files hub. 'workspace' shares one file across the workspace's agents; 'agent' pins it per-agent."
+        },
+        "target_path": {
+          "type": "string",
+          "description": "Absolute path the component consumes from. A trailing '/' marks a DIRECTORY that accepts multiple named files; no trailing slash marks a single pinned FILE (e.g. '/etc/sidebutton/rdp.env')."
+        },
+        "multiple": {
+          "type": "boolean",
+          "description": "true ⇒ target_path is a directory holding several files (e.g. named tunnels); false ⇒ a single file."
         }
       },
       "additionalProperties": false

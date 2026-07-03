@@ -40,17 +40,24 @@ sb_refresh_manifest_files() {
 
 # sb_base_artifacts_fingerprint <base_dir> — stable sha256 over everything that
 # determines what gets deployed: the manifest steps, the hooks asset, the wrapper
-# asset, this lib, and the manifest itself. Same ref + unchanged tree => same
-# fingerprint on every box, so the change-gate is deterministic. A change to ANY
-# of these (incl. the wrapper or a newly listed step) flips the fingerprint and
-# triggers a refresh.
+# asset, this lib, the manifest itself, and the step-installed assets whose CONTENT a
+# manifest step copies verbatim (they are not steps, so a content-only edit would
+# otherwise not flip the fingerprint). Same ref + unchanged tree => same fingerprint on
+# every box, so the change-gate is deterministic. A change to ANY of these (incl. the
+# wrapper, a newly listed step, or the sb-config-place primitive) flips the fingerprint
+# and triggers a refresh.
 sb_base_artifacts_fingerprint() {
   local base="$1" f
   {
     while IFS= read -r f; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done < <(sb_refresh_manifest_files "$base")
-    for f in assets/claude-hooks.json assets/sb-self-update.sh lib-refresh.sh refresh-manifest.txt; do
+    # Bare assets + the config-delivery assets 19f installs (sb-config-place is a
+    # privileged primitive — a hardening fix to it MUST reach the fleet even if 19f
+    # itself is unchanged; SCRUM-1599).
+    for f in assets/claude-hooks.json assets/sb-self-update.sh lib-refresh.sh refresh-manifest.txt \
+             assets/sb-config-place.sh assets/sb-config-reconcile.sh \
+             "assets/sb-config-apply@.service" "assets/sb-config-watch@.path"; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done
   } 2>/dev/null | sha256sum | awk '{print $1}'

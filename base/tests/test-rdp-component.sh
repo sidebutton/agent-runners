@@ -46,6 +46,14 @@ jq -r '.components[].slug' "$CATALOG" | grep -qE '^rdp-client$' \
 [ "$(jq -r "$ENTRY | .chip.processKey // \"none\"" "$CATALOG")" = "none" ] \
   && ok "chip has no processKey (live:false static chip)" || bad "chip.processKey set unexpectedly"
 
+# ── config_files contract (SCRUM-1599): rdp-env single-file target ───────────
+[ "$(jq -r "$ENTRY | .config_files[0].id" "$CATALOG")" = "rdp-env" ] \
+  && ok "declares config_files[0].id = rdp-env" || bad "config_files id != rdp-env"
+[ "$(jq -r "$ENTRY | .config_files[0].target_path" "$CATALOG")" = "/etc/sidebutton/rdp.env" ] \
+  && ok "config target_path = /etc/sidebutton/rdp.env" || bad "config target_path wrong"
+[ "$(jq -r "$ENTRY | .config_files[0].multiple" "$CATALOG")" = "false" ] \
+  && ok "config multiple = false (single file)" || bad "config multiple != false"
+
 # ── AC1: wiring — run.sh toolchain loop sources it (else it silently never installs)
 grep -Eq 'for _tc in .*\brdp-client\b' "$RUN" \
   && ok "run.sh toolchain loop includes rdp-client" \

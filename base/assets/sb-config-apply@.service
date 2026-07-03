@@ -1,0 +1,12 @@
+[Unit]
+# Templated per component slug (%i). Applies whatever config files are present at the
+# component's declared default path — triggered by sb-config-watch@%i.path on change /
+# at boot, and run once by base/19f. Idempotent + SHA-gated (see sb-config-reconcile).
+Description=Apply SideButton component config for %i
+Documentation=https://github.com/sidebutton/agent-runners
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sb-config-reconcile %i

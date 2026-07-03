@@ -139,5 +139,31 @@ none "component slugs are unique" \
 none "every requires[] target resolves to a catalog slug" \
   '[.components[].slug] as $s | .components[] | .slug as $sl | (.requires[]? as $r | select(($s|index($r))|not) | "\($sl) requires unknown \($r)")'
 
+# ── 17-19. config_files[] sub-schema (SCRUM-1599) ────────────────────────────
+# Constraints read from the schema so these track it (mirrors sections 5-14). A
+# component may omit config_files; when present, each entry validates against
+# $defs.config_file.
+jq -e '.["$defs"].config_file.additionalProperties==false' "$SCHEMA" >/dev/null 2>&1 \
+  && ok "schema pins config_file.additionalProperties:false (validator assumption holds)" \
+  || bad "schema no longer pins config_file.additionalProperties:false — update this validator"
+CF_REQ="$(jq -c '.["$defs"].config_file.required' "$SCHEMA")"
+CF_ALLOWED="$(jq -c '[.["$defs"].config_file.properties|keys[]]' "$SCHEMA")"
+SCOPE_ENUM="$(jq -c '.["$defs"].config_file.properties.scope_default.enum' "$SCHEMA")"
+
+# 17. each config_files[] entry carries the schema-required keys.
+none "every config_files[] entry has the required keys $(printf '%s' "$CF_REQ" | jq -r 'join(",")')" \
+  --argjson req "$CF_REQ" \
+  '.components[] | .slug as $sl | (.config_files // [])[] | . as $cf | ($req-($cf|keys)) as $m | select($m|length>0) | "\($sl): config \($cf.id // "?") missing \($m|join(","))"'
+
+# 18. config_file additionalProperties:false — no unknown keys on any entry.
+none "no unknown keys on any config_files[] entry (additionalProperties:false)" \
+  --argjson ok "$CF_ALLOWED" \
+  '.components[] | .slug as $sl | (.config_files // [])[] | . as $cf | (($cf|keys)-$ok) as $x | select($x|length>0) | "\($sl):\($cf.id): unknown \($x|join(","))"'
+
+# 19. scope_default (when present) in the enum.
+none "every config_files[].scope_default in $SCOPE_ENUM" \
+  --argjson e "$SCOPE_ENUM" \
+  '.components[] | (.config_files // [])[] | select(has("scope_default")) | select((.scope_default) as $s | ($e|index($s))|not) | "\(.id): scope_default=\(.scope_default)"'
+
 if [ "$fail" -ne 0 ]; then echo "TEST FAILED"; exit 1; fi
 echo "All checks passed."

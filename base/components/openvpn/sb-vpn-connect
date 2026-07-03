@@ -5,7 +5,8 @@
 # (inline private key), so it is NOT stored in the portal/repo — an operator copies
 # it to the agent post-provision and runs this once:
 #
-#     sudo sb-vpn-connect /path/to/profile.ovpn [name]
+#     sudo sb-vpn-connect /path/to/profile.ovpn [name]     # connect / replace
+#     sudo sb-vpn-connect remove [name]                    # tear down
 #
 # It installs the profile as a systemd-managed client (openvpn-client@<name>, so it
 # reconnects on boot), and — because the connection may push redirect-gateway
@@ -17,15 +18,33 @@
 # Re-running with a new .ovpn cleanly replaces the profile.
 set -euo pipefail
 
-SRC="${1:?usage: sudo sb-vpn-connect <profile.ovpn> [name]}"
+usage() {
+  echo "usage: sudo sb-vpn-connect <profile.ovpn> [name]   (default name: vpn)" >&2
+  echo "       sudo sb-vpn-connect remove [name]" >&2
+  exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || { echo "must run as root (use sudo)" >&2; exit 1; }
+command -v openvpn >/dev/null 2>&1 || { echo "openvpn not installed (select the 'openvpn' component)" >&2; exit 1; }
+
+# ── remove form ──────────────────────────────────────────────────────────────
+# Tear down a client (used by sb-config-reconcile when a watched .ovpn is removed).
+if [ "${1:-}" = "remove" ]; then
+  NAME="${2:-vpn}"
+  systemctl disable --now "openvpn-client@${NAME}" >/dev/null 2>&1 || true
+  rm -f "/etc/openvpn/client/${NAME}.conf"
+  echo "removed: openvpn-client@${NAME} disabled + /etc/openvpn/client/${NAME}.conf deleted"
+  exit 0
+fi
+
+# ── connect / replace form ───────────────────────────────────────────────────
+SRC="${1:-}"; [ -n "$SRC" ] || usage
 NAME="${2:-vpn}"
 PORTAL_HOST="$(printf '%s' "${PORTAL_URL:-https://sidebutton.com}" | sed -E 's#^[a-z]+://##; s#/.*$##; s#:.*$##')"
 DEST="/etc/openvpn/client/${NAME}.conf"
 UNIT="openvpn-client@${NAME}.service"
 
-[ "$(id -u)" -eq 0 ] || { echo "must run as root (use sudo)" >&2; exit 1; }
-[ -r "$SRC" ]        || { echo "no such readable file: $SRC" >&2; exit 1; }
-command -v openvpn >/dev/null 2>&1 || { echo "openvpn not installed (select the 'openvpn' component)" >&2; exit 1; }
+[ -r "$SRC" ] || { echo "no such readable file: $SRC" >&2; exit 1; }
 
 install -D -m 600 -o root -g root "$SRC" "$DEST"
 

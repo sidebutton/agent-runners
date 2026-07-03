@@ -22,9 +22,11 @@ stored in the portal or baked into cloud-init. Instead:
 - An operator drops the credentials **once, post-provision**, over a secure channel
   and enables the service.
 
-A later iteration can automate delivery (per-account secret + a token-authed fetch)
-without changing the agent side — `sb-rdp-connect` + `/etc/sidebutton/rdp.env` stay
-the seam.
+As of **SCRUM-1599** the agent also **auto-enables** the session as soon as
+`/etc/sidebutton/rdp.env` appears (see *Automatic delivery* below), so manual SSH
+placement and future portal delivery converge — `sb-rdp-connect` +
+`/etc/sidebutton/rdp.env` stay the seam. The creds are still never baked into
+cloud-init.
 
 ## 1. Provision with the component
 
@@ -121,8 +123,29 @@ sudo systemctl disable --now sb-rdp && sudo rm /etc/sidebutton/rdp.env   # remov
   single-tenant VM (only the `agent` user runs workloads). `/cert:ignore` accepts the
   customer host certificate unattended. Tighten per-customer via `RDP_EXTRA`.
 
-## Future (automated delivery)
+## Automatic delivery (default path)
 
-Per-account encrypted credential storage + a `sb_token`-authed, component-gated
-fetch that writes `/etc/sidebutton/rdp.env` and enables `sb-rdp`, reusing the same
-helper. Tracked separately; not required for the MVP.
+As of **SCRUM-1599** you no longer need the explicit `systemctl enable --now sb-rdp`
+step — the agent enables the service as soon as the env file lands:
+
+```bash
+# Drop the creds at the pinned path (root:600); sb-rdp is enabled automatically.
+ssh -i agent.pem <user>@<host> 'sudo install -m 600 /dev/stdin /etc/sidebutton/rdp.env' <<'ENV'
+RDP_HOST=10.20.0.5
+RDP_USER=KIAgent
+RDP_PASS=********
+ENV
+```
+
+A systemd path unit (`sb-config-watch@rdp-client.path`) runs `sb-config-reconcile`,
+which `systemctl enable --now sb-rdp` (and `try-restart`s it to re-read the env on a
+later edit). **Removing** the file disables the service. The env file is present at
+boot ⇒ the session comes up on boot. Everything else (geometry pin, reconnect loop) is
+unchanged; the manual enable stays available as break-glass.
+
+## Future (portal delivery)
+
+Per-account **encrypted** credential storage + a portal Files-hub drag-drop that pushes
+`rdp.env` over the apply rail to the `sb-config-place` wrapper (SCRUM-1600/1601), which
+lands it at the same pinned path above. The agent side is the stable seam. Tracked
+separately; not required for the MVP.

@@ -15,8 +15,10 @@ it is **not** stored in the portal or baked into cloud-init. Instead:
 - An operator attaches the customer profile **once, post-provision**, over a secure
   channel. One idempotent command does the rest (systemd unit + heartbeat guard).
 
-A later iteration can automate delivery (per-account profile + a token-authed
-fetch) without changing the agent side — `sb-vpn-connect` stays the seam.
+As of **SCRUM-1599** the agent also **auto-consumes** any profile dropped at the
+default path `/etc/sidebutton/config/openvpn/` (see *Automatic delivery* below), so
+manual SSH placement and future portal delivery converge — `sb-vpn-connect` stays the
+seam. The `.ovpn` is still never baked into cloud-init.
 
 ## 1. Provision with the component
 
@@ -124,8 +126,30 @@ sudo systemctl disable --now openvpn-client@gostudent && sudo rm /etc/openvpn/cl
 - It is never stored in the portal DB or cloud-init in this MVP.
 - One profile per agent (the AUTOLOGIN cert is user-locked).
 
-## Future (automated delivery)
+## Automatic delivery (default path)
 
-Per-account encrypted profile storage + a `sb_token`-authed, component-gated
-`GET /api/agents/vpn-profile`, fetched by a `19e-openvpn` step that calls the same
-`sb-vpn-connect`. Tracked separately; not required for the MVP.
+As of **SCRUM-1599** the agent auto-applies any profile present at the component's
+declared default path — no `sb-vpn-connect` invocation required:
+
+```bash
+# Drop a .ovpn at the watched directory (root:600); it connects automatically.
+sudo install -m 600 gostudent.ovpn /etc/sidebutton/config/openvpn/gostudent.ovpn
+```
+
+A systemd path unit (`sb-config-watch@openvpn.path`) runs `sb-config-reconcile`, which
+calls `sb-vpn-connect` per file (filename → client name → `openvpn-client@<name>`).
+Files already present are applied **on boot**; **removing** a file disables its client
+(`sb-vpn-connect remove <name>`). The heartbeat-safety `net_gateway` pins apply exactly
+as in the manual path. Manual `sudo sb-vpn-connect <profile.ovpn> [name]` stays
+available as break-glass.
+
+> ⚠️ The full-tunnel/SSH caveat above applies to auto-delivery too: dropping a
+> `redirect-gateway` profile brings the tunnel up immediately. Prefer console/RDP, or
+> a split profile, when placing over an interactive SSH session on the operator IP.
+
+## Future (portal delivery)
+
+Per-account **encrypted** profile storage + a portal Files-hub drag-drop that pushes
+the profile over the apply rail to the `sb-config-place` wrapper (SCRUM-1600/1601),
+which lands it at the same default path above. The agent side is the stable seam.
+Tracked separately; not required for the MVP.

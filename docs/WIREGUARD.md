@@ -21,8 +21,10 @@ cloud-init. Instead:
 - An operator attaches the customer profile **once, post-provision**, over a secure
   channel. One idempotent command does the rest (systemd unit + verification).
 
-A later iteration can automate delivery (per-account profile + a token-authed
-fetch) without changing the agent side — `sb-wg-connect` stays the seam.
+As of **SCRUM-1599** the agent also **auto-consumes** any profile dropped at the
+default path `/etc/sidebutton/config/wireguard/` (see *Automatic delivery* below), so
+manual SSH placement and future portal delivery converge — `sb-wg-connect` stays the
+seam. The `.conf` is still never baked into cloud-init.
 
 ## 1. Provision with the component
 
@@ -123,8 +125,26 @@ sudo sb-wg-connect remove css              # tear down: disable --now wg-quick@c
 - `wg show` redacts private/preshared keys by default, but the on-disk `.conf` does
   not — keep its mode at `600` (the helper enforces this).
 
-## Future (automated delivery)
+## Automatic delivery (default path)
 
-Per-account encrypted profile storage + a `sb_token`-authed, component-gated
-`GET /api/agents/wg-profile`, fetched by a step that calls the same
-`sb-wg-connect`. Tracked separately; not required for the MVP.
+As of **SCRUM-1599** the agent auto-applies any profile present at the component's
+declared default path — no `sb-wg-connect` invocation required:
+
+```bash
+# Drop a .conf at the watched directory (root:600); it connects automatically.
+sudo install -m 600 css.conf /etc/sidebutton/config/wireguard/css.conf
+```
+
+A systemd path unit (`sb-config-watch@wireguard.path`) runs `sb-config-reconcile`,
+which calls `sb-wg-connect` per file (filename → tunnel name, e.g. `css.conf` → `css`).
+Files already present are applied **on boot**; **removing** a file tears its tunnel
+down. Manual `sudo sb-wg-connect <profile.conf> [name]` stays available as break-glass.
+The default path is the component's contract (`config_files[].target_path` in
+`components.json`).
+
+## Future (portal delivery)
+
+Per-account **encrypted** profile storage + a portal Files-hub drag-drop that pushes
+the profile over the apply rail to the `sb-config-place` wrapper (SCRUM-1600/1601),
+which lands it at the same default path above. The agent side is the stable seam.
+Tracked separately; not required for the MVP.

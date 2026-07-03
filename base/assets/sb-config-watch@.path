@@ -1,0 +1,20 @@
+[Unit]
+# Templated per component slug (%i). Watches the component's declared default path and
+# triggers sb-config-apply@%i.service on any change.
+#
+# The concrete path directive (PathModified + DirectoryNotEmpty for a directory target;
+# PathModified + PathExists for a single-file target) is supplied by a per-instance
+# drop-in that base/19f writes at sb-config-watch@<slug>.path.d/path.conf — the watched
+# path differs per component (a dir for wireguard/openvpn, a file for rdp-client), so
+# this template intentionally ships none. It is therefore only valid once base/19f has
+# written that drop-in; base/19f writes it before enabling the instance. The
+# DirectoryNotEmpty/PathExists directive gives boot-time apply for free (it fires at
+# start when the path already has content).
+Description=Watch SideButton component config path for %i
+Documentation=https://github.com/sidebutton/agent-runners
+
+[Path]
+Unit=sb-config-apply@%i.service
+
+[Install]
+WantedBy=multi-user.target

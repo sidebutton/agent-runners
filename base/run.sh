@@ -118,4 +118,5 @@ done
 . "$BASE_DIR/19c-health-report.sh"   # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/19d-account-registry.sh"
 . "$BASE_DIR/19e-session-reaper.sh"  # close Claude Code sessions idle >1h after finish (SCRUM-1250)
+. "$BASE_DIR/19f-component-config.sh" # component config-file consumption (SCRUM-1599) — refresh-safe
 . "$BASE_DIR/20-mark-installed.sh"

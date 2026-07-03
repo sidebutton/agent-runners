@@ -38,6 +38,14 @@ wg_entry="$(jq -c '.components[] | select(.slug=="wireguard")' "$COMPONENTS_JSON
 [ "$(printf '%s' "$wg_entry" | jq -r '.kind' 2>/dev/null)" = "toolchain" ] \
   && ok "wireguard kind is toolchain" || bad "wireguard kind is not toolchain"
 
+# config_files contract (SCRUM-1599): wg-profile directory target.
+[ "$(printf '%s' "$wg_entry" | jq -r '.config_files[0].id' 2>/dev/null)" = "wg-profile" ] \
+  && ok "wireguard declares config_files[0].id = wg-profile" || bad "wireguard config_files id != wg-profile"
+[ "$(printf '%s' "$wg_entry" | jq -r '.config_files[0].target_path' 2>/dev/null)" = "/etc/sidebutton/config/wireguard/" ] \
+  && ok "wireguard config target_path = /etc/sidebutton/config/wireguard/" || bad "wireguard config target_path wrong"
+[ "$(printf '%s' "$wg_entry" | jq -r '.config_files[0].multiple' 2>/dev/null)" = "true" ] \
+  && ok "wireguard config multiple = true (named tunnels)" || bad "wireguard config multiple != true"
+
 # 3. The component dir resolves (slug → base/components/wireguard/) with both scripts.
 [ -d "$COMP_DIR" ]    && ok "base/components/wireguard/ exists"            || bad "base/components/wireguard/ missing"
 [ -f "$INSTALL_SH" ]  && ok "install.sh present"                          || bad "install.sh missing"
