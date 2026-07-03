@@ -814,6 +814,12 @@ if [ "$HOOK_EVENT" != "SubagentStop" ]; then
         --connect-timeout 10 --max-time 120) || AR_CODE=0
       ART_N=$((ART_N + 1))
       log "artifact POST ${FN} (${FSIZE}B kind=${ART_KIND}): ${AR_CODE}"
+      # Clear the file only on a 2xx so the NEXT job's Stop can't re-glob and re-POST it
+      # under a different job_id/step_index/session_id (SCRUM-1604 cross-job artifact
+      # mis-attribution — server upsert is per-job, so it doesn't protect across jobs).
+      # A non-2xx or curl-fail (AR_CODE=0) file is left in place for the next Stop's
+      # retry. Guarded + non-fatal, matching this hook's stay-invisible-to-Claude contract.
+      case "$AR_CODE" in 2*) rm -f "$f" 2>/dev/null || true ;; esac
     done < <(find "$ART_DIR" -maxdepth 3 -type f ! -name '.*' -print0 2>/dev/null)
     log "artifacts: posted ${ART_N} file(s) from ${ART_DIR}"
   fi
