@@ -121,8 +121,22 @@ sudo systemctl disable --now sb-rdp && sudo rm /etc/sidebutton/rdp.env   # remov
   single-tenant VM (only the `agent` user runs workloads). `/cert:ignore` accepts the
   customer host certificate unattended. Tighten per-customer via `RDP_EXTRA`.
 
-## Future (automated delivery)
+## Automated delivery — default-path consumption (SCRUM-1599)
 
-Per-account encrypted credential storage + a `sb_token`-authed, component-gated
-fetch that writes `/etc/sidebutton/rdp.env` and enables `sb-rdp`, reusing the same
-helper. Tracked separately; not required for the MVP.
+The component now **auto-consumes** the connection file at its default path
+**`/etc/sidebutton/rdp.env`**, declared in the runner catalog (`components.json` →
+`config_files[]`, id `rdp-env`) — the **same file** `sb-rdp-connect` already idle-waits
+on, so consumption is unchanged. When the file lands there — dropped over SSH, or pushed
+by the portal once that half ships — base step `19f`'s watcher
+(`sb-config-watch-rdp-client.path`, keyed on the single file) enables `sb-rdp`
+automatically; the idle-waiting helper then connects. This is a **single-file** config
+(no directory), so there is exactly one `rdp.env`.
+
+- Portal→agent writes go through one narrow-sudoers wrapper, `sb-config-place`, which
+  installs the file `root:600` and (for this single-file component) pins the exact
+  basename `rdp.env` — no other filename is accepted.
+- `sudo systemctl … sb-rdp` and hand-editing `rdp.env` stay break-glass.
+
+Portal-side storage/UI (encrypted per-account/workspace store + Files-hub dropzone) is
+tracked separately (epic SCRUM-1597, tickets A2–A5); the agent side above is complete and
+reaches the existing fleet via `sb-self-update` (`refresh-manifest.txt`).

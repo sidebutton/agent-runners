@@ -123,8 +123,25 @@ sudo sb-wg-connect remove css              # tear down: disable --now wg-quick@c
 - `wg show` redacts private/preshared keys by default, but the on-disk `.conf` does
   not — keep its mode at `600` (the helper enforces this).
 
-## Future (automated delivery)
+## Automated delivery — default-path consumption (SCRUM-1599)
 
-Per-account encrypted profile storage + a `sb_token`-authed, component-gated
-`GET /api/agents/wg-profile`, fetched by a step that calls the same
-`sb-wg-connect`. Tracked separately; not required for the MVP.
+The component now **auto-consumes** any `*.conf` at its default path
+**`/etc/sidebutton/config/wireguard/`**, declared in the runner catalog
+(`components.json` → `config_files[]`, id `wg-profile`). A profile that lands there —
+dropped over SSH, or pushed by the portal once that half ships — is applied by
+`sb-wg-connect` at boot and on change; removing it tears the tunnel down. Manual
+placement and portal delivery converge on identical behaviour, and
+`sudo sb-wg-connect …` stays break-glass.
+
+- Base step `19f` installs a systemd path-unit (`sb-config-watch-wireguard.path`) that
+  watches the dir and triggers a per-slug reconcile (`sb-config-reconcile wireguard`);
+  each `<name>.conf` → `wg-quick@<name>`.
+- The reconcile is **sha-gated** (a routine `sb-self-update` never bounces a live tunnel)
+  and only tears down tunnels **it** brought up — a manually-created same-named tunnel is
+  never cut.
+- Portal→agent writes go through one narrow-sudoers wrapper, `sb-config-place`, which
+  installs the file `root:600` and confines every write to this declared path.
+
+Portal-side storage/UI (encrypted per-account/workspace store + Files-hub dropzone) is
+tracked separately (epic SCRUM-1597, tickets A2–A5); the agent side above is complete and
+reaches the existing fleet via `sb-self-update` (`refresh-manifest.txt`).

@@ -38,3 +38,4 @@
 19c-health-report.sh
 19d-account-registry.sh
 19e-session-reaper.sh
+19f-component-config.sh

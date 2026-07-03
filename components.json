@@ -78,25 +78,61 @@
       "slug": "openvpn",
       "kind": "toolchain",
       "title": "OpenVPN client",
-      "description": "OpenVPN client + the sb-vpn-connect helper. The .ovpn profile is applied manually post-provision (MVP): sudo sb-vpn-connect <profile.ovpn>. Autoconnects on boot via openvpn-client@.",
+      "description": "OpenVPN client + the sb-vpn-connect helper. Drop a .ovpn profile at /etc/sidebutton/config/openvpn/ (portal Files hub or manual SSH) and it auto-connects on boot via openvpn-client@; removing it tears the tunnel down. Break-glass: sudo sb-vpn-connect <profile.ovpn>.",
       "requires": [],
-      "chip": { "label": "VPN", "live": false }
+      "chip": { "label": "VPN", "live": false },
+      "config_files": [
+        {
+          "id": "ovpn-profile",
+          "label": "OpenVPN profile (.ovpn)",
+          "description": "Client profile incl. inline private key; applied via sb-vpn-connect (net_gateway-pinned so the heartbeat stays off-tunnel).",
+          "accept": [".ovpn"],
+          "secret": true,
+          "scope_default": "workspace",
+          "target_path": "/etc/sidebutton/config/openvpn/",
+          "multiple": true
+        }
+      ]
     },
     {
       "slug": "wireguard",
       "kind": "toolchain",
       "title": "WireGuard client",
-      "description": "WireGuard client (wireguard-tools) + the sb-wg-connect helper. The .conf profile is applied manually post-provision (MVP): sudo sb-wg-connect <profile.conf> [name]. Autoconnects on boot via wg-quick@. Split-tunnel; no heartbeat carve-outs.",
+      "description": "WireGuard client (wireguard-tools) + the sb-wg-connect helper. Drop a .conf profile at /etc/sidebutton/config/wireguard/ (portal Files hub or manual SSH) and it auto-connects on boot via wg-quick@; removing it tears the tunnel down. Split-tunnel; no heartbeat carve-outs. Break-glass: sudo sb-wg-connect <profile.conf> [name].",
       "requires": [],
-      "chip": { "label": "VPN", "live": false }
+      "chip": { "label": "VPN", "live": false },
+      "config_files": [
+        {
+          "id": "wg-profile",
+          "label": "WireGuard profile (.conf)",
+          "description": "Client tunnel config incl. inline private key (+ optional preshared key); applied via sb-wg-connect. One keypair per device — prefer agent scope for concurrent agents.",
+          "accept": [".conf"],
+          "secret": true,
+          "scope_default": "workspace",
+          "target_path": "/etc/sidebutton/config/wireguard/",
+          "multiple": true
+        }
+      ]
     },
     {
       "slug": "rdp-client",
       "kind": "toolchain",
       "title": "RDP client (FreeRDP)",
-      "description": "FreeRDP (xfreerdp) + the sb-rdp-connect helper. Opens an outbound RDP session to a customer host (e.g. an on-prem Windows ERP with no API) and renders it as a fixed-geometry window on the agent desktop (:10) — driveable by computer-use, visible in LiveDesktop, auto-reconnecting on drop. Target host + credentials are applied manually post-provision via /etc/sidebutton/rdp.env (out-of-band, never in cloud-init), then: systemctl enable --now sb-rdp.",
+      "description": "FreeRDP (xfreerdp) + the sb-rdp-connect helper. Opens an outbound RDP session to a customer host (e.g. an on-prem Windows ERP with no API) and renders it as a fixed-geometry window on the agent desktop (:10) — driveable by computer-use, visible in LiveDesktop, auto-reconnecting on drop. Drop the target host + credentials at /etc/sidebutton/rdp.env (portal Files hub or manual SSH, out-of-band, never in cloud-init) and sb-rdp starts automatically.",
       "requires": [],
-      "chip": { "label": "RDP", "live": false }
+      "chip": { "label": "RDP", "live": false },
+      "config_files": [
+        {
+          "id": "rdp-env",
+          "label": "RDP connection (rdp.env)",
+          "description": "RDP_HOST/RDP_USER/RDP_PASS (+ optional RDP_DOMAIN/RDP_GEOMETRY/RDP_EXTRA). sb-rdp-connect idle-waits on this exact file; presence enables sb-rdp.",
+          "accept": [".env"],
+          "secret": true,
+          "scope_default": "workspace",
+          "target_path": "/etc/sidebutton/rdp.env",
+          "multiple": false
+        }
+      ]
     }
   ]
 }

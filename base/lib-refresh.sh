@@ -50,7 +50,14 @@ sb_base_artifacts_fingerprint() {
     while IFS= read -r f; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done < <(sb_refresh_manifest_files "$base")
-    for f in assets/claude-hooks.json assets/sb-self-update.sh lib-refresh.sh refresh-manifest.txt; do
+    # Assets deployed by manifest steps but not themselves steps: the self-update
+    # wrapper, and the sb-config-place / sb-config-reconcile helpers installed by
+    # 19f. Listing them here makes a wrapper/reconcile-only change flip the
+    # fingerprint (else the change-gate would skip the refresh and the fleet would
+    # keep the old privileged helper — the exact drift SCRUM-1380 exists to prevent).
+    for f in assets/claude-hooks.json assets/sb-self-update.sh \
+             assets/sb-config-place.sh assets/sb-config-reconcile.sh \
+             lib-refresh.sh refresh-manifest.txt; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done
   } 2>/dev/null | sha256sum | awk '{print $1}'
