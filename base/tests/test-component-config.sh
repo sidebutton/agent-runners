@@ -156,6 +156,7 @@ passes_to_rootgate() { # <desc> <args...>
 reject "traversal ../evil.conf"            wireguard  "$TMP/staged.conf" '../evil.conf'
 reject "nested a/b.conf"                    wireguard  "$TMP/staged.conf" 'a/b.conf'
 reject "dotdot embedded x..y"               wireguard  "$TMP/staged.conf" 'x..y.conf'
+reject "newline-injected filename"          wireguard  "$TMP/staged.conf" "$(printf 'a\n.conf')"
 reject "accept-mismatch .txt"               wireguard  "$TMP/staged.conf" 'bad.txt'
 reject "unknown slug"                       bogus      "$TMP/staged.conf" 'x.conf'
 reject "single-file wrong basename"         rdp-client "$TMP/staged.conf" 'other.env'

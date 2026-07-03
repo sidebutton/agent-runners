@@ -50,7 +50,10 @@ else
 fi
 
 # ── validate slug (strict; no path chars) + resolve its declaration ──────────
-printf '%s' "$SLUG" | grep -qE '^[a-z0-9][a-z0-9-]*$' \
+# Whole-string bash regex, NOT `grep -qE`: grep is line-oriented, so an embedded
+# newline splits the value and a single conforming line would pass — [[ =~ ]]
+# anchors ^/$ to the whole string and rejects any control char.
+[[ "$SLUG" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
   || die "invalid slug '$SLUG' (must match ^[a-z0-9][a-z0-9-]*\$)"
 
 DESC="${COMP_DIR}/${SLUG}.conf"
@@ -93,7 +96,11 @@ if [ "$IS_DIR" = "1" ]; then
     FN="$(basename -- "$STAGED")"
   fi
   # single safe segment — no '/', no '..', no leading dot/dash, printable set only.
-  printf '%s' "$FN" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]*$' || die "unsafe filename '$FN'"
+  # Whole-string bash regex, NOT `grep -qE`: grep matches per line, so a newline in
+  # the name would let a conforming first line pass while an arbitrary tail rides
+  # through (and would then corrupt the TAB/newline-delimited reconcile state file).
+  # [[ =~ ]] anchors to the whole string and rejects any control char / newline.
+  [[ "$FN" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "unsafe filename '$FN' (single safe segment only)"
   case "$FN" in *..*|*/*) die "unsafe filename '$FN' (path traversal)";; esac
   _accept_ok "$FN" || die "filename '$FN' does not match accepted suffix(es) ($ACCEPT)"
 
