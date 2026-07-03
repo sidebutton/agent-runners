@@ -9,7 +9,9 @@
 # ~/.claude-code-router/config.json — `model` (the transcript id) then stays an Anthropic id while
 # the true route lives in that config. This test proves: native fallback, CCR via .Router.default
 # ("provider,model"), CCR via .Providers[0] fallback, graceful degradation (CCR base-URL but no
-# config), and that an installed-but-unrouted base URL still reads as native (route == runtime).
+# config), that an installed-but-unrouted base URL still reads as native (route == runtime), and
+# native cloud-Claude (AAP-N, SCRUM-1611: Bedrock/Vertex/Foundry via CLAUDE_CODE_USE_*, no proxy)
+# labelled by provider — with CCR-proxy precedence over a stray flag and no cloud-secret leakage.
 #
 # Pure bash + jq (both present on the runner). Run: bash base/tests/test-14b-effective-route.sh
 
@@ -84,6 +86,39 @@ if command -v jq >/dev/null 2>&1; then
   # 5. Effective route == runtime, not "installed": a non-CCR base URL reads as native even with a config present.
   R="$(ANTHROPIC_BASE_URL='https://api.anthropic.com' detect_effective_route 'claude-opus-4-8')"
   [ "$(field "$R" agentic_app)" = "claude-code" ] && ok "non-ccr base URL → native (route follows runtime)" || bad "non-ccr base URL agentic_app: $(field "$R" agentic_app)"
+
+  # ── Native cloud-Claude (AAP-N, SCRUM-1611): Bedrock/Vertex/Foundry via CLAUDE_CODE_USE_*, no proxy ──
+  # HOME still holds a CCR config.json here — these cases also prove native-cloud ignores it when the
+  # base URL isn't the proxy (route follows the live runtime, not the installed component).
+  # 6. Bedrock — flag + ANTHROPIC_MODEL, no proxy base URL → claude-code / bedrock / <ANTHROPIC_MODEL>.
+  B="$(unset ANTHROPIC_BASE_URL; CLAUDE_CODE_USE_BEDROCK=1 ANTHROPIC_MODEL='eu.anthropic.claude-opus-4-6-v1' detect_effective_route 'claude-opus-4-6')"
+  [ "$(field "$B" agentic_app)" = "claude-code" ]                        && ok "bedrock: agentic_app=claude-code (native wire)"    || bad "bedrock agentic_app: $(field "$B" agentic_app)"
+  [ "$(field "$B" provider)" = "bedrock" ]                               && ok "bedrock: provider=bedrock"                         || bad "bedrock provider: $(field "$B" provider)"
+  [ "$(field "$B" effective_model)" = "eu.anthropic.claude-opus-4-6-v1" ] && ok "bedrock: effective_model from ANTHROPIC_MODEL"     || bad "bedrock effective_model: $(field "$B" effective_model)"
+
+  # 6b. Bedrock without ANTHROPIC_MODEL → effective_model falls back to the reported transcript model.
+  B2="$(unset ANTHROPIC_BASE_URL ANTHROPIC_MODEL; CLAUDE_CODE_USE_BEDROCK=1 detect_effective_route 'claude-sonnet-4-6')"
+  [ "$(field "$B2" provider)" = "bedrock" ]                              && ok "bedrock(no model): provider=bedrock"               || bad "bedrock(no model) provider: $(field "$B2" provider)"
+  [ "$(field "$B2" effective_model)" = "claude-sonnet-4-6" ]             && ok "bedrock(no model): effective_model==reported"      || bad "bedrock(no model) effective_model: $(field "$B2" effective_model)"
+
+  # 7. Vertex — flag + ANTHROPIC_MODEL → provider=vertex.
+  V="$(unset ANTHROPIC_BASE_URL; CLAUDE_CODE_USE_VERTEX=1 ANTHROPIC_MODEL='claude-opus-4-6@20260501' detect_effective_route 'claude-opus-4-6')"
+  [ "$(field "$V" provider)" = "vertex" ]                                && ok "vertex: provider=vertex"                           || bad "vertex provider: $(field "$V" provider)"
+  [ "$(field "$V" effective_model)" = "claude-opus-4-6@20260501" ]       && ok "vertex: effective_model from ANTHROPIC_MODEL"      || bad "vertex effective_model: $(field "$V" effective_model)"
+
+  # 8. Foundry — flag only (deployment names live in ANTHROPIC_DEFAULT_*_MODEL) → provider=foundry, model==reported.
+  FD="$(unset ANTHROPIC_BASE_URL ANTHROPIC_MODEL; CLAUDE_CODE_USE_FOUNDRY=1 detect_effective_route 'claude-opus-4-6')"
+  [ "$(field "$FD" provider)" = "foundry" ]                              && ok "foundry: provider=foundry"                         || bad "foundry provider: $(field "$FD" provider)"
+  [ "$(field "$FD" effective_model)" = "claude-opus-4-6" ]               && ok "foundry: effective_model==reported"                || bad "foundry effective_model: $(field "$FD" effective_model)"
+
+  # 9. Precedence — a CCR proxy base URL wins over a stray CLAUDE_CODE_USE_BEDROCK (CC talks to the proxy).
+  P="$(CLAUDE_CODE_USE_BEDROCK=1 ANTHROPIC_BASE_URL='http://127.0.0.1:3456' detect_effective_route 'claude-opus-4-8')"
+  [ "$(field "$P" agentic_app)" = "claude-code-router" ]                 && ok "precedence: CCR proxy beats stray USE_BEDROCK"     || bad "precedence agentic_app: $(field "$P" agentic_app)"
+  [ "$(field "$P" provider)" != "bedrock" ]                              && ok "precedence: provider is not bedrock under CCR"     || bad "precedence provider leaked bedrock: $(field "$P" provider)"
+
+  # 10. Secrets — cloud credentials present in the env must never leak into the triple.
+  S2="$(unset ANTHROPIC_BASE_URL; CLAUDE_CODE_USE_BEDROCK=1 ANTHROPIC_MODEL='m' AWS_SECRET_ACCESS_KEY='wJalr-SECRET' AWS_PROFILE='bedrock-x' detect_effective_route 'claude-opus-4-6')"
+  case "$S2" in *wJalr-SECRET*|*AWS_SECRET*) bad "an AWS credential leaked into the native-cloud triple" ;; *) ok "no cloud secret material in the native-cloud triple" ;; esac
 else
   skip "jq not installed — skipping the route-matrix assertions (CI runs them)"
 fi
