@@ -641,6 +641,70 @@ detect_effective_route() {
     || printf '{"agentic_app":"%s","provider":"%s","effective_model":"%s"}\n' "$app" "$provider" "$emodel"
 }
 
+# --- Per-run auth-identity stamp (AUTH-4, SCRUM-1629 / PROVIDER-AUTH-VISIBILITY.md §7) -------------
+# Echo a compact NON-SECRET JSON object {method, id, base_host?} naming the auth identity that
+# actually served this run — the subscription / key / cloud principal that spent the quota — so the
+# portal can attribute burn to it (jobs.auth_identity) and roll up usage-by-identity. Parallels
+# detect_effective_route: rides the SAME /api/jobs/usage POST, best-effort, pure + side-effect-free
+# (base/tests source & call it). Precedence mirrors Claude Code's own (env token wins over the login):
+#   token in effect (ANTHROPIC_API_KEY ‖ ANTHROPIC_AUTH_TOKEN) → id = its FINGERPRINT (§4.3); method
+#       `gateway` when a non-local ANTHROPIC_BASE_URL is present (carry its host), else `api_key`.
+#   else native cloud (CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY=1) → method bedrock|vertex|foundry, id = a
+#       best-effort principal from env (AWS_PROFILE / Vertex project) — NEVER `aws sts`/`gcloud` at Stop
+#       (that would tax every Stop); omit id (→ whole stamp omitted) on a miss.
+#   else direct Anthropic with NO token → subscription: id = ~/.claude.json oauthAccount email (the
+#       quota boundary; portal renders `run as <email>`).
+# CCR runs (ANTHROPIC_BASE_URL = the local proxy) OMIT: the upstream identity lives in the CCR config
+# and is deferred to SCRUM-1631 — degrade to an EMPTY stamp, never the proxy's dummy token. Non-secret
+# by construction: only a fingerprint, an endpoint host, an operator-owned email / profile name — never
+# a raw token, never AWS/GCP credentials. Any miss => '{}' → the portal leaves the row unstamped
+# (legacy-safe). The §4.3 fingerprint reproduces the reporter's fingerprint() (report-health-snapshot.sh)
+# — bash+jq can't import the Python helper — so a run's key stamp groups with the agent's.
+fp_token() {
+  # §4.3: first-6 + … + last-4; tokens under 12 chars render last-2 only. Never the middle, never the whole value.
+  local t="${1:-}"
+  t="${t#"${t%%[![:space:]]*}"}"; t="${t%"${t##*[![:space:]]}"}"   # trim surrounding whitespace (parity with .strip())
+  [ -z "$t" ] && return 0
+  if [ "${#t}" -lt 12 ]; then printf '…%s' "${t: -2}"; else printf '%s…%s' "${t:0:6}" "${t: -4}"; fi
+}
+
+detect_run_identity() {
+  local base="${ANTHROPIC_BASE_URL:-}"
+  # CCR local proxy → upstream identity out of scope (SCRUM-1631); never stamp the proxy's dummy token.
+  case "$base" in *127.0.0.1:3456*|*localhost:3456*) printf '{}'; return 0 ;; esac
+
+  local method="" id="" base_host=""
+  # base_host = host of a NON-LOCAL ANTHROPIC_BASE_URL (a gateway endpoint); a local host is not an identity.
+  if [ -n "$base" ]; then
+    local hp="${base#*://}"; hp="${hp%%/*}"; local h="${hp%%:*}"
+    h="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
+    case "$h" in localhost|127.0.0.1|0.0.0.0|::1|'') : ;; *) base_host="$h" ;; esac
+  fi
+
+  # A token in effect: ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN (mirrors the reporter's _token_of).
+  local tok="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  if [ -n "$tok" ]; then
+    id="$(fp_token "$tok")"
+    if [ -n "$base_host" ]; then method="gateway"; else method="api_key"; fi
+  elif [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ]; then
+    method="bedrock"; id="${AWS_PROFILE:-}"                  # principal, best-effort; no `aws sts` at Stop
+  elif [ "${CLAUDE_CODE_USE_VERTEX:-}" = "1" ]; then
+    method="vertex";  id="${ANTHROPIC_VERTEX_PROJECT_ID:-}"  # non-secret project id from env; no `gcloud` at Stop
+  elif [ "${CLAUDE_CODE_USE_FOUNDRY:-}" = "1" ]; then
+    method="foundry"; id=""                                 # no non-secret principal available at Stop → omit
+  else
+    # Direct Anthropic, no token → subscription identity from ~/.claude.json oauthAccount (the quota boundary).
+    id="$(jq -r '.oauthAccount.emailAddress // empty' "${HOME}/.claude.json" 2>/dev/null || echo "")"
+    if [ -n "$id" ]; then method="subscription"; fi
+  fi
+
+  # Require a usable (method,id) pair; else omit — a partial stamp is worse than none (best-effort).
+  if [ -z "$method" ] || [ -z "$id" ]; then printf '{}'; return 0; fi
+  jq -nc --arg m "$method" --arg i "$id" --arg h "$base_host" \
+    '{method:$m, id:$i} + (if $h != "" then {base_host:$h} else {} end)' 2>/dev/null \
+    || printf '{"method":"%s","id":"%s"}' "$method" "$id"
+}
+
 HOOK_INPUT=$(cat)
 [ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
 AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
@@ -720,13 +784,22 @@ TOTAL_COST=$(echo "$HOOK_INPUT" | jq -r '.total_cost_usd // .cost_usd // 0')
 REPORTED_MODEL=$(printf '%s' "$USAGE" | jq -r '.model // ""' 2>/dev/null || echo "")
 ROUTE_JSON=$(detect_effective_route "$REPORTED_MODEL" 2>/dev/null || echo '{}')
 case "$ROUTE_JSON" in ''|null) ROUTE_JSON='{}' ;; esac
-log "effective route: $ROUTE_JSON (base=${ANTHROPIC_BASE_URL:-unset})"
+# Per-run auth identity (AUTH-4, SCRUM-1629 / §7): the subscription/key/cloud principal that spent this
+# run's quota. Rides INSIDE `usage` alongside the route triple; the portal validates + size-bounds it,
+# writes job_steps.auth_identity, and rolls it up to jobs.auth_identity (most-recent non-empty). Best-effort:
+# a miss / CCR / legacy degrades to '{}' → the key is omitted and the row stays unstamped. NOT added to the
+# step-complete POST below (it carries no `usage` — a partial object there would clobber model/tokens), same
+# rule as the route triple.
+IDENT_JSON=$(detect_run_identity 2>/dev/null || echo '{}')
+case "$IDENT_JSON" in ''|null) IDENT_JSON='{}' ;; esac
+log "effective route: $ROUTE_JSON identity: $IDENT_JSON (base=${ANTHROPIC_BASE_URL:-unset})"
 PAYLOAD=$(jq -n --argjson job_id "${JOB_ID:-null}" --argjson step "${STEP_INDEX:-null}" \
   --arg sid "$SESSION_ID" --argjson u "$USAGE" \
   --argjson dur "$DURATION_MS" --arg cost "$TOTAL_COST" \
-  --argjson final "$IS_FINAL" --argjson route "$ROUTE_JSON" \
+  --argjson final "$IS_FINAL" --argjson route "$ROUTE_JSON" --argjson ident "$IDENT_JSON" \
   '{job_id:$job_id, step_index:$step, session_id:$sid, final:$final,
-    usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)} + $route)}')
+    usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)} + $route
+           + (if ($ident|type) == "object" and ($ident|length) > 0 then {auth_identity:$ident} else {} end))}')
 curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
