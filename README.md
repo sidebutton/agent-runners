@@ -124,7 +124,6 @@ agent-runners/
 │   ├── 08-sidebutton.sh          # SB server (gated) + installs the sb-self-update wrapper (all agents)
 │   ├── 16-services-prep.sh       # chrome/sidebutton units written conditionally
 │   ├── 18b-heartbeat-timer.sh    # recurring online beat when serverless
-│   ├── 19e-session-reaper.sh     # close Claude Code sessions idle >1h after finish
 │   ├── components/               # per-component install + lifecycle scripts
 │   │   ├── dotnet9/install.sh
 │   │   ├── docker/install.sh

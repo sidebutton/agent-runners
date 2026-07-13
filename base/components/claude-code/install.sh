@@ -5,7 +5,7 @@
 # the set is empty/unset (manual / back-compat), so a base agent still ships Claude
 # Code. An explicit non-empty set that omits `claude-code` skips this install.
 # Runs as root at provision time, at the SAME position as the former step — before
-# the Claude-config steps (09/14/15/15b/19e) which stay in base, ungated.
+# the Claude-config steps (09/14/15/15b) which stay in base, ungated.
 # Idempotent (the `command -v claude` guard).
 #
 # Body moved VERBATIM from the former base/07-claude-code.sh (SCRUM-1445) to keep
