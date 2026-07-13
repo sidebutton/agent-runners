@@ -153,7 +153,7 @@ agent-runners/
 5. **post-services**: the extension component waits for `browser_connected`.
 6. Register + heartbeat (+ recurring timer), secrets, plugins, health reporter
    (desktop screenshot + a per-session Claude terminal-window crop via `xdotool`),
-   account registry, stale-session reaper, mark-installed.
+   account registry, component config watchers, mark-installed.
 
 The variant hook mechanism (`run_variant_hook`) is retained but the single base
 variant ships no hooks — component behaviour is driven from `run.sh`.
