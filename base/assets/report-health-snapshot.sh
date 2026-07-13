@@ -53,8 +53,8 @@ mkdir -p "$TMP"
 # key on the session id, never the title. --disable-server ⇒ 1 process = 1 window.
 
 # Echo the active Claude session id, or nothing. Primary source is the dispatch
-# job-context (the id base/14 + base/19e also key on); fallback mirrors 19e — the
-# running `claude --session-id <uuid>` whose transcript was written most recently.
+# job-context (the id base/14 also keys on); fallback — the running
+# `claude --session-id <uuid>` whose transcript was written most recently.
 resolve_active_session() {
   local jc="${HOME:-/home/agent}/.sidebutton/job-context.json" sid=""
   if [ -r "$jc" ]; then

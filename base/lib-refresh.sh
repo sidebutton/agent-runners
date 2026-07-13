@@ -393,8 +393,17 @@ sb_refresh_base_artifacts() {
   {
     echo "updated_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "runners_ref=${ref}"
-    echo "base_artifacts_sha=${fp}"
+    # A FAILED hooks merge (jq/write error, unparseable settings.json) must not
+    # latch the change-gate: manifest steps may have removed scripts the live
+    # settings still reference, so omit base_artifacts_sha and let the next
+    # pull_repos tick retry the whole pass (sb_artifacts_current needs the sha).
+    # 'skipped (no jq)' / 'no settings.json' / 'no asset' DO latch — those boxes
+    # can never merge, and retrying every tick would be a refresh loop.
+    if [ "$hooks_status" != "failed" ]; then
+      echo "base_artifacts_sha=${fp}"
+    fi
   } > "$SB_UPDATED_MARKER"
+  [ "$hooks_status" = "failed" ] && log "WARN: hooks merge failed — change-gate left open to retry next tick"
 
   log "base artifacts refreshed (ref=${ref} sha=${fp:0:12} steps=${status} hooks=${hooks_status})"
   echo "base artifacts: refreshed (${fp:0:12}, steps=${status}, hooks=${hooks_status})"

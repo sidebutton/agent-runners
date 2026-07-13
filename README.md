@@ -124,7 +124,6 @@ agent-runners/
 │   ├── 08-sidebutton.sh          # SB server (gated) + installs the sb-self-update wrapper (all agents)
 │   ├── 16-services-prep.sh       # chrome/sidebutton units written conditionally
 │   ├── 18b-heartbeat-timer.sh    # recurring online beat when serverless
-│   ├── 19e-session-reaper.sh     # close Claude Code sessions idle >1h after finish
 │   ├── components/               # per-component install + lifecycle scripts
 │   │   ├── dotnet9/install.sh
 │   │   ├── docker/install.sh
@@ -154,7 +153,7 @@ agent-runners/
 5. **post-services**: the extension component waits for `browser_connected`.
 6. Register + heartbeat (+ recurring timer), secrets, plugins, health reporter
    (desktop screenshot + a per-session Claude terminal-window crop via `xdotool`),
-   account registry, stale-session reaper, mark-installed.
+   account registry, component config watchers, mark-installed.
 
 The variant hook mechanism (`run_variant_hook`) is retained but the single base
 variant ships no hooks — component behaviour is driven from `run.sh`.

@@ -6,7 +6,7 @@
 # add it to the /api/agents/health-report payload as terminal_b64 (+ session_id),
 # keyed by the session — WITHOUT ever regressing the desktop frame or the POST. The
 # session id is resolved from ~/.sidebutton/job-context.json (fallback: the running
-# `claude --session-id <uuid>` whose transcript is newest, mirroring base/19e); the
+# `claude --session-id <uuid>` whose transcript is newest); the
 # window is found via the tmux `sbjob-<session_id>` carried in the xfce4-terminal
 # argv — NOT the title, which recon showed is non-unique across concurrent sessions.
 # Every hop degrades to "omit the terminal frame" (no xdotool / no session / no

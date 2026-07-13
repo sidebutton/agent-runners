@@ -79,9 +79,9 @@ fi
 # ── 4. 19f wiring + refresh-safety ───────────────────────────────────────────
 [ -f "$STEP" ] && bash -n "$STEP" 2>/dev/null && ok "19f-component-config.sh parses (bash -n)" || bad "19f missing / syntax error"
 grep -qF '19f-component-config.sh' "$RUN" && ok "run.sh sources 19f" || bad "run.sh does NOT source 19f"
-# 19f must be sourced AFTER 19e and BEFORE 20-mark-installed (helpers exist, marker last)
-awk '/19e-session-reaper.sh/{e=NR} /19f-component-config.sh/{f=NR} /20-mark-installed.sh/{m=NR} END{exit !(e<f && f<m)}' "$RUN" \
-  && ok "run.sh orders 19f after 19e, before 20-mark-installed" || bad "19f mis-ordered in run.sh"
+# 19f must be sourced AFTER 19d and BEFORE 20-mark-installed (helpers exist, marker last)
+awk '/19d-account-registry.sh/{e=NR} /19f-component-config.sh/{f=NR} /20-mark-installed.sh/{m=NR} END{exit !(e<f && f<m)}' "$RUN" \
+  && ok "run.sh orders 19f after 19d, before 20-mark-installed" || bad "19f mis-ordered in run.sh"
 grep -qxF '19f-component-config.sh' <(sed -e 's/[[:space:]]*#.*$//' "$MANIFEST") \
   && ok "refresh-manifest.txt lists 19f (fleet reach)" || bad "refresh-manifest.txt missing 19f"
 # refresh-safe: detects by helper presence, never via has_component / AGENT_COMPONENTS

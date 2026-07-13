@@ -29,10 +29,11 @@
 step "Step 14/16: Claude stop hook"
 
 # --- PostToolUse liveness marker, gated to the job session -------------------
-# Referenced from base/assets/claude-hooks.json. last-tool-use feeds stall
-# detection and busy/idle classification on the portal — an operator window or
-# a lingering previous session must not refresh it while a job runs. With no
-# job-context session id (no active job / old runtime) behavior is unchanged.
+# Referenced from base/assets/claude-hooks.json. last-tool-use feeds the
+# monitor's regular-workflow grace discriminator and idle recovery's
+# recent-activity check on the portal — an operator window or a lingering
+# previous session must not refresh it while a job runs. With no job-context
+# session id (no active job / old runtime) behavior is unchanged.
 cat > "$AGENT_HOME/.local/bin/sb-mark-tool-use.sh" <<'TUEOF'
 #!/usr/bin/env bash
 # stdin: Claude Code hook JSON (carries the firing session's session_id).
@@ -423,22 +424,48 @@ exit 0
 SESSIONEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-session-start.sh"
 
-# --- UserPromptSubmit hook: clear the session-done sentinel (SCRUM-1433) -------
-# Referenced from base/assets/claude-hooks.json (UserPromptSubmit). The reaper
-# (base/19e) reaps a session ~1h after its stop hook drops
-# ~/.sidebutton/session-done/<sid>. A new prompt means the session is working
-# again, so remove its sentinel: the reaper then reads "absent = still running" and
-# leaves an actively-engaged session alone (AC3). The next Stop re-creates the
-# sentinel with a fresh mtime, restarting the grace. Self-scoped to the prompt's own
-# session_id, so no job-context gate is needed; best-effort, never disturbs the prompt.
-cat > "$AGENT_HOME/.local/bin/sb-clear-session-done.sh" <<'CLEAREOF'
-#!/usr/bin/env bash
-IN=$(cat 2>/dev/null || true)
-SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
-[ -n "$SID" ] && rm -f "${HOME}/.sidebutton/session-done/${SID}" 2>/dev/null || true
-exit 0
-CLEAREOF
-chmod +x "$AGENT_HOME/.local/bin/sb-clear-session-done.sh"
+# --- Decommission: retired idle-session reaper (SCRUM-1250/SCRUM-1433) ---------
+# Job completeness is signalled ONLY by the Stop hook's step-complete POST below;
+# the idle-session reaper (former base/19e) and its session-done sentinel
+# machinery (writer in this hook, sb-clear-session-done.sh, the UserPromptSubmit
+# hook entry) are retired. base/14 is refresh-manifest-listed, so this teardown
+# also reaches already-provisioned boxes on their next base refresh. Guarded on
+# the artifacts actually existing, so already-clean boxes (and every fresh
+# provision) pay two stat() calls instead of systemctl round-trips + a
+# daemon-reload on every run.
+# TODO: remove this block once the fleet reports no sb-session-reaper units
+# (tracking ticket to be filed in SCRUM).
+if [ -e /etc/systemd/system/sb-session-reaper.timer ] || [ -f /opt/sb-session-reaper.sh ]; then
+  systemctl disable --now sb-session-reaper.timer >/dev/null 2>&1 || true
+  systemctl disable --now sb-session-reaper.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/sb-session-reaper.timer \
+        /etc/systemd/system/sb-session-reaper.service \
+        /opt/sb-session-reaper.sh 2>/dev/null || true
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  log "decommissioned retired sb-session-reaper units"
+fi
+rm -f "$AGENT_HOME/.local/bin/sb-clear-session-done.sh" 2>/dev/null || true
+rm -rf "$AGENT_HOME/.sidebutton/session-done" 2>/dev/null || true
+# Also strip the retired UserPromptSubmit entry from the LIVE settings directly.
+# The hooks re-merge (lib-refresh / agent-redeploy §4b) normally removes it, but
+# it runs AFTER this step and is best-effort — if it fails, a hook entry would
+# keep pointing at the just-deleted script (exit 127 on every prompt submit).
+# Self-contained cleanup removes that ordering coupling. Only OUR entry is
+# touched: the key is deleted solely when its commands reference
+# sb-clear-session-done; validated tmp + mv so a jq failure never corrupts
+# settings.json.
+CLAUDE_SETTINGS="$AGENT_HOME/.claude/settings.json"
+if command -v jq >/dev/null 2>&1 && [ -f "$CLAUDE_SETTINGS" ] \
+   && jq -e '(.hooks.UserPromptSubmit // []) | tostring | contains("sb-clear-session-done")' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+  if jq 'del(.hooks.UserPromptSubmit)' "$CLAUDE_SETTINGS" > "${CLAUDE_SETTINGS}.tmp" 2>/dev/null \
+     && jq empty "${CLAUDE_SETTINGS}.tmp" 2>/dev/null; then
+    mv "${CLAUDE_SETTINGS}.tmp" "$CLAUDE_SETTINGS"
+    chown "$AGENT_USER:$AGENT_USER" "$CLAUDE_SETTINGS" 2>/dev/null || true
+    log "removed retired UserPromptSubmit hook entry from settings.json"
+  else
+    rm -f "${CLAUDE_SETTINGS}.tmp" 2>/dev/null || true
+  fi
+fi
 
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
@@ -717,25 +744,6 @@ SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty')
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty')
 HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
 
-# SCRUM-1433: write the session-done sentinel the reaper (base/19e) reads, BEFORE the
-# job-session gate below. The sentinel is a LOCAL lifecycle marker, not a portal post,
-# so it must be dropped for EVERY finished session — including one that is no longer
-# the current job-context session (a newer job can be dispatched while this one is
-# still running; concurrent ops sessions, SCRUM-1434). Gating it like the portal posts
-# would leave such a session with no sentinel, so the reaper would read it as "still
-# running" forever — the very ghost accumulation this ticket fixes. The reaper keys off
-# this file's mtime, immune to the idle-TUI/steer transcript writes that defeated the
-# old mtime signal; sb-clear-session-done.sh (UserPromptSubmit) removes it on
-# re-engagement so an active session is never reaped. Only the final Stop (never
-# SubagentStop) marks completion. Best-effort under set -e: if-guarded, never aborts.
-if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$SESSION_ID" ]; then
-  SDONE_DIR="${HOME}/.sidebutton/session-done"
-  if mkdir -p "$SDONE_DIR" 2>/dev/null; then
-    : > "${SDONE_DIR}/${SESSION_ID}" 2>/dev/null || true
-    log "session-done sentinel written for $SESSION_ID"
-  fi
-fi
-
 # Session identity (v3): job-context carries the dispatch-assigned Claude
 # session UUID (`claude --session-id`); this hook's stdin carries its own.
 # When both are known and differ, this Stop belongs to a lingering previous
@@ -800,11 +808,17 @@ PAYLOAD=$(jq -n --argjson job_id "${JOB_ID:-null}" --argjson step "${STEP_INDEX:
   '{job_id:$job_id, step_index:$step, session_id:$sid, final:$final,
     usage:($u + {duration_ms:$dur, total_cost_usd_reported:($cost|tonumber)} + $route
            + (if ($ident|type) == "object" and ($ident|length) > 0 then {auth_identity:$ident} else {} end))}')
+# --retry: these two POSTs are the ONLY completion signal — a single portal
+# blip (deploy restart, 5xx) at Stop time must not strand the job as
+# 'running'. --retry-all-errors covers connection-refused during a restart;
+# both endpoints are idempotent, so a duplicate delivery is harmless.
+# --max-time bounds the whole operation including retries.
 curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/usage" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
   -H "X-Agent-Name: ${AGENT_NAME}" \
-  -d "$PAYLOAD" --connect-timeout 10 --max-time 30 >/dev/null 2>&1 || true
+  -d "$PAYLOAD" --connect-timeout 10 --max-time 90 \
+  --retry 3 --retry-delay 2 --retry-all-errors >/dev/null 2>&1 || true
 log "posted usage (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-?} final=$IS_FINAL)"
 
 # SCRUM-1178 / SCRUM-511: on the main Stop, also POST step-complete — a
@@ -836,11 +850,13 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
     --arg msg "$OUTPUT_MSG" --arg sid "$SESSION_ID" --argjson prs "$PRS_JSON" \
     '{job_id:$job_id, step_index:$step, session_id:$sid, status:"success", output_message:$msg}
       + (if ($prs|length) > 0 then {prs:$prs} else {} end)')
+  # Retried like the usage POST above — completion must survive a portal blip.
   curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/step-complete" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${AGENT_TOKEN}" \
     -H "X-Agent-Name: ${AGENT_NAME}" \
-    -d "$STEP_COMPLETE_PAYLOAD" --connect-timeout 10 --max-time 30 >/dev/null 2>&1 || true
+    -d "$STEP_COMPLETE_PAYLOAD" --connect-timeout 10 --max-time 90 \
+    --retry 3 --retry-delay 2 --retry-all-errors >/dev/null 2>&1 || true
   log "posted step-complete (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-?})"
 fi
 

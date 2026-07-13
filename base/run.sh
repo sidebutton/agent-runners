@@ -36,7 +36,7 @@ run_variant_hook "early-setup"
 . "$BASE_DIR/06-chrome.sh"           # gated on INSTALL_CHROME
 # Claude Code CLI — componentized (gated on INSTALL_CLAUDE_CODE; default-on for
 # manual / back-compat sets). Position unchanged: before 08/09 and the
-# 14/15/15b/19e steps that configure Claude (which stay in base, ungated).
+# 14/15/15b steps that configure Claude (which stay in base, ungated).
 if [ "${INSTALL_CLAUDE_CODE:-0}" = "1" ] && [ -f "$BASE_DIR/components/claude-code/install.sh" ]; then
   . "$BASE_DIR/components/claude-code/install.sh"
 fi
@@ -117,6 +117,5 @@ done
 . "$BASE_DIR/18c-git-telemetry-timer.sh"  # git-telemetry reconcile timer (SCRUM-513) — never sourced before
 . "$BASE_DIR/19c-health-report.sh"   # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/19d-account-registry.sh"
-. "$BASE_DIR/19e-session-reaper.sh"  # close Claude Code sessions idle >1h after finish (SCRUM-1250)
 . "$BASE_DIR/19f-component-config.sh" # component config-file watchers + sb-config-place (SCRUM-1599)
 . "$BASE_DIR/20-mark-installed.sh"
