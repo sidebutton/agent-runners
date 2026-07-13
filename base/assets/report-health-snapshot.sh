@@ -183,11 +183,240 @@ fi
 export PAYLOAD_FILE="$TMP/payload.json"
 
 python3 - << 'PYEOF'
-import json, base64, os
+import json, base64, os, subprocess, datetime, pathlib
+import urllib.parse
 
 def env(k, default="0"):
     v = os.environ.get(k, default)
     return v if v else default
+
+# ── Auth-identity collector (SCRUM-1626, design §4.2/§4.3) ───────────────────
+# Extend the snapshot with a NON-SECRET view of which auth each agent is on:
+# Claude subscription (email/org), the global-env method, the staged per-app
+# envs, and cloud principals. Non-secret by construction — key names + a
+# fingerprint + endpoint host only, never values; ~/.claude/.credentials.json is
+# NEVER read. Every sub-section is wrapped in its own try/except so one failure
+# (missing file, absent oauthAccount, offline `aws sts`) still delivers the rest
+# of the snapshot: the collector must never raise into, or block, the POST.
+
+def fingerprint(tok):
+    """The single non-secret choke point for token identity: first-6 + … + last-4;
+    tokens under 12 chars render last-2 only. Never the middle, never the whole
+    value — so nothing usable as a credential leaves the VM."""
+    if not tok:
+        return None
+    t = str(tok).strip()
+    if not t:
+        return None
+    if len(t) < 12:
+        return "…" + t[-2:]
+    return t[:6] + "…" + t[-4:]
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+def _base_host(base_url):
+    """Host of a NON-LOCAL ANTHROPIC_BASE_URL (a gateway endpoint), else None. A
+    local base_url (CCR proxy on 127.0.0.1) is not a gateway identity."""
+    if not base_url:
+        return None
+    u = str(base_url).strip().strip('"').strip("'")
+    if not u:
+        return None
+    try:
+        host = urllib.parse.urlparse(u if "//" in u else "//" + u).hostname
+    except Exception:
+        return None
+    if not host or host.lower() in _LOCAL_HOSTS:
+        return None
+    return host
+
+def _parse_env_file(path):
+    """Parse `export KEY="VALUE"` / bare `KEY=VALUE` lines into a dict: strip an
+    optional `export ` prefix, split on the FIRST `=` (values may contain `=`),
+    strip matching surrounding quotes. Values are used only to derive
+    fingerprints/hosts — they are never emitted."""
+    out = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:]
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k, v = k.strip(), v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                v = v[1:-1]
+            if k:
+                out[k] = v
+    return out
+
+def _token_of(d):
+    """The auth token in an env dict: ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN."""
+    return d.get("ANTHROPIC_API_KEY") or d.get("ANTHROPIC_AUTH_TOKEN")
+
+def _cloud_cache_path(want_aws, want_gcp):
+    """Per-boot cache file, tagged by which principals we resolve so a box that is
+    somehow both Bedrock and Vertex never conflates them. Dir is overridable
+    (SB_AUTH_CACHE_DIR) so the hermetic test isolates itself from a real /tmp."""
+    boot = "na"
+    try:
+        boot = open("/proc/sys/kernel/random/boot_id").read().strip().replace("-", "")[:8] or "na"
+    except Exception:
+        pass
+    tag = ("a" if want_aws else "") + ("g" if want_gcp else "")
+    d = os.environ.get("SB_AUTH_CACHE_DIR") or "/tmp"
+    return os.path.join(d, ".sb-auth-cloud-%s-%s.json" % (boot, tag))
+
+def _collect_cloud(genv):
+    """AWS principal via `aws sts get-caller-identity` when a Bedrock flag /
+    AWS_PROFILE is present; GCP account+project via `gcloud config` when a Vertex
+    flag is present. Cached per boot with a short subprocess timeout; only invoked
+    for the relevant provider; omitted entirely on failure (offline/uninstalled)."""
+    def getenv(k):
+        return os.environ.get(k) or genv.get(k)
+    want_aws = getenv("CLAUDE_CODE_USE_BEDROCK") == "1" or bool(getenv("AWS_PROFILE"))
+    want_gcp = getenv("CLAUDE_CODE_USE_VERTEX") == "1"
+    if not (want_aws or want_gcp):
+        return None
+
+    cache = _cloud_cache_path(want_aws, want_gcp)
+    try:
+        with open(cache) as f:
+            return json.load(f) or None
+    except Exception:
+        pass
+
+    cloud = {"aws_profile": None, "aws_account": None, "aws_arn_tail": None,
+             "gcp_account": None, "gcp_project": None}
+    if want_aws:
+        cloud["aws_profile"] = getenv("AWS_PROFILE")
+        try:
+            out = subprocess.run(["aws", "sts", "get-caller-identity", "--output", "json"],
+                                 capture_output=True, text=True, timeout=4)
+            if out.returncode == 0 and out.stdout.strip():
+                ident = json.loads(out.stdout)
+                cloud["aws_account"] = ident.get("Account")
+                arn = ident.get("Arn") or ""
+                seg = arn.split(":")[-1] if arn else ""
+                if seg:
+                    cloud["aws_arn_tail"] = "/".join(seg.split("/")[:2])  # e.g. role/agent-runner
+        except Exception:
+            pass
+    if want_gcp:
+        for field, key in (("account", "gcp_account"), ("project", "gcp_project")):
+            try:
+                out = subprocess.run(["gcloud", "config", "get-value", field],
+                                     capture_output=True, text=True, timeout=4)
+                val = (out.stdout or "").strip()
+                if out.returncode == 0 and val and val != "(unset)":
+                    cloud[key] = val
+            except Exception:
+                pass
+
+    if not any(v for v in cloud.values()):
+        return None
+    try:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w") as f:
+            json.dump(cloud, f)
+    except Exception:
+        pass
+    return cloud
+
+def collect_auth_identity():
+    """Assemble the non-secret auth_identity block (design §4.2). Returns a dict of
+    only the sub-sections that succeeded, or None when nothing could be collected."""
+    ai = {}
+    home = pathlib.Path(os.environ.get("HOME") or pathlib.Path.home())
+
+    # oauthAccount underpins BOTH claude_subscription and the global-env method.
+    oauth = None
+    try:
+        cj = json.loads((home / ".claude.json").read_text())
+        oauth = cj.get("oauthAccount") if isinstance(cj, dict) else None
+    except Exception:
+        oauth = None
+    have_oauth = isinstance(oauth, dict) and bool(oauth)
+
+    # claude_subscription — omit the block entirely when oauthAccount is absent;
+    # read each field defensively (shape drifts across Claude Code versions, §10).
+    try:
+        if have_oauth:
+            sub = {}
+            if oauth.get("emailAddress"):
+                sub["email"] = oauth["emailAddress"]
+            if oauth.get("organizationName"):
+                sub["org"] = oauth["organizationName"]
+            if oauth.get("accountUuid"):
+                sub["account_uuid8"] = str(oauth["accountUuid"])[:8]
+            if sub:
+                ai["claude_subscription"] = sub
+    except Exception:
+        pass
+
+    # Global ~/.agent-env — feeds global_env, and the cloud flags/AWS_PROFILE.
+    genv = {}
+    try:
+        genv = _parse_env_file(os.environ.get("ENV_FILE") or str(home / ".agent-env"))
+    except Exception:
+        genv = {}
+
+    # global_env — method from the global env's token/base_url + the subscription:
+    # non-local base_url ⇒ gateway; else token present ⇒ api_key; else oauth ⇒
+    # subscription; else none (design §4.2).
+    try:
+        tok = _token_of(genv)
+        bh = _base_host(genv.get("ANTHROPIC_BASE_URL"))
+        if tok:
+            method = "gateway" if bh else "api_key"
+        elif have_oauth:
+            method = "subscription"
+        else:
+            method = "none"
+        ai["global_env"] = {"method": method, "token_fp": fingerprint(tok), "base_host": bh}
+    except Exception:
+        pass
+
+    # app_env_files — inventory of ~/.agent-env.d/* (drift vs the portal's delivered
+    # set): per slug the sorted key names + token fingerprint + base host. VALUES
+    # ARE NEVER EMITTED — unlike the global env, these are not echoed elsewhere.
+    try:
+        appdir = home / ".agent-env.d"
+        files = []
+        if appdir.is_dir():
+            for p in sorted(appdir.iterdir()):
+                if not p.is_file():
+                    continue
+                try:
+                    d = _parse_env_file(str(p))
+                except Exception:
+                    continue
+                files.append({
+                    "slug": p.name,
+                    "keys": sorted(d.keys()),
+                    "token_fp": fingerprint(_token_of(d)),
+                    "base_host": _base_host(d.get("ANTHROPIC_BASE_URL")),
+                })
+        if files:
+            ai["app_env_files"] = files
+    except Exception:
+        pass
+
+    # cloud — best-effort principals (cached per boot; short timeout).
+    try:
+        cloud = _collect_cloud(genv)
+        if cloud:
+            ai["cloud"] = cloud
+    except Exception:
+        pass
+
+    if not ai:
+        return None
+    ai["collected_at"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return ai
 
 payload = {
     "metrics": {
@@ -248,7 +477,6 @@ if env_file and os.path.isfile(env_file):
         payload["agent_env"] = '\n'.join(lines)
 
 # .mcp.json (syncs MCP server config to portal DB)
-import pathlib
 for mcp_path in [pathlib.Path.home() / "workspace" / ".mcp.json",
                  pathlib.Path("/home/agent/workspace/.mcp.json")]:
     if mcp_path.is_file():
@@ -257,6 +485,17 @@ for mcp_path in [pathlib.Path.home() / "workspace" / ".mcp.json",
         except Exception:
             pass
         break
+
+# auth_identity (SCRUM-1626) — non-secret subscription/key/cloud identity. Attached
+# only when the collector returns something; a total failure just omits the key while
+# every other block still posts. Additive: the current intake ignores unknown fields,
+# so this is a no-op until the AUTH-2 (SCRUM-1627) portal intake consumes it.
+try:
+    ai = collect_auth_identity()
+    if ai:
+        payload["auth_identity"] = ai
+except Exception:
+    pass
 
 with open(os.environ["PAYLOAD_FILE"], "w") as out:
     json.dump(payload, out)

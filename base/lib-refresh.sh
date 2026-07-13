@@ -51,12 +51,16 @@ sb_base_artifacts_fingerprint() {
       [ -f "$base/$f" ] && cat "$base/$f"
     done < <(sb_refresh_manifest_files "$base")
     # Assets deployed by manifest steps but not themselves steps: the self-update
-    # wrapper, and the sb-config-place / sb-config-reconcile helpers installed by
-    # 19f. Listing them here makes a wrapper/reconcile-only change flip the
-    # fingerprint (else the change-gate would skip the refresh and the fleet would
-    # keep the old privileged helper — the exact drift SCRUM-1380 exists to prevent).
+    # wrapper, the sb-config-place / sb-config-reconcile helpers installed by 19f,
+    # and the health reporter installed by 19c (report-health-snapshot.sh — an
+    # asset that 19c copies to /opt, so a reporter-only edit leaves 19c's own bytes
+    # unchanged and would NOT flip the fingerprint; SCRUM-1626). Listing them here
+    # makes a wrapper/reconcile/reporter-only change flip the fingerprint (else the
+    # change-gate would skip the refresh and the fleet would keep the old artifact —
+    # the exact drift SCRUM-1380 exists to prevent).
     for f in assets/claude-hooks.json assets/sb-self-update.sh \
              assets/sb-config-place.sh assets/sb-config-reconcile.sh \
+             assets/report-health-snapshot.sh \
              lib-refresh.sh refresh-manifest.txt; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done
