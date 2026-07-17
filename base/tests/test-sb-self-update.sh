@@ -54,6 +54,12 @@ done
 printf '%s\n' "${STEPS[@]}" | grep -qx '18c-git-telemetry-timer.sh' \
   && ok "manifest covers 18c-git-telemetry-timer.sh (the silently-dropped step)" \
   || bad "manifest is missing 18c-git-telemetry-timer.sh"
+# 19e-session-tidy.sh (SCRUM-1769) reaches the live fleet ONLY via this manifest — it is the
+# whole deployment path for the fix (no re-provisioning), so a dropped entry means boxes keep
+# accumulating finished Claude TUIs until they OOM-livelock, silently.
+printf '%s\n' "${STEPS[@]}" | grep -qx '19e-session-tidy.sh' \
+  && ok "manifest covers 19e-session-tidy.sh (session-tidy's only fleet path)" \
+  || bad "manifest is missing 19e-session-tidy.sh"
 if printf '%s\n' "${STEPS[@]}" | grep -qE '^(19-secrets|18-heartbeat|20-mark-installed)\.sh$'; then
   bad "manifest must NOT include token-rotating / re-registering / lifecycle steps"
 else

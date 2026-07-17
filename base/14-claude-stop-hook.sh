@@ -424,6 +424,32 @@ exit 0
 SESSIONEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-session-start.sh"
 
+# --- UserPromptSubmit hook: clear the session-stopped sentinel (SCRUM-1769) ----
+# Referenced from base/assets/claude-hooks.json (UserPromptSubmit). The Stop hook
+# below marks a finished session (~/.sidebutton/session-stopped/<sid>.json) and
+# sb-session-tidy (base/19e) closes its TUI once that mark is older than the TTL.
+# A new prompt means the session is working again, so drop the mark: the sweep
+# then finds nothing and an actively-engaged session is never closed. The next
+# Stop re-writes the sentinel with a fresh stopped_at, so the clock always runs
+# from the LAST completion.
+#
+# Self-scoped to the prompt's OWN session_id, so no job-context gate is needed
+# (an operator window clears only its own mark). Best-effort, always exit 0 — a
+# prompt submit must never be disturbed by this.
+cat > "$AGENT_HOME/.local/bin/sb-clear-session-stopped.sh" <<'CLEAREOF'
+#!/usr/bin/env bash
+# stdin: Claude Code UserPromptSubmit hook JSON (carries this session's session_id).
+IN=$(cat 2>/dev/null || true)
+SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
+# Same charset guard as the writer: sid reaches a path here, and it is stdin JSON.
+case "${SID:-}" in
+  ''|*[!A-Za-z0-9._-]*) exit 0 ;;
+esac
+rm -f "${HOME}/.sidebutton/session-stopped/${SID}.json" 2>/dev/null || true
+exit 0
+CLEAREOF
+chmod +x "$AGENT_HOME/.local/bin/sb-clear-session-stopped.sh"
+
 # --- Decommission: retired idle-session reaper (SCRUM-1250/SCRUM-1433) ---------
 # Job completeness is signalled ONLY by the Stop hook's step-complete POST below;
 # the idle-session reaper (former base/19e) and its session-done sentinel
@@ -433,8 +459,12 @@ chmod +x "$AGENT_HOME/.local/bin/sb-session-start.sh"
 # the artifacts actually existing, so already-clean boxes (and every fresh
 # provision) pay two stat() calls instead of systemctl round-trips + a
 # daemon-reload on every run.
-# TODO: remove this block once the fleet reports no sb-session-reaper units
-# (tracking ticket to be filed in SCRUM).
+# TODO (SCRUM-1769): remove this block once the fleet reports no sb-session-reaper
+# units. Until then it runs on EVERY refresh, which is why the successor deliberately
+# takes different names — sb-session-tidy.* + session-stopped/ + sb-clear-session-stopped.sh
+# (this ticket) — so the teardown below cannot delete the replacement it precedes.
+# The UserPromptSubmit strip further down is likewise keyed to the retired
+# sb-clear-session-done command string, so it leaves the new entry alone.
 if [ -e /etc/systemd/system/sb-session-reaper.timer ] || [ -f /opt/sb-session-reaper.sh ]; then
   systemctl disable --now sb-session-reaper.timer >/dev/null 2>&1 || true
   systemctl disable --now sb-session-reaper.service >/dev/null 2>&1 || true
@@ -732,6 +762,71 @@ detect_run_identity() {
     || printf '{"method":"%s","id":"%s"}' "$method" "$id"
 }
 
+# --- session-stopped sentinel writer (SCRUM-1769) -----------------------------
+# Mark a finished session so sb-session-tidy (base/19e) can close its idle TUI
+# ~SB_SESSION_CLOSE_TTL_SEC later. A dispatched job launches Claude as an
+# interactive TUI that never exits when the run ends; since PR #75 retired the
+# reaper nothing closes them, so they accumulate until the box OOM-livelocks
+# (23 claude procs = 7.7GB at the 2026-07-17 darwin OOM).
+#
+# The sentinel carries the PID and its /proc starttime rather than only the
+# session id, so the sweep signals a process it has positively identified instead
+# of mapping sid -> process by parsing --session-id out of /proc/*/cmdline (what
+# the retired gen-3 did). That matters for `claude --continue`, which resumes the
+# SAME session id in a NEW process: the stale sentinel carries the OLD pid, the
+# starttime check fails, and the sweep prunes the sentinel instead of killing the
+# live resumed session.
+#
+# STRICTLY best-effort — this is the one thing in this change that could be worse
+# than the bug. The hook runs `set -euo pipefail` and this writer lands BEFORE the
+# usage + step-complete POSTs that PR #75 made the SOLE completion signal, so any
+# non-zero here would abort the hook and strand EVERY job as 'running', fleet-wide.
+# Every step is guarded and the call site adds `|| true`, which also suspends -e
+# for the whole function body. A leaked TUI is recoverable; a stranded job is not.
+mark_session_stopped() {
+  local sid="${1:-}"
+  [ -n "$sid" ] || return 0
+  # sid comes from hook stdin JSON and becomes a filename — charset-validate it.
+  case "$sid" in
+    .|..|*[!A-Za-z0-9._-]*) log "session id unusable as a sentinel name — skipped"; return 0 ;;
+  esac
+  # Nearest ancestor with comm exactly `claude` (claude -> shell -> this hook, so
+  # the walk is 1-2 hops; bounded anyway). PPid comes from /proc/<p>/status, NOT
+  # field 4 of /proc/<p>/stat — a comm containing spaces shifts stat's fields.
+  local p="${PPID:-}" pid="" hops=0 comm=""
+  while [ -n "$p" ] && [ "$p" != "0" ] && [ "$p" != "1" ] && [ "$hops" -lt 12 ]; do
+    comm=$(cat "/proc/$p/comm" 2>/dev/null || true)
+    if [ "$comm" = "claude" ]; then pid="$p"; break; fi
+    p=$(awk '/^PPid:/{print $2; exit}' "/proc/$p/status" 2>/dev/null || true)
+    hops=$(( hops + 1 ))
+  done
+  [ -n "$pid" ] || { log "no claude ancestor for session $sid — sentinel skipped"; return 0; }
+  # starttime = /proc/<pid>/stat field 22. comm (field 2) is parenthesized and may
+  # contain spaces/parens, so cut everything through the LAST ") " and index from
+  # field 3: 22 - 2 = 20. Safe regardless of what comm holds.
+  local stat_line rest pid_start=""
+  stat_line=$(cat "/proc/$pid/stat" 2>/dev/null || true)
+  rest="${stat_line##*) }"
+  pid_start=$(printf '%s' "$rest" | awk '{print $20}' 2>/dev/null || true)
+  case "${pid_start:-}" in
+    ''|*[!0-9]*) log "unreadable starttime for pid $pid — sentinel skipped"; return 0 ;;
+  esac
+  local dir="${HOME}/.sidebutton/session-stopped"
+  mkdir -p "$dir" 2>/dev/null || { log "cannot create $dir — sentinel skipped"; return 0; }
+  # Atomic tmp + mv: the 5-min sweep must never read a half-written sentinel.
+  local tmp="${dir}/.${sid}.$$.tmp"
+  if jq -nc --argjson pid "$pid" --argjson pid_start "$pid_start" \
+       --argjson stopped_at "$(date +%s)" \
+       '{pid:$pid, pid_start:$pid_start, stopped_at:$stopped_at}' > "$tmp" 2>/dev/null \
+     && mv -f "$tmp" "${dir}/${sid}.json" 2>/dev/null; then
+    log "session-stopped sentinel written for $sid (pid=$pid start=$pid_start)"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    log "sentinel write failed for $sid — continuing to the completion POSTs"
+  fi
+  return 0
+}
+
 HOOK_INPUT=$(cat)
 [ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
 AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
@@ -743,6 +838,24 @@ fi
 SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty')
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty')
 HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
+
+# SCRUM-1769: mark this finished session for sb-session-tidy (base/19e), BEFORE the
+# job-session gate below. The sentinel is a LOCAL lifecycle marker, not a portal
+# post — it carries no job state and the sweep never consults completion — so it
+# must be dropped for EVERY finished session, including one the gate is about to
+# exit on. Lingering previous sessions and operator windows are precisely the ones
+# that accumulate; gating this like the portal posts would leave them unmarked and
+# therefore never closed, i.e. the leak this ticket fixes.
+#
+# Only the real Stop marks completion: SubagentStop fires when a sub-agent returns
+# while the main agent is still working, so marking there would arm the sweep
+# against a live session.
+#
+# `|| true` on a best-effort local marker that runs ahead of the sole completion
+# signal — see the mark_session_stopped header.
+if [ "$HOOK_EVENT" = "Stop" ]; then
+  mark_session_stopped "$SESSION_ID" || true
+fi
 
 # Session identity (v3): job-context carries the dispatch-assigned Claude
 # session UUID (`claude --session-id`); this hook's stdin carries its own.

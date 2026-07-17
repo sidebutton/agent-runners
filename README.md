@@ -253,6 +253,7 @@ Component-model coverage (the catalog ↔ schema ↔ on-disk ↔ `run.sh` wiring
 | `test-default-install-parity.sh` | default / empty / back-compat + every profile resolves to a byte-identical gate vector vs a committed snapshot (re-bless: `BLESS=1 bash …`) |
 | `test-claude-code-*` / `test-claude-code-router-component.sh` | the claude-code + CCR components' catalog shape, install dir, and `run.sh` wiring |
 | `test-component-config.sh` | `config_files[]` schema + the 3 declarations; `19f` refresh-safety (helper-signal detection, `run.sh`/manifest/fingerprint wiring); `sb-config-place` traversal/confinement rejection; `sb-config-reconcile` apply/sha-gate/teardown + service dispatch |
+| `test-19e-session-tidy.sh` | session-tidy (SCRUM-1769): the Stop-only sentinel writer lands **before** the job-session gate and can never abort the step-complete POST; the sweep spares the active job / fresh marks / unverified pids (comm + starttime) and honours `SB_SESSION_CLOSE_TTL_SEC=0`; `run.sh`/manifest wiring; the retired reaper names stay unused |
 
 CI (`.github/workflows/tests.yml`) runs `run-all.sh` on every push to `main` + PR
 (`ubuntu-latest` + `jq`).

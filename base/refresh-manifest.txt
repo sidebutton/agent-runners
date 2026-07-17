@@ -37,4 +37,5 @@
 18c-git-telemetry-timer.sh
 19c-health-report.sh
 19d-account-registry.sh
+19e-session-tidy.sh
 19f-component-config.sh
