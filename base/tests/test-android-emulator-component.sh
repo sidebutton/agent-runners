@@ -100,6 +100,15 @@ grep -q 'sys.boot_completed' "$AVD_START" \
   && ok "sb-avd-start waits for sys.boot_completed" || bad "sb-avd-start does not wait for full boot"
 grep -q -- '-no-window' "$AVD_START" \
   && ok "sb-avd-start boots headless (-no-window)" || bad "sb-avd-start is not headless"
+grep -vE '^[[:space:]]*#' "$AVD_START" | grep -q 'wait-for-device' \
+  && bad "sb-avd-start uses adb wait-for-device — hangs forever when the emulator dies pre-registration" \
+  || ok "sb-avd-start avoids adb wait-for-device (deadline-bounded polling instead)"
+grep -q 'BOOT_TIMEOUT' "$AVD_START" \
+  && ok "sb-avd-start waits are deadline-bounded (SB_AVD_BOOT_TIMEOUT)" \
+  || bad "sb-avd-start has no boot timeout"
+grep -q 'android-emulator requires android-sdk' "$ROOT/base/components.sh" \
+  && ok "components.sh defensively enables android-sdk for android-emulator (non-wizard callers)" \
+  || bad "components.sh does not enforce android-emulator's android-sdk prerequisite"
 grep -qE 'exit 1' "$INSTALL_SH" \
   && bad "install.sh hard-exits — component installs must WARN-and-continue" \
   || ok "install.sh never hard-exits (WARN-and-continue contract)"
