@@ -70,7 +70,7 @@
       "slug": "android-emulator",
       "kind": "toolchain",
       "title": "Android Emulator",
-      "description": "Android Emulator + a headless AVD (sb-default, API 36 x86_64) driven via adb/uiautomator for on-device UI discovery and testing. Boots on demand via sb-avd-start — nothing runs at boot. Needs KVM (/dev/kvm): Hetzner cloud VMs have it, AWS virtual instances do NOT. Pick a Large or larger machine.",
+      "description": "Android Emulator + a headless AVD (sb-default, API 36 x86_64) driven via adb/uiautomator for on-device UI discovery and testing. Boots on demand via sb-avd-start — nothing runs at boot. Needs KVM (/dev/kvm), which most cloud instance types do NOT expose (AWS virtual: never; verify on the target box — sb-avd-start refuses without it). Pick a Large or larger machine.",
       "requires": ["android-sdk"],
       "chip": { "label": "Emulator", "live": false }
     },
