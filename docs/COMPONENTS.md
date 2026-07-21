@@ -91,6 +91,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | `sidebutton-extension` | runtime | ext `pre-services` (Chrome managed-policy force-install) + `post-services` (browser_connected wait) | `chrome`, `sidebutton-server` | Extension (live) |
 | `knowledge-packs` | packs | `13-knowledge-packs` + `19d-account-registry` (+ update timer) | `sidebutton-server` | Knowledge packs |
 | `dotnet9` | toolchain | **new** — Microsoft apt repo → `dotnet-sdk-9.0`; `DOTNET_ROOT` in `/etc/environment` | — | .NET 9 |
+| `android-sdk` | toolchain | **new** — `openjdk-17-jdk-headless` + pinned Android cmdline-tools → `/opt/android-sdk` (platform-tools, platform 36, build-tools; licenses pre-accepted so AGP can self-serve further packages at build time); SDK tree chowned to `$AGENT_USER`; `ANDROID_HOME`/`ANDROID_SDK_ROOT` in `/etc/environment`. **No emulator/AVD** — headless build/lint/unit-test only (no KVM guarantee, no BLE/NFC radios) | — | Android SDK |
 | `docker` | toolchain | **new** — `docker-ce` + `systemctl enable --now docker` + `usermod -aG docker $AGENT_USER` | — | Docker (live) |
 | `postgres-client` | toolchain | **new** — `postgresql-client` | — | psql |
 | `openvpn` | toolchain | **new** — `openvpn` + `sb-vpn-connect` helper; .ovpn applied manually post-provision (MVP — see [`OPENVPN.md`](./OPENVPN.md)) | — | VPN |
@@ -173,6 +174,7 @@ are optional and require the server.
 |---|---|---|
 | **SideButton SWE Full Stack** (`swe-full-stack`, default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
 | **SideButton SWE .NET** (`swe-dotnet`, new) | Full Stack **+ `dotnet9`** | se, qa, sd, pm |
+| **SideButton SWE Android** (`swe-android`, new) | Full Stack **+ `android-sdk`** | se, qa, sd, pm |
 | **SideButton SWE Native** (`swe-native`) | `claude-code, chrome, sidebutton-server, knowledge-packs` (no extension) | se, qa |
 
 Plugins are selected separately, by role (§4b): `screen-record` for every role, `writing-quality` for `smm`.
@@ -183,7 +185,7 @@ Dropped: `qa-generalist`, `swe-bare`.
 {
   "version": 2,
   "default": "swe-full-stack",
-  "order": ["swe-full-stack", "swe-dotnet", "swe-native"],
+  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "swe-native"],
   "runner": "ubuntu-claude-code",
   "profiles": [
     { "slug": "swe-full-stack", "name": "SideButton SWE Full Stack",
@@ -192,6 +194,9 @@ Dropped: `qa-generalist`, `swe-bare`.
     { "slug": "swe-dotnet", "name": "SideButton SWE .NET",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
       "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "dotnet9"] },
+    { "slug": "swe-android", "name": "SideButton SWE Android",
+      "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
+      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "android-sdk"] },
     { "slug": "swe-native", "name": "SideButton SWE Native",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa"],
       "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] }
