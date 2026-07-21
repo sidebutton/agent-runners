@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# sb-avd-stop — shut every running emulator down and free its RAM.
+set -uo pipefail
+ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
+ADB="$ANDROID_HOME/platform-tools/adb"
+_found=0
+for _e in $("$ADB" devices 2>/dev/null | awk '/^emulator-/{print $1}'); do
+  _found=1
+  "$ADB" -s "$_e" emu kill >/dev/null 2>&1 || true
+  echo "sb-avd-stop: sent kill to ${_e}"
+done
+[ "$_found" = 1 ] || echo "sb-avd-stop: no emulator running"

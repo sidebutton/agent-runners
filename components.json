@@ -62,9 +62,17 @@
       "slug": "android-sdk",
       "kind": "toolchain",
       "title": "Android SDK",
-      "description": "OpenJDK 17 + Android SDK cmdline-tools, platform 36 & build-tools with licenses pre-accepted (headless Gradle build/lint/unit-test). No emulator — on-device/BLE/NFC flows still need real hardware. Prefer a Medium or larger machine.",
+      "description": "OpenJDK 17 + Android SDK cmdline-tools, platform 36 & build-tools with licenses pre-accepted (headless Gradle build/lint/unit-test). No emulator — add the Android Emulator component for on-device runs. Prefer a Medium or larger machine.",
       "requires": [],
       "chip": { "label": "Android SDK", "live": false }
+    },
+    {
+      "slug": "android-emulator",
+      "kind": "toolchain",
+      "title": "Android Emulator",
+      "description": "Android Emulator + a headless AVD (sb-default, API 36 x86_64) driven via adb/uiautomator for on-device UI discovery and testing. Boots on demand via sb-avd-start — nothing runs at boot. Needs KVM (/dev/kvm): Hetzner cloud VMs have it, AWS virtual instances do NOT. Pick a Large or larger machine.",
+      "requires": ["android-sdk"],
+      "chip": { "label": "Emulator", "live": false }
     },
     {
       "slug": "docker",

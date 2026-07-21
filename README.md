@@ -38,6 +38,7 @@ not dispatchable** — it's a manual / RDP agent.
 | `knowledge-packs` | packs | `sidebutton-server` | universal `agents` ops pack + account registry |
 | `dotnet9` | toolchain | — | .NET 9 SDK |
 | `android-sdk` | toolchain | — | OpenJDK 17 + Android SDK (cmdline-tools, platform 36, build-tools; licenses pre-accepted; `ANDROID_HOME` set) — headless Gradle build/lint/unit-test, no emulator |
+| `android-emulator` | toolchain | `android-sdk` | Android Emulator + headless AVD `sb-default` (API 36 x86_64) with on-demand `sb-avd-start`/`sb-avd-stop` — needs KVM (`/dev/kvm`), on-device UI discovery/testing |
 | `docker` | toolchain | — | Docker engine (+ agent in `docker` group) |
 | `postgres-client` | toolchain | — | `psql` |
 | `openvpn` | toolchain | — | OpenVPN client + `sb-vpn-connect` helper; auto-consumes `.ovpn` at `/etc/sidebutton/config/openvpn/` (see [`docs/OPENVPN.md`](./docs/OPENVPN.md)) |
@@ -89,7 +90,7 @@ wizard pre-checks; the user may uncheck or add any component.
 |---|---|---|
 | **SideButton SWE Full Stack** (default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
 | **SideButton SWE .NET** | Full Stack + `dotnet9` | se, qa, sd, pm |
-| **SideButton SWE Android** | Full Stack + `android-sdk` | se, qa, sd, pm |
+| **SideButton SWE Android** | Full Stack + `android-sdk` + `android-emulator` | se, qa, sd, pm |
 | **SideButton SWE Native** | `claude-code, chrome, sidebutton-server, knowledge-packs` | se, qa |
 
 Plugins are selected separately, by role (see Plugins above) — not baked into profile presets.
