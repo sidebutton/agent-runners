@@ -16,7 +16,10 @@ step "Component: Android SDK"
 ANDROID_SDK_DIR=/opt/android-sdk
 # dl.google.com publishes cmdline-tools as versioned zips only — pin the build and
 # bump deliberately (the tools self-update the rest of the SDK via sdkmanager).
-ANDROID_CMDLINE_TOOLS_BUILD=13114709
+# GOTCHA (live-verified 2026-07-21): Google PRUNES old zips — a pinned build can
+# start 404ing. If the download fails with 404, pick the newest build listed in
+# https://dl.google.com/android/repository/repository2-3.xml and bump this pin.
+ANDROID_CMDLINE_TOOLS_BUILD=15859902
 # Baseline warm set — track the highest compileSdk the fleet's Android repos use.
 # A build needing anything else self-serves via AGP (licenses are pre-accepted).
 ANDROID_SDK_PACKAGES=("platform-tools" "platforms;android-36" "build-tools;36.0.0")

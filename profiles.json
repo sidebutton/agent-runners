@@ -25,7 +25,7 @@
     {
       "slug": "swe-android",
       "name": "SideButton SWE Android",
-      "description": "SWE Full Stack + JDK 17, the Android SDK, and the Android Emulator (headless AVD for on-device UI discovery/testing, booted on demand via sb-avd-start; needs KVM). Pick a Large or larger machine.",
+      "description": "SWE Full Stack + JDK 17, the Android SDK, and the Android Emulator (headless AVD for on-device UI discovery/testing, booted on demand via sb-avd-start; needs KVM). The Create-Agent wizard enforces a KVM-capable machine where the provider offers one (AWS XL/m8i class); on Hetzner none qualifies and discovery falls back to source-only.",
       "runner": "ubuntu-claude-code",
       "default_roles": ["se", "qa", "sd", "pm"],
       "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "android-sdk", "android-emulator"]
