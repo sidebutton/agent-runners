@@ -11,7 +11,9 @@
 # later resize/migration can enable them), but sb-avd-start hard-refuses, so a
 # discovery run degrades to the source-scaffold path with a clear reason instead
 # of a silent 10-minute software-rendered crawl. AWS virtual instances have no
-# nested virt; Hetzner cloud VMs expose /dev/kvm. Idempotent.
+# nested virt, and many cloud types don't expose it either (live-verified
+# 2026-07-21: a Hetzner CPX shared-vCPU box had no vmx at all) — always verify
+# /dev/kvm on the target box. Idempotent.
 
 step "Component: Android Emulator"
 
