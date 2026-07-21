@@ -84,9 +84,9 @@ jq -e '.profiles[] | select(.slug=="swe-android") | .components | index("android
   && ok "swe-android preset includes android-sdk" || bad "swe-android preset missing android-sdk"
 full="$(jq -c '.profiles[] | select(.slug=="swe-full-stack") | .components' "$PROFILES_JSON")"
 droid="$(jq -c '.profiles[] | select(.slug=="swe-android") | .components' "$PROFILES_JSON")"
-[ "$droid" = "$(printf '%s' "$full" | jq -c '. + ["android-sdk"]')" ] \
-  && ok "swe-android = swe-full-stack components + android-sdk (exact superset)" \
-  || bad "swe-android preset drifted from full-stack + android-sdk: $droid"
+[ "$droid" = "$(printf '%s' "$full" | jq -c '. + ["android-sdk", "android-emulator"]')" ] \
+  && ok "swe-android = swe-full-stack components + android-sdk + android-emulator (exact superset)" \
+  || bad "swe-android preset drifted from full-stack + android-sdk + android-emulator: $droid"
 
 echo
 if [ "$fail" = 0 ]; then echo "TEST PASSED"; else echo "TEST FAILED"; exit 1; fi

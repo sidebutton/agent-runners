@@ -45,7 +45,9 @@ fi
 
 # Toolchain components (root; run after the agent user exists so docker can add
 # it to the docker group). Each is idempotent and self-gated by selection here.
-for _tc in dotnet9 android-sdk docker postgres-client openvpn wireguard rdp-client; do
+# Order matters within the list: android-emulator consumes the sdkmanager +
+# licenses that android-sdk installs.
+for _tc in dotnet9 android-sdk android-emulator docker postgres-client openvpn wireguard rdp-client; do
   if has_component "$_tc" && [ -f "$BASE_DIR/components/$_tc/install.sh" ]; then
     . "$BASE_DIR/components/$_tc/install.sh"
   fi

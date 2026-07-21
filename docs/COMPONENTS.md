@@ -91,7 +91,8 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | `sidebutton-extension` | runtime | ext `pre-services` (Chrome managed-policy force-install) + `post-services` (browser_connected wait) | `chrome`, `sidebutton-server` | Extension (live) |
 | `knowledge-packs` | packs | `13-knowledge-packs` + `19d-account-registry` (+ update timer) | `sidebutton-server` | Knowledge packs |
 | `dotnet9` | toolchain | **new** — Microsoft apt repo → `dotnet-sdk-9.0`; `DOTNET_ROOT` in `/etc/environment` | — | .NET 9 |
-| `android-sdk` | toolchain | **new** — `openjdk-17-jdk-headless` + pinned Android cmdline-tools → `/opt/android-sdk` (platform-tools, platform 36, build-tools; licenses pre-accepted so AGP can self-serve further packages at build time); SDK tree chowned to `$AGENT_USER`; `ANDROID_HOME`/`ANDROID_SDK_ROOT` in `/etc/environment`. **No emulator/AVD** — headless build/lint/unit-test only (no KVM guarantee, no BLE/NFC radios) | — | Android SDK |
+| `android-sdk` | toolchain | **new** — `openjdk-17-jdk-headless` + pinned Android cmdline-tools → `/opt/android-sdk` (platform-tools, platform 36, build-tools; licenses pre-accepted so AGP can self-serve further packages at build time); SDK tree chowned to `$AGENT_USER`; `ANDROID_HOME`/`ANDROID_SDK_ROOT` in `/etc/environment`. **No emulator/AVD** — headless build/lint/unit-test only (add `android-emulator` for on-device runs) | — | Android SDK |
+| `android-emulator` | toolchain | **new** — `sdkmanager` installs `emulator` + pinned `system-images;android-36;google_apis;x86_64` (licenses already accepted by `android-sdk`); creates the shared headless AVD `sb-default` as `$AGENT_USER` (no `--force`); `usermod -aG kvm`; ships on-demand `sb-avd-start` / `sb-avd-stop` helpers — **no boot service**, the emulator's RAM stays free between runs. **KVM is a run-time gate**: `sb-avd-start` refuses without `/dev/kvm` (AWS virtual instances have none; Hetzner cloud VMs do), so SD/QA degrade to source-only with a clear reason | `android-sdk` | Emulator |
 | `docker` | toolchain | **new** — `docker-ce` + `systemctl enable --now docker` + `usermod -aG docker $AGENT_USER` | — | Docker (live) |
 | `postgres-client` | toolchain | **new** — `postgresql-client` | — | psql |
 | `openvpn` | toolchain | **new** — `openvpn` + `sb-vpn-connect` helper; .ovpn applied manually post-provision (MVP — see [`OPENVPN.md`](./OPENVPN.md)) | — | VPN |
@@ -174,7 +175,7 @@ are optional and require the server.
 |---|---|---|
 | **SideButton SWE Full Stack** (`swe-full-stack`, default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
 | **SideButton SWE .NET** (`swe-dotnet`, new) | Full Stack **+ `dotnet9`** | se, qa, sd, pm |
-| **SideButton SWE Android** (`swe-android`, new) | Full Stack **+ `android-sdk`** | se, qa, sd, pm |
+| **SideButton SWE Android** (`swe-android`, new) | Full Stack **+ `android-sdk` + `android-emulator`** | se, qa, sd, pm |
 | **SideButton SWE Native** (`swe-native`) | `claude-code, chrome, sidebutton-server, knowledge-packs` (no extension) | se, qa |
 
 Plugins are selected separately, by role (§4b): `screen-record` for every role, `writing-quality` for `smm`.
@@ -196,7 +197,7 @@ Dropped: `qa-generalist`, `swe-bare`.
       "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "dotnet9"] },
     { "slug": "swe-android", "name": "SideButton SWE Android",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
-      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "android-sdk"] },
+      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "android-sdk", "android-emulator"] },
     { "slug": "swe-native", "name": "SideButton SWE Native",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa"],
       "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] }

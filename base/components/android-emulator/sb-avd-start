@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# sb-avd-start [avd-name] — boot the shared headless AVD and wait for full boot.
+#
+# On demand only: SD/QA sessions call this when a run actually needs the device;
+# nothing starts it at boot, so its RAM stays free between runs. Exits 0 fast
+# when an emulator is already up. Hard-refuses without usable /dev/kvm — a
+# software-rendered emulator takes 10+ minutes to boot and times out uiautomator
+# calls, so degrading to source-only discovery WITH A CLEAR REASON beats a
+# silent crawl. Every wait is bounded by SB_AVD_BOOT_TIMEOUT (default 300s);
+# `adb wait-for-device` is deliberately NOT used — it hangs forever when the
+# emulator process dies before registering with adb.
+set -euo pipefail
+
+AVD_NAME="${1:-sb-default}"
+ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
+ADB="$ANDROID_HOME/platform-tools/adb"
+EMULATOR_BIN="$ANDROID_HOME/emulator/emulator"
+BOOT_TIMEOUT="${SB_AVD_BOOT_TIMEOUT:-300}"
+
+if [ ! -e /dev/kvm ]; then
+  echo "sb-avd-start: /dev/kvm not available — the Android emulator needs KVM (AWS virtual instances cannot provide it; Hetzner cloud boxes can). Use source-based discovery instead." >&2
+  exit 1
+fi
+if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+  echo "sb-avd-start: no read/write access to /dev/kvm — $(id -un) must be in the kvm group (provisioning adds it; re-login if this is a stale session)." >&2
+  exit 1
+fi
+if [ ! -x "$EMULATOR_BIN" ]; then
+  echo "sb-avd-start: $EMULATOR_BIN not found — is the android-emulator component installed on this agent?" >&2
+  exit 1
+fi
+if ! "$EMULATOR_BIN" -list-avds 2>/dev/null | grep -qx "$AVD_NAME"; then
+  echo "sb-avd-start: AVD '$AVD_NAME' not found for $(id -un) (emulator -list-avds) — provisioning creates sb-default under the agent user's ~/.android." >&2
+  exit 1
+fi
+
+if "$ADB" devices 2>/dev/null | grep -qE '^emulator-[0-9]+[[:space:]]+device$'; then
+  echo "sb-avd-start: an emulator is already running"
+  exit 0
+fi
+
+nohup "$EMULATOR_BIN" -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim \
+  -gpu swiftshader_indirect >"/tmp/sb-avd-${AVD_NAME}.log" 2>&1 &
+EMU_PID=$!
+
+_deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
+_die() {
+  echo "sb-avd-start: $1 — see /tmp/sb-avd-${AVD_NAME}.log" >&2
+  exit 1
+}
+
+# Phase 1: the emulator process registers with adb (any state — offline counts).
+until "$ADB" devices 2>/dev/null | grep -qE '^emulator-[0-9]+[[:space:]]'; do
+  kill -0 "$EMU_PID" 2>/dev/null || _die "emulator process exited before registering with adb"
+  if [ "$(date +%s)" -ge "$_deadline" ]; then _die "no emulator registered with adb within ${BOOT_TIMEOUT}s"; fi
+  sleep 2
+done
+# Phase 2: Android userspace is fully up.
+until [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+  if [ "$(date +%s)" -ge "$_deadline" ]; then _die "AVD did not reach sys.boot_completed within ${BOOT_TIMEOUT}s"; fi
+  sleep 3
+done
+"$ADB" shell input keyevent 82 >/dev/null 2>&1 || true
+echo "sb-avd-start: ${AVD_NAME} booted (adb: $("$ADB" devices | awk '/^emulator-/{print $1; exit}'))"

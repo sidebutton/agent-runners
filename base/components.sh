@@ -48,6 +48,12 @@ fi
 if has_component claude-code-router; then
   [ "$INSTALL_CLAUDE_CODE" = 1 ]       || { log "components: claude-code-router requires claude-code — enabling"; export INSTALL_CLAUDE_CODE=1; }
 fi
+if has_component android-emulator && ! has_component android-sdk; then
+  # Toolchain deps have no gate vars — extend the set itself so the run.sh
+  # toolchain loop installs the prerequisite (its install.sh would WARN-skip).
+  log "components: android-emulator requires android-sdk — enabling"
+  COMPONENTS="${COMPONENTS}android-sdk "
+fi
 if [ "$SKIP_KNOWLEDGE_PACKS" = 0 ] && [ "$SKIP_SIDEBUTTON_SERVER" != 0 ]; then
   log "components: knowledge-packs requires sidebutton-server — enabling"; export SKIP_SIDEBUTTON_SERVER=0
 fi
