@@ -18,7 +18,7 @@ EMULATOR_BIN="$ANDROID_HOME/emulator/emulator"
 BOOT_TIMEOUT="${SB_AVD_BOOT_TIMEOUT:-300}"
 
 if [ ! -e /dev/kvm ]; then
-  echo "sb-avd-start: /dev/kvm not available — the Android emulator needs KVM, and this instance type does not expose it (AWS virtual instances never do; many cloud types lack nested virtualization). Use source-based discovery instead." >&2
+  echo "sb-avd-start: /dev/kvm not available — the Android emulator needs KVM, and this instance type does not expose it (no AWS virtual instance or Hetzner Cloud type does; GCP needs nested virtualization enabled at provision). Use source-based discovery instead." >&2
   exit 1
 fi
 if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then

@@ -10,10 +10,11 @@
 # ONLY with KVM: install still completes without /dev/kvm (image + AVD land so a
 # later resize/migration can enable them), but sb-avd-start hard-refuses, so a
 # discovery run degrades to the source-scaffold path with a clear reason instead
-# of a silent 10-minute software-rendered crawl. AWS virtual instances have no
-# nested virt, and many cloud types don't expose it either (live-verified
-# 2026-07-21: a Hetzner CPX shared-vCPU box had no vmx at all) — always verify
-# /dev/kvm on the target box. Idempotent.
+# of a silent 10-minute software-rendered crawl. No AWS virtual instance or
+# Hetzner Cloud type exposes nested virt (live-verified 2026-07-21 on a CX box:
+# no vmx; Hetzner does not offer it on any cloud type) — GCP can with nested
+# virtualization enabled at provision. Always verify /dev/kvm on the box.
+# Idempotent.
 
 step "Component: Android Emulator"
 
