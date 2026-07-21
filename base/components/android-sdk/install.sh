@@ -54,7 +54,10 @@ else
 fi
 
 if [ -x "$SDKMANAGER" ]; then
-  yes | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_DIR" --licenses >>"$LOG_FILE" 2>&1 \
+  # NOT `yes |`: under run.sh's pipefail, `yes` dies SIGPIPE (141) when sdkmanager
+  # exits, turning every SUCCESSFUL license pass into a false WARN. A bounded
+  # printf fits the pipe buffer and exits 0, so the guard reflects sdkmanager.
+  printf 'y\n%.0s' {1..200} | "$SDKMANAGER" --sdk_root="$ANDROID_SDK_DIR" --licenses >>"$LOG_FILE" 2>&1 \
     || log "WARN: SDK license acceptance failed"
   "$SDKMANAGER" --sdk_root="$ANDROID_SDK_DIR" "${ANDROID_SDK_PACKAGES[@]}" >>"$LOG_FILE" 2>&1 \
     || log "WARN: SDK package install failed"

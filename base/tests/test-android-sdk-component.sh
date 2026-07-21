@@ -62,7 +62,10 @@ grep -qE 'ANDROID_CMDLINE_TOOLS_BUILD=[0-9]+' "$INSTALL_SH" \
 grep -q -- '--licenses' "$INSTALL_SH" \
   && ok "install.sh accepts SDK licenses (AGP self-serve downloads depend on it)" \
   || bad "install.sh never accepts SDK licenses — first Gradle build would fail"
-grep -q '^ANDROID_HOME=' "$INSTALL_SH" || grep -q 'ANDROID_HOME=' "$INSTALL_SH" \
+grep -qE '^[[:space:]]*yes[[:space:]]*\|' "$INSTALL_SH" \
+  && bad "license pipe uses \`yes |\` — SIGPIPE 141 under run.sh's pipefail makes every success a false WARN" \
+  || ok "license pipe avoids \`yes |\` (no SIGPIPE false-WARN under pipefail)"
+grep -q 'ANDROID_HOME=' "$INSTALL_SH" \
   && ok "install.sh writes ANDROID_HOME to /etc/environment" \
   || bad "install.sh never sets ANDROID_HOME"
 grep -q 'chown -R "\$AGENT_USER"' "$INSTALL_SH" \
