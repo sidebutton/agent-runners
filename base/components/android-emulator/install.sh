@@ -69,5 +69,13 @@ else
   install -m 0755 "$BASE_DIR/components/android-emulator/sb-avd-stop" /usr/local/bin/sb-avd-stop \
     || log "WARN: sb-avd-stop install failed"
 
+  # Emulator-driver MCP: lets Claude Code drive the AVD (accessibility-tree
+  # taps/reads over adb) with no per-session npx fetch. base/15-claude-mcp.sh
+  # registers it as an MCP server for android-emulator agents; the package
+  # exposes the `mcp-server-mobile` bin. Pinned — its tools take an explicit
+  # `device` argument, a contract that can shift between versions.
+  npm i -g @mobilenext/mobile-mcp@0.0.62 >>"$LOG_FILE" 2>&1 \
+    || log "WARN: mobile-mcp global install failed — Claude Code emulator control unavailable"
+
   log "android-emulator: image [${ANDROID_EMULATOR_IMAGE}] avd [${SB_AVD_NAME}] kvm [$([ -e /dev/kvm ] && echo yes || echo no)]"
 fi

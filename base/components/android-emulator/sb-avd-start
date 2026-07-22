@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sb-avd-start [avd-name] — boot the shared headless AVD and wait for full boot.
+# sb-avd-start [avd-name] — boot the shared AVD and wait for full boot.
 #
 # On demand only: SD/QA sessions call this when a run actually needs the device;
 # nothing starts it at boot, so its RAM stays free between runs. Exits 0 fast
@@ -9,6 +9,11 @@
 # silent crawl. Every wait is bounded by SB_AVD_BOOT_TIMEOUT (default 300s);
 # `adb wait-for-device` is deliberately NOT used — it hangs forever when the
 # emulator process dies before registering with adb.
+#
+# Display: headless by default (RAM-lean, no display dependency). Set
+# SB_AVD_WINDOWED=1 to render a window on the agent's Xvfb display
+# (SB_AVD_DISPLAY, default :10) so the device is visible on the Live Desktop for
+# demos and visual QA.
 set -euo pipefail
 
 AVD_NAME="${1:-sb-default}"
@@ -16,6 +21,14 @@ ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
 ADB="$ANDROID_HOME/platform-tools/adb"
 EMULATOR_BIN="$ANDROID_HOME/emulator/emulator"
 BOOT_TIMEOUT="${SB_AVD_BOOT_TIMEOUT:-300}"
+
+# Run from a directory this user owns. The emulator writes transient files
+# relative to $PWD during startup; a cwd the agent user cannot write (e.g. the
+# home of whatever account invoked us) makes QEMU's main loop exit 1 within a
+# millisecond, with no usable error surfaced through the launcher. A login shell
+# cd's home for free, but a bare `sudo -u agent …` / subprocess invocation keeps
+# the caller's cwd — so normalise it here rather than depending on the caller.
+cd "${HOME:-$(getent passwd "$(id -u)" | cut -d: -f6)}" 2>/dev/null || cd /tmp
 
 if [ ! -e /dev/kvm ]; then
   echo "sb-avd-start: /dev/kvm not available — the Android emulator needs KVM, and this instance type does not expose it (no Hetzner Cloud type has it — live-verified; on AWS use an m8i/c8i-class XL machine). Use source-based discovery instead." >&2
@@ -39,7 +52,15 @@ if "$ADB" devices 2>/dev/null | grep -qE '^emulator-[0-9]+[[:space:]]+device$'; 
   exit 0
 fi
 
-nohup "$EMULATOR_BIN" -avd "$AVD_NAME" -no-window -no-audio -no-boot-anim \
+# Headless by default; SB_AVD_WINDOWED=1 renders on the agent's Xvfb display so
+# the device shows up on the Live Desktop (demos / visual QA).
+WINDOW_ARGS=(-no-window)
+if [ "${SB_AVD_WINDOWED:-0}" = "1" ]; then
+  WINDOW_ARGS=()
+  export DISPLAY="${SB_AVD_DISPLAY:-:10}"
+fi
+
+nohup "$EMULATOR_BIN" -avd "$AVD_NAME" "${WINDOW_ARGS[@]}" -no-audio -no-boot-anim \
   -gpu swiftshader_indirect >"/tmp/sb-avd-${AVD_NAME}.log" 2>&1 &
 EMU_PID=$!
 
