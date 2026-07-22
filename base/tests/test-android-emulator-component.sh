@@ -99,7 +99,13 @@ grep -q '/dev/kvm' "$AVD_START" \
 grep -q 'sys.boot_completed' "$AVD_START" \
   && ok "sb-avd-start waits for sys.boot_completed" || bad "sb-avd-start does not wait for full boot"
 grep -q -- '-no-window' "$AVD_START" \
-  && ok "sb-avd-start boots headless (-no-window)" || bad "sb-avd-start is not headless"
+  && ok "sb-avd-start boots headless by default (-no-window)" || bad "sb-avd-start is not headless by default"
+grep -q 'SB_AVD_WINDOWED' "$AVD_START" \
+  && ok "sb-avd-start supports windowed mode (SB_AVD_WINDOWED → Live Desktop)" \
+  || bad "sb-avd-start has no windowed mode"
+grep -qE '^cd "\$\{HOME' "$AVD_START" \
+  && ok "sb-avd-start normalises cwd (QEMU exits 1 from a cwd the agent can't write)" \
+  || bad "sb-avd-start does not normalise cwd — foreign-cwd launches brick silently"
 grep -vE '^[[:space:]]*#' "$AVD_START" | grep -q 'wait-for-device' \
   && bad "sb-avd-start uses adb wait-for-device — hangs forever when the emulator dies pre-registration" \
   || ok "sb-avd-start avoids adb wait-for-device (deadline-bounded polling instead)"
@@ -112,6 +118,17 @@ grep -q 'android-emulator requires android-sdk' "$ROOT/base/components.sh" \
 grep -qE 'exit 1' "$INSTALL_SH" \
   && bad "install.sh hard-exits — component installs must WARN-and-continue" \
   || ok "install.sh never hard-exits (WARN-and-continue contract)"
+
+# 5b. Emulator-driver MCP (mobile-mcp): pre-installed by the component, registered
+#     as an MCP server for android-emulator agents by base/15-claude-mcp.sh.
+grep -q 'mobile-mcp' "$INSTALL_SH" \
+  && ok "install.sh pre-installs the mobile-mcp emulator driver" \
+  || bad "install.sh does not pre-install mobile-mcp"
+CLAUDE_MCP_SH="$ROOT/base/15-claude-mcp.sh"
+grep -q 'has_component android-emulator' "$CLAUDE_MCP_SH" \
+  && grep -q 'mcp-server-mobile' "$CLAUDE_MCP_SH" \
+  && ok "base/15 registers mobile-mcp for android-emulator agents" \
+  || bad "base/15 does not register mobile-mcp for android-emulator agents"
 
 # 6. profiles.json: swe-android includes the component (superset shape is owned
 #    by test-android-sdk-component.sh — asserted there against full-stack).
