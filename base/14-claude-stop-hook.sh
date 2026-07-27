@@ -731,7 +731,20 @@ fp_token() {
 url_host() {
   local u="${1:-}" hp="" h=""
   [ -n "$u" ] || return 0
-  hp="${u#*://}"; hp="${hp%%/*}"; h="${hp%%:*}"
+  u="${u#[\"\']}"; u="${u%[\"\']}"                 # a quoted env value is not a quoted host (parity with .strip('"'))
+  hp="${u#*://}"; hp="${hp%%/*}"                   # drop scheme + path
+  # Drop userinfo. `##*@` cuts at the LAST @, exactly as urlparse's netloc.rpartition('@') does.
+  # Without this a credentialed endpoint (`https://tok@api.z.ai/v1` — legal for openai-compatible
+  # upstreams) stamps `tok@api.z.ai`, i.e. part of a SECRET, into a payload and a log line that are
+  # non-secret by construction.
+  hp="${hp##*@}"
+  case "$hp" in
+    # Bracketed IPv6 literal: `[::1]:3456` -> `::1`. Splitting on the first colon instead would
+    # yield `[`, which is not just wrong but slips past the loopback check below — the one filter
+    # that keeps the local CCR proxy from being stamped as though it were the upstream endpoint.
+    '['*) h="${hp#\[}"; h="${h%%\]*}" ;;
+    *)    h="${hp%%:*}" ;;                         # host[:port]
+  esac
   h="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
   case "$h" in localhost|127.0.0.1|0.0.0.0|::1|'') return 0 ;; esac
   printf '%s' "$h"

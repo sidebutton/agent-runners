@@ -63,6 +63,63 @@ if command -v jq >/dev/null 2>&1; then
   export HOME="$TMP/home"; mkdir -p "$HOME"
   printf '%s' '{"oauthAccount":{"emailAddress":"op1@company.com","organizationName":"Company"}}' > "$HOME/.claude.json"
 
+  # ── 0b. url_host PARITY with the reporter's _base_host() ────────────────────────────────────────
+  # url_host's contract is not "extract something host-shaped", it is "return exactly what the
+  # reporter's Python _base_host() returns" — a run's stamp and the agent's ccr block are joined on
+  # base_host, so any divergence silently splits one identity into two. The two implementations are
+  # in different languages in different files, so pin them against each other directly rather than
+  # against hand-copied expectations that can rot with either side. Cases chosen for the shapes bash
+  # string surgery gets wrong where urlparse does not: userinfo (a SECRET must not become a host),
+  # bracketed IPv6 (a first-colon split yields `[`, which also slips past the loopback filter — the
+  # one guard that stops the local CCR proxy being stamped as the upstream), quotes, and ports.
+  RPT="$BASE/assets/report-health-snapshot.sh"
+  if command -v python3 >/dev/null 2>&1 && [ -f "$RPT" ]; then
+    { echo 'import urllib.parse'
+      sed -n '/^_LOCAL_HOSTS = /,/^def _parse_env_file/p' "$RPT" | sed '$d'
+      cat <<'PYDRV'
+import sys
+print(_base_host(sys.argv[1]) or "")
+PYDRV
+    } > "$TMP/base_host.py"
+    grep -q '^def _base_host' "$TMP/base_host.py" \
+      && ok "extracted _base_host() from the reporter for a parity cross-check" \
+      || bad "could not extract _base_host() from $RPT"
+    uh_div=0
+    while IFS= read -r u; do
+      [ -n "$u" ] || continue
+      got="$(url_host "$u")"
+      want="$(python3 "$TMP/base_host.py" "$u")"
+      [ "$got" = "$want" ] || { bad "url_host parity: '$u' → bash '$got' vs reporter '$want'"; uh_div=$((uh_div+1)); }
+    done <<'URLS'
+https://api.moonshot.cn/anthropic
+https://openrouter.ai/api/v1
+https://api.z.ai:8443/v1
+https://API.Z.AI/v1
+api.z.ai
+"https://api.z.ai/v1"
+http://[fd00::1]:8000/v1
+http://[2001:db8::1]:8080/v1
+https://tokSECRET123@api.z.ai/v1
+https://user:PASSWORD123@gw.corp.example:8443/v1
+https://a@b@api.z.ai/v1
+http://127.0.0.1:3456
+http://localhost:3456
+http://[::1]:3456
+URLS
+    [ "$uh_div" -eq 0 ] && ok "url_host matches the reporter's _base_host() on every case (0 divergences)"
+    # The two shapes that must never be emitted, spelled out: a credential is not a host, and a
+    # loopback proxy is not an identity no matter how it is written.
+    [ -z "$(url_host 'http://[::1]:3456')" ]            && ok "url_host: IPv6 loopback proxy rejected (not stamped as an endpoint)" || bad "url_host stamped the IPv6 loopback proxy: '$(url_host 'http://[::1]:3456')'"
+    case "$(url_host 'https://tokSECRET123@api.z.ai/v1')" in
+      *SECRET*|*secret*) bad "url_host leaked URL userinfo (a credential) into base_host" ;;
+      api.z.ai)          ok "url_host: userinfo stripped — only the host is stamped" ;;
+      *)                 bad "url_host userinfo case: '$(url_host 'https://tokSECRET123@api.z.ai/v1')'" ;;
+    esac
+    [ "$(url_host 'http://[fd00::1]:8000/v1')" = "fd00::1" ] && ok "url_host: bracketed IPv6 literal unwrapped" || bad "url_host IPv6: '$(url_host 'http://[fd00::1]:8000/v1')'"
+  else
+    skip "python3 or the reporter absent — skipping url_host/_base_host parity cross-check"
+  fi
+
   # 1. Subscription — direct Anthropic, NO token in effect → run-as email (AC1).
   S="$(unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY; detect_run_identity)"
   [ "$(field "$S" method)" = "subscription" ]       && ok "subscription: method=subscription"        || bad "subscription method: $(field "$S" method)"
