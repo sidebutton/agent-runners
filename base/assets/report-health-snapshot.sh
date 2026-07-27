@@ -213,7 +213,8 @@ def env(k, default="0"):
 # ── Auth-identity collector (SCRUM-1626, design §4.2/§4.3) ───────────────────
 # Extend the snapshot with a NON-SECRET view of which auth each agent is on:
 # Claude subscription (email/org), the global-env method, the staged per-app
-# envs, and cloud principals. Non-secret by construction — key names + a
+# envs, cloud principals, and — on a CCR agent — the UPSTREAM provider/key its
+# router proxy forwards to (SCRUM-1631). Non-secret by construction — key names + a
 # fingerprint + endpoint host only, never values; ~/.claude/.credentials.json is
 # NEVER read. Every sub-section is wrapped in its own try/except so one failure
 # (missing file, absent oauthAccount, offline `aws sts`) still delivers the rest
@@ -346,6 +347,82 @@ def _collect_cloud(genv):
         pass
     return cloud
 
+def _deref(val, genv):
+    """Resolve a CCR config.json value that may be a LITERAL (portal-delivered app row) or the
+    install-time template's `$VAR` / `${VAR}` placeholder — CCR's own interpolateEnvVars() resolves
+    those at runtime from ccr.service's EnvironmentFile, so the file on disk still holds the literal
+    `$CCR_PROVIDER_API_KEY`. Returns the resolved value, or None when a placeholder resolves to
+    nothing: an UNRESOLVED placeholder must never be emitted, or a template-only box would fabricate
+    an identity (`provider: "$CCR_PROVIDER_NAME"`) and churn auth-changed events."""
+    if not isinstance(val, str):
+        return None
+    v = val.strip()
+    if not v or not v.startswith("$"):
+        return v or None
+    name = v[1:]
+    if name.startswith("{") and name.endswith("}"):
+        name = name[1:-1]
+    if not name or not all(c.isalnum() or c == "_" for c in name):
+        return None
+    return (os.environ.get(name) or genv.get(name)) or None
+
+
+def _collect_ccr(genv, home):
+    """CCR upstream identity (SCRUM-1631, design §4.1/§9). A Claude-Code-Router agent's own env is
+    useless for attribution — ANTHROPIC_BASE_URL is the loopback proxy and the token is the local
+    sbccr_ dummy — so the identity that actually spends quota lives one hop further out, in
+    ~/.claude-code-router/config.json: WHICH upstream provider, endpoint and key the daemon forwards
+    to. Emits the same three non-secret fields the portal whitelists (lib/cloud/auth-identity.ts
+    CcrIdentity): provider, base_host, token_fp — NEVER the upstream key, and never the config's
+    APIKEY/ANTHROPIC_AUTH_TOKEN (that is the local CC↔CCR token, not an upstream identity).
+
+    Omitted entirely when nothing resolves, so an agent that merely carries the component (template
+    config, no app row) reports no ccr section at all rather than a placeholder-shaped one."""
+    cfg = {}
+    try:
+        with open(str(home / ".claude-code-router" / "config.json")) as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    providers = cfg.get("Providers")
+    p0 = providers[0] if isinstance(providers, list) and providers and isinstance(providers[0], dict) else {}
+    router = cfg.get("Router")
+    default = router.get("default") if isinstance(router, dict) else None
+
+    # provider: the left half of `Router.default` ("provider,model"), else Providers[0].name —
+    # the same precedence base/14's detect_effective_route uses, so the agent chip and the run's
+    # route badge name the same upstream.
+    provider = None
+    if isinstance(default, str) and "," in default:
+        provider = _deref(default.split(",", 1)[0], genv)
+    if not provider:
+        provider = _deref(p0.get("name") or p0.get("provider"), genv)
+    base_url = _deref(p0.get("api_base_url"), genv)
+    api_key = _deref(p0.get("api_key"), genv)
+
+    # Legacy cloud-init contract (pre-SCRUM-1613): the upstream arrived as CCR_PROVIDER_* env with
+    # only the $VAR template on disk. Gated on CCR_STATUS — set by this script only when
+    # ccr.service exists — so a stray CCR_PROVIDER_* on a non-CCR box cannot invent a section.
+    if not (provider or base_url or api_key) and os.environ.get("CCR_STATUS"):
+        provider = _deref(os.environ.get("CCR_PROVIDER_NAME") or genv.get("CCR_PROVIDER_NAME"), genv)
+        base_url = _deref(os.environ.get("CCR_PROVIDER_API_BASE_URL") or genv.get("CCR_PROVIDER_API_BASE_URL"), genv)
+        api_key = _deref(os.environ.get("CCR_PROVIDER_API_KEY") or genv.get("CCR_PROVIDER_API_KEY"), genv)
+
+    out = {}
+    if provider:
+        out["provider"] = provider
+    host = _base_host(base_url)                     # a loopback upstream is not an identity
+    if host:
+        out["base_host"] = host
+    fp = fingerprint(api_key)                       # the §4.3 choke point — never the raw key
+    if fp:
+        out["token_fp"] = fp
+    return out or None
+
+
 def collect_auth_identity():
     """Assemble the non-secret auth_identity block (design §4.2). Returns a dict of
     only the sub-sections that succeeded, or None when nothing could be collected."""
@@ -430,6 +507,15 @@ def collect_auth_identity():
         cloud = _collect_cloud(genv)
         if cloud:
             ai["cloud"] = cloud
+    except Exception:
+        pass
+
+    # ccr — the upstream provider/key behind the local router proxy (SCRUM-1631). Absent on every
+    # non-CCR agent, whose payload therefore stays byte-identical to before.
+    try:
+        ccr = _collect_ccr(genv, home)
+        if ccr:
+            ai["ccr"] = ccr
     except Exception:
         pass
 

@@ -6,8 +6,10 @@
 # that actually served a run — the subscription / key / cloud principal that spent the quota — so the
 # portal can attribute burn (jobs.auth_identity) and roll up usage-by-identity. It parallels
 # detect_effective_route (test-14b) and rides the SAME /api/jobs/usage POST, INSIDE `usage`. This test
-# proves: the subscription / api_key / gateway / bedrock / vertex identities; foundry / CCR / no-auth
-# omit (empty stamp, never a wrong one); the §4.3 fingerprint shape (first-6 + … + last-4, short → …last-2)
+# proves: the subscription / api_key / gateway / bedrock / vertex identities; the CCR upstream stamp
+# (SCRUM-1631 — literal + `$VAR` configs, never the proxy's dummy token, never an unresolved
+# placeholder); foundry / unrouted-CCR / no-auth omit (empty stamp, never a wrong one); the §4.3
+# fingerprint shape (first-6 + … + last-4, short → …last-2)
 # reproduces the reporter's fingerprint(); no raw token / cloud secret ever leaks into the stamp; and the
 # stamp is merged into `usage` on the usage POST but NOT onto the step-complete POST (which carries no usage).
 #
@@ -44,8 +46,10 @@ IDENT_REFS=$(grep -c '\$ident' "$TMP/claude-stop-hook.sh" || true)
   && ok "auth_identity confined to the usage payload (\$ident refs=${IDENT_REFS})" \
   || bad "auth_identity leaked beyond the usage payload (\$ident refs=${IDENT_REFS})"
 
-# ── Extract the pure detector (+ its fp_token helper) and drive it across the identity matrix ─────
+# ── Extract the pure detector (+ its helpers) and drive it across the identity matrix ─────────────
 awk '/^fp_token\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$TMP/claude-stop-hook.sh"  > "$TMP/ident.sh"
+awk '/^url_host\(\) \{/{p=1} p{print} p&&/^\}$/{exit}'  "$TMP/claude-stop-hook.sh" >> "$TMP/ident.sh"
+awk '/^ccr_deref\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$TMP/claude-stop-hook.sh" >> "$TMP/ident.sh"
 awk '/^detect_run_identity\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$TMP/claude-stop-hook.sh" >> "$TMP/ident.sh"
 grep -q '^detect_run_identity() {' "$TMP/ident.sh" \
   && ok "extracted detect_run_identity from the hook heredoc" \
@@ -91,11 +95,73 @@ if command -v jq >/dev/null 2>&1; then
   FD="$(unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL; CLAUDE_CODE_USE_FOUNDRY=1 detect_run_identity)"
   [ "$FD" = "{}" ]                                   && ok "foundry(no principal): omitted → {}"       || bad "foundry omit: $FD"
 
-  # 7. CCR — the local proxy base URL → OMIT even with a (dummy) token present. Upstream identity is
-  #    deferred to SCRUM-1631; the stamp must degrade to empty, never the proxy's dummy fingerprint.
-  C="$(ANTHROPIC_API_KEY='sk-dummy-ccr-proxy-key' ANTHROPIC_BASE_URL='http://127.0.0.1:3456' detect_run_identity)"
-  [ "$C" = "{}" ]                                    && ok "ccr(local proxy): omitted → {} (deferred)" || bad "ccr omit: $C"
-  case "$C" in *sk-dum*) bad "ccr: the proxy's dummy token leaked into a stamp" ;; *) ok "ccr: no dummy-token stamp" ;; esac
+  # 7. CCR (SCRUM-1631) — the local proxy base URL. The env names only the proxy, so the identity comes
+  #    from the UPSTREAM provider in ~/.claude-code-router/config.json: method=ccr, id = fingerprint of
+  #    Providers[0].api_key, base_host = its endpoint. The proxy's own dummy token must NEVER be stamped.
+  CH="$TMP/home-ccr"; mkdir -p "$CH/.claude-code-router"
+  CCR_UPSTREAM_KEY='sk-or-v1-UPSTREAMsecretMIDDLE-7777efgh'
+  cat > "$CH/.claude-code-router/config.json" <<CFGEOF
+{"HOST":"127.0.0.1","PORT":3456,"APIKEY":"sbccr_localdummytoken",
+ "Providers":[{"name":"openrouter-app","api_base_url":"https://openrouter.ai/api/v1",
+               "api_key":"$CCR_UPSTREAM_KEY","models":["moonshotai/kimi-k2"]}],
+ "Router":{"default":"openrouter-app,moonshotai/kimi-k2"}}
+CFGEOF
+  C="$(HOME="$CH" ANTHROPIC_API_KEY='sbccr_dummyproxytoken' ANTHROPIC_BASE_URL='http://127.0.0.1:3456' detect_run_identity)"
+  [ "$(field "$C" method)" = "ccr" ]                 && ok "ccr: method=ccr"                           || bad "ccr method: $(field "$C" method)"
+  [ "$(field "$C" id)" = "sk-or-…efgh" ]             && ok "ccr: id=fingerprint of the UPSTREAM key"   || bad "ccr id: $(field "$C" id)"
+  [ "$(field "$C" base_host)" = "openrouter.ai" ]    && ok "ccr: base_host=upstream endpoint host"     || bad "ccr base_host: $(field "$C" base_host)"
+  case "$C" in *sbccr_*) bad "ccr: the proxy's dummy token leaked into the stamp" ;; *) ok "ccr: no proxy dummy token in the stamp" ;; esac
+  case "$C" in *UPSTREAMsecret*|*"$CCR_UPSTREAM_KEY"*) bad "ccr: the RAW upstream key leaked into the stamp" ;; *) ok "ccr: no raw upstream key in the stamp" ;; esac
+  # 127.0.0.1 must never surface as the identity's endpoint (the proxy is not a gateway).
+  case "$(field "$C" base_host)" in 127.0.0.1|localhost) bad "ccr: the loopback proxy host was stamped as base_host" ;; *) ok "ccr: loopback host never stamped" ;; esac
+
+  # 7b. CCR on the install-time TEMPLATE config ($VAR placeholders, interpolated by CCR at runtime):
+  #     resolved from env → a real stamp; the literal `$CCR_PROVIDER_*` must never become the identity.
+  CT="$TMP/home-ccr-tmpl"; mkdir -p "$CT/.claude-code-router"
+  cat > "$CT/.claude-code-router/config.json" <<'CFGEOF'
+{"HOST":"127.0.0.1","PORT":3456,"APIKEY":"$ANTHROPIC_AUTH_TOKEN",
+ "Providers":[{"name":"$CCR_PROVIDER_NAME","api_base_url":"$CCR_PROVIDER_API_BASE_URL",
+               "api_key":"$CCR_PROVIDER_API_KEY","models":["$CCR_PROVIDER_MODEL"]}],
+ "Router":{"default":"$CCR_PROVIDER_NAME,$CCR_PROVIDER_MODEL"}}
+CFGEOF
+  CV="$(HOME="$CT" ANTHROPIC_API_KEY='sbccr_dummyproxytoken' ANTHROPIC_BASE_URL='http://127.0.0.1:3456' \
+        CCR_PROVIDER_API_KEY='sk-kimi-TEMPLATEresolved-4444wxyz' CCR_PROVIDER_API_BASE_URL='https://api.moonshot.cn/anthropic' \
+        detect_run_identity)"
+  [ "$(field "$CV" method)" = "ccr" ]                && ok "ccr(\$VAR + env): method=ccr"              || bad "ccr \$VAR method: $(field "$CV" method)"
+  [ "$(field "$CV" id)" = "sk-kim…wxyz" ]            && ok "ccr(\$VAR + env): id=fp of the resolved key" || bad "ccr \$VAR id: $(field "$CV" id)"
+  [ "$(field "$CV" base_host)" = "api.moonshot.cn" ] && ok "ccr(\$VAR + env): base_host resolved"      || bad "ccr \$VAR base_host: $(field "$CV" base_host)"
+
+  # 7c. Same template with NOTHING in env → OMIT. A stamp of the literal `$CCR_PROVIDER_API_KEY` would
+  #     fabricate an identity that every unrouted CCR box shares.
+  CN="$(unset CCR_PROVIDER_API_KEY CCR_PROVIDER_API_BASE_URL; HOME="$CT" ANTHROPIC_API_KEY='sbccr_dummyproxytoken' \
+        ANTHROPIC_BASE_URL='http://127.0.0.1:3456' detect_run_identity)"
+  [ "$CN" = "{}" ]                                   && ok "ccr(unresolved \$VAR): omitted → {}"       || bad "ccr unresolved: $CN"
+  case "$CN" in *CCR_PROVIDER*) bad "ccr: a \$VAR placeholder leaked into the stamp" ;; *) ok "ccr: no placeholder in the stamp" ;; esac
+
+  # 7d. CCR proxy with NO readable config (component installed, no app row) → OMIT, never the dummy.
+  CX="$(unset CCR_PROVIDER_API_KEY CCR_PROVIDER_API_BASE_URL; HOME="$TMP/home-none-xyz" \
+        ANTHROPIC_API_KEY='sbccr_dummyproxytoken' ANTHROPIC_BASE_URL='http://127.0.0.1:3456' detect_run_identity)"
+  [ "$CX" = "{}" ]                                   && ok "ccr(no config): omitted → {} (legacy-safe)" || bad "ccr no-config: $CX"
+  case "$CX" in *sbccr_*) bad "ccr: the proxy's dummy token was stamped when the config was unreadable" ;; *) ok "ccr(no config): no dummy-token stamp" ;; esac
+
+  # 7e. Legacy cloud-init contract: NO config on disk, upstream only in CCR_PROVIDER_* env → stamp it.
+  CL="$(HOME="$TMP/home-none-xyz" ANTHROPIC_API_KEY='sbccr_dummyproxytoken' ANTHROPIC_BASE_URL='http://127.0.0.1:3456' \
+        CCR_PROVIDER_API_KEY='sk-kimi-LEGACYenvkey-5555abcd' CCR_PROVIDER_API_BASE_URL='https://api.moonshot.cn/anthropic' \
+        detect_run_identity)"
+  [ "$(field "$CL" id)" = "sk-kim…abcd" ]            && ok "ccr(legacy env, no config): id=fp of the env key" || bad "ccr legacy id: $(field "$CL" id)"
+  [ "$(field "$CL" base_host)" = "api.moonshot.cn" ] && ok "ccr(legacy env, no config): base_host from env"   || bad "ccr legacy base_host: $(field "$CL" base_host)"
+
+  # 7f. A config that OMITS api_key (an app row with no stored secret) must NOT borrow a stray env key —
+  #     CCR would not use it either, so a stamp built from it names an identity that served nothing.
+  CK="$TMP/home-ccr-nokey"; mkdir -p "$CK/.claude-code-router"
+  cat > "$CK/.claude-code-router/config.json" <<'CFGEOF'
+{"HOST":"127.0.0.1","PORT":3456,"Providers":[{"name":"kimi-app","api_base_url":"https://api.moonshot.cn/anthropic","models":["kimi-k2"]}],
+ "Router":{"default":"kimi-app,kimi-k2"}}
+CFGEOF
+  CKS="$(HOME="$CK" ANTHROPIC_API_KEY='sbccr_dummyproxytoken' ANTHROPIC_BASE_URL='http://127.0.0.1:3456' \
+         CCR_PROVIDER_API_KEY='sk-kimi-STRAYenvkey-6666abcd' detect_run_identity)"
+  [ "$CKS" = "{}" ]                                  && ok "ccr(config without api_key): omitted → {}"  || bad "ccr keyless config: $CKS"
+  case "$CKS" in *STRAY*|*sk-kim*) bad "ccr: a stray env key was stamped over a keyless config" ;; *) ok "ccr: no stray env key borrowed" ;; esac
 
   # 8. No auth at all (no token, no cloud flag, no oauthAccount) → OMIT.
   N="$(unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY; HOME='/nonexistent-sb-xyz' detect_run_identity)"
