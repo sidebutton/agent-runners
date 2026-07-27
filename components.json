@@ -13,7 +13,7 @@
       "slug": "claude-code-router",
       "kind": "runtime",
       "title": "Claude Code Router",
-      "description": "Local CCR proxy on 127.0.0.1:3456 that routes Claude Code to a configured provider via ANTHROPIC_BASE_URL in ~/.agent-env. Requires Claude Code.",
+      "description": "Local CCR proxy on 127.0.0.1:3456 that routes Claude Code to the provider configured in the CCR app row. Requires Claude Code.",
       "requires": ["claude-code"],
       "chip": { "label": "Router", "live": false }
     },

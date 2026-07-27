@@ -58,7 +58,9 @@ done
 # the toolchain loop. Runs here, after 09 (it writes + chowns ~/.claude-code-router)
 # and after the claude-code install above (components.sh enforces that requirement).
 # install.sh only ENABLES ccr.service; its first start is the post-services phase,
-# after 19-secrets populates ~/.agent-env with the routing env CCR resolves at runtime.
+# after 19-secrets stages the portal's per-app env under ~/.agent-env.d/ — from which
+# sb-ccr-sync derives the sidecar + config.json the daemon reads (SCRUM-1613; the unit
+# no longer reads the global ~/.agent-env at all).
 if has_component claude-code-router && [ -f "$BASE_DIR/components/claude-code-router/install.sh" ]; then
   . "$BASE_DIR/components/claude-code-router/install.sh"
 fi

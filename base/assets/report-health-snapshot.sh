@@ -144,7 +144,13 @@ export CLAUDE_COUNT=$(pgrep -c -f '[c]laude' 2>/dev/null || true)
 # reads these back on a CCR app's Validate — it cannot probe an agent's loopback
 # itself. Absent on every other agent, so nothing changes for the rest of the fleet.
 if [ -f /etc/systemd/system/ccr.service ]; then
-  export CCR_STATUS=$(systemctl is-active ccr 2>/dev/null || echo "unknown")
+  # NOT the `|| echo "unknown"` idiom used for SB_STATUS above: `systemctl is-active` PRINTS the
+  # state ("inactive" / "failed" / "activating") *and* exits non-zero for everything except
+  # `active`, so that form appends a second line and ships "inactive\nunknown" as the state — which
+  # the portal renders verbatim on a CCR app's Validate. Capture first; default only when the call
+  # printed nothing at all (no systemd / systemctl missing).
+  CCR_STATUS=$(systemctl is-active ccr 2>/dev/null)
+  export CCR_STATUS="${CCR_STATUS:-unknown}"
   if curl -s -o /dev/null --max-time 3 http://127.0.0.1:3456 2>/dev/null; then
     export CCR_PROXY="up"
   else

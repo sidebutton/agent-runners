@@ -153,6 +153,13 @@ Type=oneshot
 # (Any extra run is a no-op anyway — sb-ccr-sync is sha-gated.)
 ExecStartPre=/bin/sleep 2
 ExecStart=/usr/local/bin/sb-ccr-sync
+# Re-derive once more before exiting. A write that lands WHILE this oneshot is running is not
+# guaranteed to raise a fresh trigger afterwards (systemd drops the inotify watch for the duration
+# of the triggered unit and, on re-arming, explicitly does not re-fire an edge spec) — so without
+# this pass, a second apply arriving inside the window above would leave the daemon on the previous
+# upstream until some LATER write happened to poke the dir. Reading the files again costs a sha
+# compare and changes nothing in the common case. `-` so a failure here cannot fail the unit.
+ExecStartPost=-/usr/local/bin/sb-ccr-sync
 
 [Install]
 WantedBy=multi-user.target

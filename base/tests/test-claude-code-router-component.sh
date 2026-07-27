@@ -135,6 +135,30 @@ grep -q 'systemctl enable --now ccr-env-sync.path' "$INSTALL" \
 grep -q 'sb-ccr-sync --no-restart' "$POST" \
   && ok "post-services derives via sb-ccr-sync --no-restart (it owns the first start)" \
   || bad "post-services does not call sb-ccr-sync --no-restart"
+# A write landing WHILE the oneshot runs is not guaranteed to raise another trigger (systemd drops the
+# watch for the duration of the triggered unit and does not re-fire an edge spec when it re-arms), so
+# the unit re-derives once before exiting — otherwise a second apply inside that window is lost until
+# some later write pokes the dir.
+grep -q 'ExecStartPost=-/usr/local/bin/sb-ccr-sync' "$INSTALL" \
+  && ok "ccr-env-sync.service re-derives after its run (a write inside the window is not lost)" \
+  || bad "ccr-env-sync.service has no post-run re-derive (an apply during the sync would be dropped)"
+
+# ── F5 collector: the reported unit state must be a SINGLE token the portal can render ──────────
+# `systemctl is-active` prints the state AND exits non-zero for everything but `active`, so the
+# `|| echo "unknown"` idiom would ship "inactive\nunknown" straight into the Validate line.
+SNAP="$ROOT/base/assets/report-health-snapshot.sh"
+grep -q 'CCR_STATUS=$(systemctl is-active ccr 2>/dev/null || echo' "$SNAP" \
+  && bad "report-health-snapshot appends to is-active output (ships a two-line CCR_STATUS)" \
+  || ok "report-health-snapshot does not append to is-active output"
+grep -q 'export CCR_STATUS="${CCR_STATUS:-unknown}"' "$SNAP" \
+  && ok "CCR_STATUS defaults to unknown only when nothing was printed" \
+  || bad "CCR_STATUS has no empty-only default"
+grep -q '"ccr_proxy"' "$SNAP" && ok "snapshot reports processes.ccr_proxy (F5)" || bad "snapshot does not report ccr_proxy"
+# Drive the collector's own idiom against a unit that does not exist — the state must stay one token.
+_st=$(systemctl is-active definitely-not-a-real-unit.service 2>/dev/null); _st="${_st:-unknown}"
+[ "$(printf '%s' "$_st" | wc -l)" = "0" ] \
+  && ok "is-active capture yields a single-line state ($_st)" \
+  || bad "is-active capture yielded a multi-line state"
 
 # ── AC1/AC4 runtime guard: post-services.sh is SOURCED into run.sh's `set -euo
 #    pipefail` shell. The CCR_CONFIG_B64 lookup is a `grep|...|sed` pipeline whose
