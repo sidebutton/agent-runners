@@ -137,6 +137,20 @@ export UPTIME_SEC=$(awk '{printf "%d",$1}' /proc/uptime 2>/dev/null || echo "0")
 export SB_STATUS=$(systemctl is-active sidebutton 2>/dev/null || echo "unknown")
 export CHROME_COUNT=$(pgrep -c -f '[c]hrom' 2>/dev/null || true)
 export CLAUDE_COUNT=$(pgrep -c -f '[c]laude' 2>/dev/null || true)
+# CCR proxy (F5 / SCRUM-1613) — only on agents that carry the claude-code-router
+# component, detected by the unit file rather than by AGENT_COMPONENTS (which is
+# provision-only cloud-init and never persisted). Both facts are reported because
+# they fail apart: the unit can be `active` while the port never came up. The portal
+# reads these back on a CCR app's Validate — it cannot probe an agent's loopback
+# itself. Absent on every other agent, so nothing changes for the rest of the fleet.
+if [ -f /etc/systemd/system/ccr.service ]; then
+  export CCR_STATUS=$(systemctl is-active ccr 2>/dev/null || echo "unknown")
+  if curl -s -o /dev/null --max-time 3 http://127.0.0.1:3456 2>/dev/null; then
+    export CCR_PROXY="up"
+  else
+    export CCR_PROXY="down"
+  fi
+fi
 [ -z "$CHROME_COUNT" ] && export CHROME_COUNT=0
 [ -z "$CLAUDE_COUNT" ] && export CLAUDE_COUNT=0
 
@@ -439,6 +453,12 @@ payload = {
     },
     "activity": env("ACTIVITY", "unknown"),
 }
+
+# CCR proxy state — present only when the component is installed (see the collector
+# above), so a non-CCR agent's payload is byte-identical to before (SCRUM-1613 / F5).
+if os.environ.get("CCR_STATUS"):
+    payload["processes"]["ccr"] = os.environ["CCR_STATUS"]
+    payload["processes"]["ccr_proxy"] = os.environ.get("CCR_PROXY", "unknown")
 
 # Screenshot (base64-encoded PNG)
 ss = os.environ.get("SS_FILE", "")

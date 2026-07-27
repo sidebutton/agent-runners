@@ -130,29 +130,53 @@ Each component owns phase scripts under `base/components/<slug>/`:
 `post-services.sh` — matching today's variant hook phases (so the extension's
 policy-before-`chrome.service`-start ordering is preserved exactly).
 
-### `claude-code-router` env contract (owned here; values delivered by the operator / T6)
+### `claude-code-router` routing contract (SCRUM-1613)
 
-`~/.claude-code-router/config.json` holds **literal `$VAR` placeholders** that CCR
-interpolates at RUNTIME from its process env (systemd `EnvironmentFile=~/.agent-env`),
-so the routing secrets are delivered AFTER install — written into `agents.agent_env`
-by the portal/operator, pushed to `~/.agent-env` by `19-secrets`, and read by CCR on
-(re)start in `post-services.sh`. `claude-code-router` **owns these variable names**;
-the portal-side delivery (T6 / SCRUM-1449) only has to populate them:
+**Routing comes from the portal's CCR app row — nothing else.** The portal delivers an
+agent-app's env per APP into `~/.agent-env.d/<slug>` (a run `source`s the one it was
+launched with), and for a CCR app that file carries the whole routing truth:
 
 | Var | Purpose |
 |---|---|
 | `ANTHROPIC_BASE_URL` | points Claude Code at the proxy — `http://127.0.0.1:3456` |
 | `ANTHROPIC_AUTH_TOKEN` | token Claude Code presents to CCR; reused as the proxy `APIKEY` gate |
-| `CCR_PROVIDER_NAME` | upstream provider id (e.g. `deepseek`) — also the `Router.default` provider |
-| `CCR_PROVIDER_API_BASE_URL` | upstream provider base URL |
-| `CCR_PROVIDER_API_KEY` | upstream provider key |
-| `CCR_PROVIDER_MODEL` | upstream model id — also the `Router.default` model |
-| `CCR_CONFIG_B64` | optional base64 of a whole `config.json` that OVERRIDES the template (honored in both `install.sh` and `post-services.sh`) |
+| `CCR_CONFIG_B64` | base64 of the whole generated `config.json` (upstream URL, key, model, transformer) — also the MARKER identifying the CCR app's file |
 
-systemd's `EnvironmentFile` does **not** interpolate, so `~/.agent-env` values must be
-plain literals — CCR alone resolves `$VAR`. The template keeps `Router.default` =
-`"$CCR_PROVIDER_NAME,$CCR_PROVIDER_MODEL"` plus `Providers[0].{name,models[0]}` so
-`base/14`'s `detect_effective_route` (T9 routed-job telemetry) stays correct.
+`ccr.service` cannot read that file: slug files are `export KEY="VALUE"` (they are
+`source`d), a systemd `EnvironmentFile` must be bare `KEY=VALUE`, and `<slug>` is
+account-defined so no static unit can name it. `/usr/local/bin/sb-ccr-sync` bridges —
+it finds the file by the `CCR_CONFIG_B64` marker, mirrors it into the bare-format
+sidecar `~/.claude-code-router/ccr.env` (the unit's `EnvironmentFile=-…/ccr.env`),
+decodes `config.json`, and restarts `ccr.service` **only when those derived artifacts
+changed** (an apply rewrites slug files unconditionally; a restart per apply would kill
+in-flight proxied requests). `ccr-env-sync.path` watches `~/.agent-env.d` so a portal
+edit reaches the running daemon; deleting or de-scoping the app removes the sidecar and
+stops the proxy instead of crash-looping. Two CCR apps in scope → the sorted-first file
+wins and the other is named in the log (one daemon, one config).
+
+```bash
+sudo sb-ccr-sync                 # re-derive + restart if changed (what the path unit runs)
+sudo sb-ccr-sync --no-restart    # derive only (what post-services.sh runs at provision)
+systemctl status ccr-env-sync.path ccr.service
+```
+
+**RETIRED — the global env contract.** `ccr.service` no longer reads `~/.agent-env`, and
+the portal no longer writes any routing env into it (`ccrEnvForAgent` is deleted). The
+old operator flow of pasting `CCR_PROVIDER_NAME` / `CCR_PROVIDER_API_BASE_URL` /
+`CCR_PROVIDER_API_KEY` / `CCR_PROVIDER_MODEL` into the per-agent env editor therefore
+**routes nothing** — configure the CCR app in the portal instead. The `$VAR` template
+`install.sh` lays down still exists as a first-boot placeholder (install runs before any
+env is delivered, and CCR resolves `$VAR` from its own `EnvironmentFile` at runtime), and
+a **cloud-init** `CCR_CONFIG_B64` is still honored as a fallback when no app row exists.
+The template keeps `Router.default` = `"$CCR_PROVIDER_NAME,$CCR_PROVIDER_MODEL"` plus
+`Providers[0].{name,models[0]}` so `base/14`'s `detect_effective_route` (T9 routed-job
+telemetry) stays correct for both shapes.
+
+**Fleet reach:** component scripts are not in `base/refresh-manifest.txt`, so the units
+above land on **newly provisioned agents only** — an existing CCR agent needs a redeploy.
+The health reporter (`19c`, refresh-safe) additionally reports `processes.ccr` and
+`processes.ccr_proxy` on any agent that has `ccr.service`, which is how the portal shows
+agent-local proxy liveness on a CCR app's Validate.
 `claude-code-router` **requires `claude-code`** (`base/components.sh` force-enables it).
 
 ## 4b. Plugins (separate role-driven catalog — `plugins.json`)
