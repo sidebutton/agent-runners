@@ -8,6 +8,7 @@
 #   global_env           — method subscription|api_key|gateway|none + token_fp + base_host
 #   app_env_files        — inventory of ~/.agent-env.d/* (key names + fp + host; NO values)
 #   cloud                — best-effort AWS (Bedrock) / GCP (Vertex) principals
+#   ccr                  — CCR upstream provider/base_host/token_fp (SCRUM-1631)
 #   collected_at         — ISO-8601 UTC
 # Every section is best-effort: a single failure (missing/malformed file, offline
 # `aws sts`) must still deliver the rest of the snapshot and never block the POST.
@@ -193,6 +194,81 @@ jqeq "$P8" '.auth_identity | has("claude_subscription")' 'false'   "AC5: malform
 jqeq "$P8" '.auth_identity | has("global_env")'          'true'    "AC5: global_env still delivered"
 jqeq "$P8" '.auth_identity.cloud.aws_profile'            'gs-prod' "AC5: aws_profile kept even when sts is offline"
 jqeq "$P8" '.auth_identity.cloud.aws_account'            'null'    "AC5: offline sts ⇒ aws_account null, not a crash"
+
+# ── 9. CCR upstream identity (SCRUM-1631) ────────────────────────────────────────
+#      A CCR agent's own env names only the loopback proxy, so the identity that spends
+#      quota is the UPSTREAM provider in ~/.claude-code-router/config.json. Only
+#      provider / base_host / token_fp may leave the box — never the upstream key, and
+#      never the config's APIKEY (the local CC↔CCR token, not an upstream identity).
+CCR_TOK="sk-or-v1-CCRMIDDLEsecret-7777efgh"; CCR_MID="CCRMIDDLEsecret"
+HC="$TMP/home-ccr"; mkdir -p "$HC/.claude-code-router"; cp "$H/.agent-env" "$HC/.agent-env"
+cat > "$HC/.claude-code-router/config.json" <<EOF
+{"HOST":"127.0.0.1","PORT":3456,"APIKEY":"sbccr_localdummytoken","NON_INTERACTIVE_MODE":true,
+ "Providers":[{"name":"openrouter-app","api_base_url":"https://openrouter.ai/api/v1",
+               "api_key":"$CCR_TOK","models":["moonshotai/kimi-k2"]}],
+ "Router":{"default":"openrouter-app,moonshotai/kimi-k2"}}
+EOF
+P9="$TMP/p9.json"; run "$P9" "$HC" "$HC/.agent-env" ccr CCR_STATUS=active CCR_PROXY=up
+jqeq "$P9" '.auth_identity.ccr.provider'  'openrouter-app'  "AC-CCR: provider from Router.default (portal-delivered config)"
+jqeq "$P9" '.auth_identity.ccr.base_host' 'openrouter.ai'   "AC-CCR: base_host = upstream endpoint host"
+jqeq "$P9" '.auth_identity.ccr.token_fp'  'sk-or-…efgh'     "AC-CCR: token_fp = first-6 + … + last-4 of the UPSTREAM key"
+jqeq "$P9" '.processes.ccr'               'active'          "AC-CCR: the existing proxy-state fields are unaffected"
+ccrpriv=0
+for needle in "$CCR_TOK" "$CCR_MID" "sbccr_localdummytoken"; do
+  if grep -qF "$needle" "$P9"; then bad "PRIVACY LEAK: '$needle' present in payload"; ccrpriv=1; fi
+done
+[ "$ccrpriv" -eq 0 ] && ok "AC-CCR: neither the raw upstream key nor the local proxy token appears in the payload"
+
+# ── 9b. the install-time TEMPLATE config ($VAR placeholders CCR interpolates at runtime) ──
+HT="$TMP/home-ccr-tmpl"; mkdir -p "$HT/.claude-code-router"; cp "$H/.agent-env" "$HT/.agent-env"
+cat > "$HT/.claude-code-router/config.json" <<'EOF'
+{"HOST":"127.0.0.1","PORT":3456,"APIKEY":"$ANTHROPIC_AUTH_TOKEN","NON_INTERACTIVE_MODE":true,
+ "Providers":[{"name":"$CCR_PROVIDER_NAME","api_base_url":"$CCR_PROVIDER_API_BASE_URL",
+               "api_key":"$CCR_PROVIDER_API_KEY","models":["$CCR_PROVIDER_MODEL"]}],
+ "Router":{"default":"$CCR_PROVIDER_NAME,$CCR_PROVIDER_MODEL"}}
+EOF
+P9B="$TMP/p9b.json"; run "$P9B" "$HT" "$HT/.agent-env" ccrtmpl CCR_STATUS=active \
+  CCR_PROVIDER_NAME=moonshot CCR_PROVIDER_API_BASE_URL=https://api.moonshot.cn/anthropic \
+  CCR_PROVIDER_API_KEY=sk-kimi-TEMPLATEresolved-4444wxyz
+jqeq "$P9B" '.auth_identity.ccr.provider'  'moonshot'        "AC-CCR: \$VAR provider resolved from env"
+jqeq "$P9B" '.auth_identity.ccr.base_host' 'api.moonshot.cn' "AC-CCR: \$VAR base_url resolved from env"
+jqeq "$P9B" '.auth_identity.ccr.token_fp'  'sk-kim…wxyz'     "AC-CCR: \$VAR api_key resolved, then fingerprinted"
+
+# ── 9c. the SAME template with nothing in env → the section is OMITTED, not fabricated ────
+#       Emitting a literal `$CCR_PROVIDER_NAME` would give every unrouted CCR box the same
+#       bogus identity and churn auth-changed events (§4.2 posture).
+P9C="$TMP/p9c.json"; run "$P9C" "$HT" "$HT/.agent-env" ccrtmpl0 CCR_STATUS=active
+jqeq "$P9C" '.auth_identity | has("ccr")' 'false' "AC-CCR: unresolved \$VAR template ⇒ no ccr section"
+grep -qF 'CCR_PROVIDER' "$P9C" && bad "AC-CCR: a \$VAR placeholder leaked into the payload" \
+                               || ok "AC-CCR: no \$VAR placeholder anywhere in the payload"
+
+# ── 9d. legacy cloud-init contract: no config on disk, upstream only in env + CCR_STATUS ──
+P9D="$TMP/p9d.json"; run "$P9D" "$HE" "$TMP/env-none" ccrenv CCR_STATUS=active \
+  CCR_PROVIDER_NAME=moonshot CCR_PROVIDER_API_BASE_URL=https://api.moonshot.cn/anthropic \
+  CCR_PROVIDER_API_KEY=sk-kimi-LEGACYenvkey-5555abcd
+jqeq "$P9D" '.auth_identity.ccr.provider' 'moonshot'    "AC-CCR: env fallback when no config is readable"
+jqeq "$P9D" '.auth_identity.ccr.token_fp' 'sk-kim…abcd' "AC-CCR: env fallback fingerprints the upstream key"
+
+# ── 9e. the same env WITHOUT CCR_STATUS (no ccr.service) → no section ─────────────────────
+#       A stray CCR_PROVIDER_* on a non-CCR box must not fabricate an upstream identity.
+P9E="$TMP/p9e.json"; run "$P9E" "$HE" "$TMP/env-none" ccrenv0 CCR_PROVIDER_NAME=moonshot \
+  CCR_PROVIDER_API_KEY=sk-kimi-LEGACYenvkey-5555abcd
+jqeq "$P9E" '.auth_identity | has("ccr")' 'false' "AC-CCR: env fallback is gated on CCR_STATUS"
+
+# ── 9f. a config that OMITS api_key (an app row with no stored secret) reports provider/host
+#        but NO token_fp — and never borrows a stray CCR_PROVIDER_API_KEY the daemon isn't using.
+HK="$TMP/home-ccr-nokey"; mkdir -p "$HK/.claude-code-router"; cp "$H/.agent-env" "$HK/.agent-env"
+cat > "$HK/.claude-code-router/config.json" <<'EOF'
+{"HOST":"127.0.0.1","PORT":3456,"Providers":[{"name":"kimi-app","api_base_url":"https://api.moonshot.cn/anthropic","models":["kimi-k2"]}],
+ "Router":{"default":"kimi-app,kimi-k2"}}
+EOF
+P9F="$TMP/p9f.json"; run "$P9F" "$HK" "$HK/.agent-env" ccrnokey CCR_STATUS=active \
+  CCR_PROVIDER_API_KEY=sk-kimi-STRAYenvkey-6666abcd
+jqeq "$P9F" '.auth_identity.ccr.provider' 'kimi-app' "AC-CCR: keyless config still reports its provider"
+jqeq "$P9F" '.auth_identity.ccr.token_fp' 'null'     "AC-CCR: keyless config borrows no stray env key"
+
+# ── 9g. NON-REGRESSION: a non-CCR agent reports no ccr section at all ─────────────────────
+jqeq "$P1" '.auth_identity | has("ccr")' 'false' "AC-CCR: non-CCR agent's payload carries no ccr section"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi

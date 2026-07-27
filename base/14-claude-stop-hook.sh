@@ -711,10 +711,11 @@ detect_effective_route() {
 #       (that would tax every Stop); omit id (→ whole stamp omitted) on a miss.
 #   else direct Anthropic with NO token → subscription: id = ~/.claude.json oauthAccount email (the
 #       quota boundary; portal renders `run as <email>`).
-# CCR runs (ANTHROPIC_BASE_URL = the local proxy) OMIT: the upstream identity lives in the CCR config
-# and is deferred to SCRUM-1631 — degrade to an EMPTY stamp, never the proxy's dummy token. Non-secret
-# by construction: only a fingerprint, an endpoint host, an operator-owned email / profile name — never
-# a raw token, never AWS/GCP credentials. Any miss => '{}' → the portal leaves the row unstamped
+#   CCR runs (ANTHROPIC_BASE_URL = the local proxy) → method `ccr` (SCRUM-1631): the env names only the
+#       proxy — the identity that SPENT the quota is the UPSTREAM key in ~/.claude-code-router/config.json,
+#       so id = ITS fingerprint and base_host = its endpoint. NEVER the proxy's own sbccr_ dummy token.
+# Non-secret by construction: only a fingerprint, an endpoint host, an operator-owned email / profile name
+# — never a raw token, never AWS/GCP credentials. Any miss => '{}' → the portal leaves the row unstamped
 # (legacy-safe). The §4.3 fingerprint reproduces the reporter's fingerprint() (report-health-snapshot.sh)
 # — bash+jq can't import the Python helper — so a run's key stamp groups with the agent's.
 fp_token() {
@@ -725,22 +726,64 @@ fp_token() {
   if [ "${#t}" -lt 12 ]; then printf '…%s' "${t: -2}"; else printf '%s…%s' "${t:0:6}" "${t: -4}"; fi
 }
 
+# Host of a NON-LOCAL URL (a real endpoint), else nothing — a loopback host is not an identity.
+# Mirrors the reporter's _base_host() so a run's stamp and the agent's block agree on the host.
+url_host() {
+  local u="${1:-}" hp="" h=""
+  [ -n "$u" ] || return 0
+  hp="${u#*://}"; hp="${hp%%/*}"; h="${hp%%:*}"
+  h="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
+  case "$h" in localhost|127.0.0.1|0.0.0.0|::1|'') return 0 ;; esac
+  printf '%s' "$h"
+}
+
+# Resolve a CCR config.json value: a LITERAL (portal-delivered app row) or the install-time template's
+# `$VAR` / `${VAR}` placeholder, which CCR itself interpolates at runtime from ccr.service's
+# EnvironmentFile — so what is on disk may be the literal string `$CCR_PROVIDER_API_KEY`. Echoes nothing
+# when a placeholder resolves to nothing: stamping an unresolved `$VAR` would fabricate an identity that
+# every unrouted CCR box would then share. Resolution is BY THE VAR'S OWN NAME, exactly as CCR does it —
+# a config that simply omits a field is a config with no upstream key, not an invitation to guess from env.
+ccr_deref() {
+  local v="${1:-}" name=""
+  case "$v" in
+    '$'*)
+      name="${v#\$}"; name="${name#\{}"; name="${name%\}}"
+      case "$name" in ''|*[!A-Za-z0-9_]*) v="" ;; *) v="${!name:-}" ;; esac
+      ;;
+  esac
+  printf '%s' "$v"
+}
+
 detect_run_identity() {
   local base="${ANTHROPIC_BASE_URL:-}"
-  # CCR local proxy → upstream identity out of scope (SCRUM-1631); never stamp the proxy's dummy token.
-  case "$base" in *127.0.0.1:3456*|*localhost:3456*) printf '{}'; return 0 ;; esac
+  local method="" id="" base_host="" is_ccr=0
+  # CCR local proxy — routed one hop further out; resolved in the first branch below (SCRUM-1631).
+  case "$base" in *127.0.0.1:3456*|*localhost:3456*) is_ccr=1 ;; esac
 
-  local method="" id="" base_host=""
   # base_host = host of a NON-LOCAL ANTHROPIC_BASE_URL (a gateway endpoint); a local host is not an identity.
-  if [ -n "$base" ]; then
-    local hp="${base#*://}"; hp="${hp%%/*}"; local h="${hp%%:*}"
-    h="$(printf '%s' "$h" | tr '[:upper:]' '[:lower:]')"
-    case "$h" in localhost|127.0.0.1|0.0.0.0|::1|'') : ;; *) base_host="$h" ;; esac
-  fi
+  base_host="$(url_host "$base")"
 
   # A token in effect: ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN (mirrors the reporter's _token_of).
   local tok="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
-  if [ -n "$tok" ]; then
+  if [ "$is_ccr" = 1 ]; then
+    # CCR (SCRUM-1631): $tok here is the local sbccr_ dummy Claude Code presents to the proxy, and $base
+    # is loopback — neither is an identity. The quota was spent by the UPSTREAM key in the router config,
+    # so stamp ITS fingerprint + endpoint. Checked FIRST and never falling through to the token branch
+    # below: that would fingerprint the dummy, the exact mis-attribution this branch replaces.
+    local cfg="${HOME}/.claude-code-router/config.json" ukey="" uurl=""
+    if [ -f "$cfg" ]; then
+      ukey="$(ccr_deref "$(jq -r '.Providers[0].api_key    // ""' "$cfg" 2>/dev/null || echo "")")"
+      uurl="$(ccr_deref "$(jq -r '.Providers[0].api_base_url // ""' "$cfg" 2>/dev/null || echo "")")"
+    else
+      # Legacy cloud-init contract (pre-SCRUM-1613): the upstream arrived as CCR_PROVIDER_* env with no
+      # config on disk. Only reachable with NO config at all — mirrors the reporter's _collect_ccr gate.
+      ukey="${CCR_PROVIDER_API_KEY:-}"; uurl="${CCR_PROVIDER_API_BASE_URL:-}"
+    fi
+    if [ -n "$ukey" ]; then
+      method="ccr"; id="$(fp_token "$ukey")"
+      base_host="$(url_host "$uurl")"
+    fi
+  elif [ -n "$tok" ]; then
     id="$(fp_token "$tok")"
     if [ -n "$base_host" ]; then method="gateway"; else method="api_key"; fi
   elif [ "${CLAUDE_CODE_USE_BEDROCK:-}" = "1" ]; then
