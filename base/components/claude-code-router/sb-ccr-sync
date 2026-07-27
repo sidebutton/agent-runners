@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# sb-ccr-sync [--no-restart] — derive the CCR daemon's runtime state from the portal-delivered
+# per-app env, and restart it only when that state actually changed (SCRUM-1613 / AAP-Cb).
+#
+# WHY THIS EXISTS. The portal delivers an agent-app's env per APP, into ~/.agent-env.d/<slug>
+# (AAP-C / SCRUM-1506, refreshed live on every config-apply by AAP-21 / SCRUM-1659). For a CCR app
+# that file carries ANTHROPIC_BASE_URL, the CC↔CCR token, and CCR_CONFIG_B64 — the whole routing
+# truth. `ccr.service` cannot read it directly, for two reasons that no amount of unit-file editing
+# fixes:
+#   1. FORMAT. Slug files are `export KEY="VALUE"` because the launch preamble `source`s them
+#      (base/19-secrets.sh:49). A systemd EnvironmentFile must be bare `KEY=VALUE` — with `export`
+#      systemd logs "Ignoring invalid environment assignment" and the daemon starts with NOTHING
+#      (base/12-workspace.sh:3-8 documents the same trap for ~/.agent-env).
+#   2. NAME. <slug> is account-defined, so install.sh cannot name the file in a static unit.
+# So this helper bridges: it FINDS the CCR app's file, mirrors it into a bare-format sidecar the
+# unit does pin (~/.claude-code-router/ccr.env), and materializes config.json from the base64.
+#
+# CONTRACT WITH THE PORTAL: the CCR marker is the CCR_CONFIG_B64 key — only the CCR adapter
+# (the-assistant lib/cloud/agent-app-env.ts) emits it, so its presence identifies the app without
+# the agent needing to know slugs, kinds, or the account's app list.
+#
+# WHY THE SHA-GATE. The agent reconciler rewrites every slug file on every apply, whether or not the
+# content changed, and the path unit fires on each write. Restarting CCR kills in-flight proxied
+# requests, so a restart must follow a REAL change of what the daemon consumes — never a rewrite.
+#
+# Run as root: by ccr-env-sync.service (boot + on every change to ~/.agent-env.d), by the component's
+# post-services.sh at provision (--no-restart: that phase does the first start itself), and by hand
+# for debugging. Idempotent and WARN-not-die throughout — a bad payload keeps the last good config.
+set -uo pipefail
+
+RESTART=1
+case "${1:-}" in
+  --no-restart) RESTART=0 ;;
+  '') ;;
+  *) echo "usage: sb-ccr-sync [--no-restart]" >&2; exit 2 ;;
+esac
+
+# Overridable for the offline component test (no root, no systemd, no /home/agent).
+AGENT_HOME="${SB_AGENT_HOME:-/home/agent}"
+AGENT_USER="${SB_AGENT_USER:-agent}"
+SERVICE="${SB_CCR_SERVICE:-ccr.service}"
+RUN_DIR="${SB_CCR_RUN_DIR:-/run}"
+
+APP_ENV_DIR="${AGENT_HOME}/.agent-env.d"
+CCR_HOME="${AGENT_HOME}/.claude-code-router"
+SIDECAR="${CCR_HOME}/ccr.env"
+CONFIG="${CCR_HOME}/config.json"
+
+log() { printf '[sb-ccr-sync] %s\n' "$*"; }
+_sha() { sha256sum -- "$1" 2>/dev/null | awk '{print $1}'; }
+
+TMP_ENV=""; TMP_CFG=""
+cleanup() { [ -n "$TMP_ENV" ] && rm -f "$TMP_ENV"; [ -n "$TMP_CFG" ] && rm -f "$TMP_CFG"; return 0; }
+trap cleanup EXIT
+
+# Serialise: the path unit and the provision-time call must never derive into the same temp names or
+# race a restart against a half-written sidecar.
+mkdir -p "$RUN_DIR" 2>/dev/null || true
+exec 9>"${RUN_DIR}/sb-ccr-sync.lock" 2>/dev/null || true
+flock -w 60 9 2>/dev/null || true
+
+# ── 1. find the CCR app's slug file (deterministic pick) ──────────────────────
+# One daemon means one config, so two CCR apps in an agent's scope can only route one of them. The
+# pick is the first in glob (sorted) order and the loser is named in the log — the alternative,
+# "whichever file the loop happened to see last", is the same limitation but silent.
+CCR_FILE=""
+CCR_COUNT=0
+if [ -d "$APP_ENV_DIR" ]; then
+  shopt -s nullglob
+  for f in "$APP_ENV_DIR"/*; do
+    [ -f "$f" ] && [ ! -L "$f" ] || continue
+    grep -qE '^[[:space:]]*export[[:space:]]+CCR_CONFIG_B64=' "$f" 2>/dev/null || continue
+    CCR_COUNT=$((CCR_COUNT + 1))
+    [ -n "$CCR_FILE" ] || CCR_FILE="$f"
+  done
+  shopt -u nullglob
+fi
+[ "$CCR_COUNT" -gt 1 ] && log "WARN: ${CCR_COUNT} CCR apps in ${APP_ENV_DIR} — one proxy can serve one, routing $(basename -- "$CCR_FILE"); scope the agent to a single CCR app"
+
+# ── 2. reconcile to zero: the app was deleted or de-scoped ───────────────────
+# Only tear down what THIS helper brought up (the sidecar is its own marker) — a component-only VM
+# that never had an app row keeps the shipped template behaviour untouched.
+if [ -z "$CCR_FILE" ]; then
+  if [ -f "$SIDECAR" ]; then
+    rm -f "$SIDECAR"
+    log "no CCR app under ${APP_ENV_DIR} — sidecar removed"
+    if [ "$RESTART" = "1" ]; then
+      systemctl stop "$SERVICE" >/dev/null 2>&1 \
+        && log "${SERVICE} stopped (nothing to route)" \
+        || log "WARN: could not stop ${SERVICE}"
+    fi
+  else
+    log "no CCR app and no managed sidecar — nothing to do"
+  fi
+  exit 0
+fi
+
+# ── 3. derive the bare-format sidecar ────────────────────────────────────────
+# `export K="V"` → `K="V"`. systemd strips the quotes itself; the three delivered values (a URL, an
+# sbccr_<hex> token, base64) are quote- and escape-free by construction, so the mirror is lossless.
+mkdir -p "$CCR_HOME/logs" 2>/dev/null || true
+TMP_ENV="${SIDECAR}.tmp.$$"
+( umask 177; : > "$TMP_ENV" ) || { log "WARN: cannot write ${CCR_HOME} — sync skipped"; exit 0; }
+sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}//p' "$CCR_FILE" >> "$TMP_ENV"
+
+# ── 4. derive config.json from the delivered base64 ──────────────────────────
+# Read the key back OUT of the derived sidecar with the same bare-format extractor the rest of the
+# fleet uses — if that pipeline can't find it, neither can systemd, and the sidecar is wrong.
+CCR_B64="$(grep -E '^CCR_CONFIG_B64=' "$TMP_ENV" 2>/dev/null | tail -n1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' || true)"
+if [ -n "$CCR_B64" ]; then
+  TMP_CFG="${CONFIG}.tmp.$$"
+  if printf '%s' "$CCR_B64" | base64 -d > "$TMP_CFG" 2>/dev/null && [ -s "$TMP_CFG" ]; then
+    :
+  else
+    rm -f "$TMP_CFG"; TMP_CFG=""
+    log "WARN: CCR_CONFIG_B64 did not decode to a non-empty config — keeping the existing config.json"
+  fi
+else
+  log "WARN: $(basename -- "$CCR_FILE") matched the CCR marker but yielded no value — keeping the existing config.json"
+fi
+
+# ── 5. install what actually changed (the restart gate) ──────────────────────
+CHANGED=0
+if [ "$(_sha "$TMP_ENV")" != "$(_sha "$SIDECAR")" ]; then
+  mv -f "$TMP_ENV" "$SIDECAR" && CHANGED=1 || log "WARN: could not install ${SIDECAR}"
+  TMP_ENV=""
+fi
+if [ -n "$TMP_CFG" ] && [ "$(_sha "$TMP_CFG")" != "$(_sha "$CONFIG")" ]; then
+  mv -f "$TMP_CFG" "$CONFIG" && CHANGED=1 || log "WARN: could not install ${CONFIG}"
+  TMP_CFG=""
+fi
+chown -R "${AGENT_USER}:${AGENT_USER}" "$CCR_HOME" 2>/dev/null || true
+chmod 600 "$SIDECAR" "$CONFIG" 2>/dev/null || true
+
+# ── 6. restart only on a real change ─────────────────────────────────────────
+if [ "$CHANGED" = "0" ]; then
+  log "in sync with $(basename -- "$CCR_FILE") — ${SERVICE} untouched"
+elif [ "$RESTART" = "0" ]; then
+  log "derived from $(basename -- "$CCR_FILE") — restart deferred to the caller"
+else
+  systemctl restart "$SERVICE" >/dev/null 2>&1 \
+    && log "routing changed ($(basename -- "$CCR_FILE")) — ${SERVICE} restarted" \
+    || log "WARN: could not restart ${SERVICE} — check 'journalctl -u ${SERVICE}'"
+fi
+exit 0
