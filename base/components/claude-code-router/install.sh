@@ -26,6 +26,16 @@
 # so the routing values are not present yet. CCR's interpolateEnvVars() resolves
 # them at RUNTIME from its process env (systemd EnvironmentFile=the sidecar), so
 # the secrets are never baked into the image. Idempotent (command -v / overwrite).
+#
+# Why LOG_LEVEL is pinned to `info`: CCR 2.0.0 defaults to `debug` (`LOG_LEVEL ||
+# "debug"`), whose per-request "final request" line dumps the outbound HEADERS —
+# i.e. `authorization: Bearer <the operator's upstream key>` — straight into
+# logs/*.log. Observed 2026-07-28 driving CCR 2.0.0 against a live provider.
+# `info` keeps startup, provider registration, request/response and error lines and
+# drops only the header dump. The portal pins the same value in the config it
+# generates, but this template is what a first boot (and any agent whose portal has
+# not redeployed yet) actually runs on, so the value has to exist on BOTH sides —
+# and the logs/ dir mode below is the backstop for a payload that predates either.
 
 step "Component: Claude Code Router (CCR)"
 
@@ -52,11 +62,24 @@ fi
 CCR_HOME="$AGENT_HOME/.claude-code-router"
 mkdir -p "$CCR_HOME/logs"
 
+# Everything under here is secret-bearing — config.json carries the upstream api_key, ccr.env the
+# proxy token, and the logs can carry either (see the LOG_LEVEL note below). Only the agent (owner)
+# and root ever read them: ccr.service runs User=agent and logrotate runs as root, so 700 costs
+# nothing. Same idiom as ~/.agent-env.d above. This dir mode is what actually protects the ROTATED
+# copies too: `copytruncate` reproduces the original file's permissions, and logrotate's `create`
+# directive is documented as having no effect when copytruncate is used — so mode cannot be fixed
+# per-file at rotation time, only by making the directory untraversable.
+chmod 700 "$CCR_HOME" "$CCR_HOME/logs"
+# Re-provisioning an agent that already ran a debug-level CCR: tighten logs written world-readable
+# before this change. Glob may not match (fresh install) — never let that fail the step.
+chmod 600 "$CCR_HOME"/logs/*.log 2>/dev/null || true
+
 cat > "$CCR_HOME/config.json" <<'EOF'
 {
   "HOST": "127.0.0.1",
   "PORT": 3456,
   "APIKEY": "$ANTHROPIC_AUTH_TOKEN",
+  "LOG_LEVEL": "info",
   "NON_INTERACTIVE_MODE": true,
   "Providers": [
     {
@@ -192,6 +215,12 @@ systemctl enable ccr-env-sync.service >/dev/null 2>&1 \
 # 4. logrotate for CCR's logs (new idiom — first logrotate drop in base). copytruncate
 #    so the long-lived ccr process keeps its open fd; su agent agent since the logs
 #    are agent-owned under ~/.
+#
+#    No `create 0600` here on purpose: logrotate documents `create` as having NO EFFECT
+#    under copytruncate (the original file stays in place and the copy inherits its mode),
+#    so adding it would read as a permission control while changing nothing. The rotated
+#    and compressed copies are protected by the 700 on logs/ instead — they are written
+#    into that same directory.
 cat > /etc/logrotate.d/claude-code-router <<'EOF'
 /home/agent/.claude-code-router/logs/*.log {
     daily
