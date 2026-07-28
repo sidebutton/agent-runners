@@ -99,6 +99,11 @@ fi
 # `export K="V"` → `K="V"`. systemd strips the quotes itself; the three delivered values (a URL, an
 # sbccr_<hex> token, base64) are quote- and escape-free by construction, so the mirror is lossless.
 mkdir -p "$CCR_HOME/logs" 2>/dev/null || true
+# Match install.sh: this dir holds the upstream key (config.json), the proxy token (ccr.env) and logs
+# that can carry either, and only the owner + root ever read it. Re-asserted here because this script
+# also runs on agents provisioned before that mode existed, and it is the one CCR path that executes
+# on every portal config-apply.
+chmod 700 "$CCR_HOME" "$CCR_HOME/logs" 2>/dev/null || true
 TMP_ENV="${SIDECAR}.tmp.$$"
 ( umask 177; : > "$TMP_ENV" ) || { log "WARN: cannot write ${CCR_HOME} — sync skipped"; exit 0; }
 sed -n 's/^[[:space:]]*export[[:space:]]\{1,\}//p' "$CCR_FILE" >> "$TMP_ENV"

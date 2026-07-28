@@ -109,6 +109,33 @@ grep -q 'CCR_CONFIG_B64' "$INSTALL" && ok "install.sh honors a CCR_CONFIG_B64 wh
 # ── AC1: logrotate written for the CCR logs ──────────────────────────────────
 grep -q '/etc/logrotate.d/claude-code-router' "$INSTALL" && ok "install.sh writes logrotate config" || bad "install.sh missing logrotate config"
 
+# ── Upstream-key exposure via CCR's own logs (SCRUM-1502) ────────────────────
+# CCR 2.0.0 defaults to LOG_LEVEL=debug, whose per-request line dumps the outbound headers —
+# `authorization: Bearer <upstream key>` — into logs/*.log. Two independent guards, because each
+# covers a case the other cannot: the pinned level stops the secret being WRITTEN (but only for
+# configs generated after this change), and the 700 on logs/ stops it being READ by any other user
+# (including for payloads that predate it, and for the rotated + compressed copies, whose mode
+# copytruncate reproduces from the original and which `create` provably cannot fix).
+grep -q '"LOG_LEVEL": "info"' "$INSTALL" \
+  && ok "config pins LOG_LEVEL=info (CCR 2.0.0 defaults to debug, which logs the upstream key)" \
+  || bad "config missing LOG_LEVEL=info — CCR would log the upstream key in cleartext"
+grep -Eq 'chmod 700 "\$CCR_HOME" "\$CCR_HOME/logs"' "$INSTALL" \
+  && ok "install.sh restricts ~/.claude-code-router + logs/ to 700" \
+  || bad "install.sh does not restrict the CCR home/logs dir (secrets world-readable)"
+grep -Eq 'chmod 600 "\$CCR_HOME"/logs/\*\.log' "$INSTALL" \
+  && ok "install.sh tightens pre-existing logs on re-provision" \
+  || bad "install.sh leaves already-written logs world-readable on re-provision"
+grep -Eq 'chmod 700 "\$CCR_HOME" "\$CCR_HOME/logs"' "$SYNC" \
+  && ok "sb-ccr-sync re-asserts 700 on every config-apply (covers pre-existing agents)" \
+  || bad "sb-ccr-sync does not re-assert the CCR home/logs mode"
+# The guard that must NOT be there: `create` is a no-op under copytruncate, so it would read as a
+# permission control while changing nothing.
+if grep -q 'copytruncate' "$INSTALL" && grep -Eq '^\s*create\s' "$INSTALL"; then
+  bad "logrotate stanza has both copytruncate and create — create has no effect there (misleading)"
+else
+  ok "logrotate stanza does not pair copytruncate with an inert create"
+fi
+
 # ── AC4: post-services starts + health-checks CCR, WARN-not-die ──────────────
 grep -q 'systemctl restart ccr.service' "$POST" \
   && ok "post-services (re)starts ccr.service (its first start)" || bad "post-services does not start ccr.service"
