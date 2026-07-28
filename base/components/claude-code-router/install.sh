@@ -69,7 +69,10 @@ mkdir -p "$CCR_HOME/logs"
 # copies too: `copytruncate` reproduces the original file's permissions, and logrotate's `create`
 # directive is documented as having no effect when copytruncate is used — so mode cannot be fixed
 # per-file at rotation time, only by making the directory untraversable.
-chmod 700 "$CCR_HOME" "$CCR_HOME/logs"
+# WARN-not-die, like the npm install above: run.sh is `set -euo pipefail` and CCR is an OPTIONAL
+# component, so an unguarded chmod here could abort provisioning of the whole VM over a hardening step.
+chmod 700 "$CCR_HOME" "$CCR_HOME/logs" 2>/dev/null \
+  || log "WARN: could not restrict $CCR_HOME to 700 — CCR logs may be world-readable"
 # Re-provisioning an agent that already ran a debug-level CCR: tighten logs written world-readable
 # before this change. Glob may not match (fresh install) — never let that fail the step.
 chmod 600 "$CCR_HOME"/logs/*.log 2>/dev/null || true
