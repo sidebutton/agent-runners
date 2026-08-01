@@ -54,11 +54,15 @@ BITBUCKET_API_TOKEN=
 # wired as a per-host credential helper below for clones, pulls and SD write-back pushes.
 SIDEBUTTON_DEFAULT_REGISTRY_TOKEN=
 
-# Required for SE/QA agents: Jira credentials
-JIRA_URL=
-JIRA_EMAIL=
-JIRA_API_TOKEN=
-JIRA_PROJECT_KEY=SCRUM
+# Jira credentials are PORTAL-OWNED and deliberately NOT scaffolded here. An api_key
+# account's secrets fetch (base/19) appends the canonical JIRA_* set; a Forge-app
+# account's agents pull a short-lived Bearer token per session instead
+# (GET /api/agents/jira-token — the-assistant docs/plans/JIRA-AGENT-VM-ACCESS.md §4)
+# and no Jira key ever lands in this file. Empty KEY= scaffold lines are a trap, not
+# a hint: job preambles `source` this file over the daemon env, and a line saying
+# JIRA_URL= BLANKS an inherited value that omitting the key would have let through.
+# (JIRA_PROJECT_KEY is workspace-scoped and delivered by workspace applies — a
+# hardcoded default here was wrong for every non-SCRUM tenant.)
 
 # Populated by heartbeat below (DNS hostname assigned by portal)
 AGENT_DNS=
