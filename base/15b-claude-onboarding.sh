@@ -78,7 +78,12 @@ if jq \
       --arg ver "$CLAUDE_VER" \
       --argjson seen "$NOTICE_SEEN_COUNT" '
       # raise(key) — set key to max(existing, $seen); never rewinds a real count.
-      def raise(k): .[k] = ([(.[k] // 0), $seen] | max);
+      # `| numbers` is load-bearing, not defensive noise: jq orders numbers BEFORE
+      # strings, so a non-number left in the file (hand-edit, corruption, a future
+      # format change) would win the max and be written back — leaving the notice
+      # both un-dismissed AND still non-numeric. Coercing a non-number to 0 makes the
+      # seed win instead, so the key is always a number afterwards.
+      def raise(k): .[k] = ([((.[k] | numbers) // 0), $seen] | max);
 
         . + {hasCompletedOnboarding: true, hasCompletedProjectOnboarding: true, theme: "dark"}
       | .projects = (.projects // {})

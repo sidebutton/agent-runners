@@ -54,6 +54,9 @@ drop_claude() { rm -f "$FAKEBIN/claude"; }
 # Run the step against a home dir seeded with $1 (JSON), returning the merged file.
 # Stubs step()/log() (lib.sh is not sourced) and chowns to the CURRENT user so the
 # step's chown succeeds unprivileged.
+# chown/chmod are stubbed: `chown agent:agent` is meaningless in a test sandbox and
+# FAILS on macOS (no group matching the user), which would mask the step's own exit
+# status behind a platform artifact — see run_step_rc, which asserts that status.
 run_step() {
   local seed="$1" home="$WORK/home"
   rm -rf "$home"; mkdir -p "$home"
@@ -61,12 +64,34 @@ run_step() {
   (
     set +e
     export AGENT_HOME="$home" AGENT_USER="$(id -un)" PATH="$SANDBOX_PATH"
-    step() { :; }
-    log()  { :; }
+    step()  { :; }
+    log()   { :; }
+    chown() { :; }
+    chmod() { :; }
     # shellcheck source=/dev/null
     . "$STEP"
   ) >/dev/null 2>&1
   cat "$home/.claude.json"
+}
+
+# Same, but runs under the run.sh contract (`set -euo pipefail`) and echoes the EXIT
+# STATUS instead of the file. base/run.sh sources this step UNGATED under set -e, so a
+# non-zero exit here does not degrade a notice — it ABORTS the whole provision.
+run_step_rc() {
+  local seed="$1" home="$WORK/home"
+  rm -rf "$home"; mkdir -p "$home"
+  [ "$seed" = "-" ] || printf '%s' "$seed" > "$home/.claude.json"
+  (
+    set -euo pipefail
+    export AGENT_HOME="$home" AGENT_USER="$(id -un)" PATH="$SANDBOX_PATH"
+    step()  { :; }
+    log()   { :; }
+    chown() { :; }
+    chmod() { :; }
+    # shellcheck source=/dev/null
+    . "$STEP"
+  ) >/dev/null 2>&1
+  echo $?
 }
 
 j() { jq -r "$1" <<<"$2"; }
@@ -135,6 +160,51 @@ first="$(run_step -)"
 second="$(cat "$home/.claude.json")"
 [ "$(jq -S . <<<"$first")" = "$(jq -S . <<<"$second")" ] \
   && ok "AC5 a second run is a byte-identical no-op" || bad "AC5 not idempotent"
+
+# ── AC7 — a malformed ~/.claude.json is PRESERVED, never destroyed ──
+# That file holds every project's trust flag and history. Overwriting a file jq could
+# not parse would silently wipe an agent's Claude state; the step must leave it alone
+# and warn instead.
+make_claude "2.1.222 (Claude Code)"
+broken='{"projects":{"/x":{"history":["keep me"]}},,BROKEN'
+out="$(run_step "$broken")"
+[ "$out" = "$broken" ] \
+  && ok "AC7 a malformed ~/.claude.json is left byte-identical" \
+  || bad "AC7 clobbered a malformed ~/.claude.json"
+
+# ── AC8 — never abort a provision ──
+# base/run.sh sources 15b UNGATED under `set -euo pipefail`, and the claude-code
+# component is only DEFAULT-on (AGENT_COMPONENTS can omit it). So the step must exit 0
+# with no CLI on PATH and with an unparseable file — otherwise it takes the whole
+# provision down with it.
+#
+# The rc MUST be captured into a variable before comparing. Inlining it as
+# `[ "$(run_step_rc -)" = "0" ]` makes this whole check VACUOUS: bash suppresses
+# errexit inside a command substitution that sits in a tested context, and that
+# suppression is inherited by the subshell — so the step runs to completion, `echo $?`
+# reports 0, and the assertion passes even when the step would really abort a
+# provision. Verified: with the guard deliberately removed, the inline form still
+# said "ok" while the captured form correctly said non-zero.
+drop_claude
+rc="$(run_step_rc -)"
+[ "$rc" = "0" ] \
+  && ok "AC8 exits 0 with no claude on PATH (variant without the claude-code component)" \
+  || bad "AC8 exit $rc with no claude on PATH — would abort run.sh"
+make_claude "2.1.222 (Claude Code)"
+rc="$(run_step_rc "$broken")"
+[ "$rc" = "0" ] \
+  && ok "AC8 exits 0 on an unparseable ~/.claude.json" \
+  || bad "AC8 exit $rc on an unparseable file — would abort run.sh"
+
+# ── AC9 — a non-number counter is coerced, not propagated ──
+# jq orders numbers before strings, so a stringy count would win max() and be written
+# back: the notice stays un-dismissed AND the key stays non-numeric.
+out="$(run_step '{"fullscreenUpsellSeenCount":"5"}')"
+[ "$(j '.fullscreenUpsellSeenCount' "$out")" = "99" ] \
+  && ok "AC9 a string-typed counter is coerced and raised" \
+  || bad "AC9 string counter survived as $(j '.fullscreenUpsellSeenCount' "$out")"
+[ "$(j '.fullscreenUpsellSeenCount | type' "$out")" = "number" ] \
+  && ok "AC9 the written counter is a number" || bad "AC9 wrote a non-number counter"
 
 # ── AC6 — listed in the refresh manifest, or the stamps go stale on the next upgrade ──
 if [ -r "$MANIFEST" ]; then
