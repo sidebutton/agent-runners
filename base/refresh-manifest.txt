@@ -25,6 +25,18 @@
 #   18-heartbeat.sh    re-registers the agent + swaps in a fresh sb_token
 #   18b-heartbeat-timer / 20-mark-installed  install-lifecycle, not artifacts
 #   01..13, 15..17     OS/toolchain/desktop install + one-time user/workspace setup
+#                      — EXCEPT 15b (listed below), see its carve-out note.
+#
+# CARVE-OUT — 15b-claude-onboarding.sh is listed despite sitting in the 15..17 range.
+# It installs nothing and sets up no user/workspace: it is a pure jq merge into
+# ~/.claude.json (onboarding + folder trust + first-run notices), idempotent by
+# construction, and it MUST re-run after a Claude Code upgrade — its release-notes
+# stamp is keyed to the INSTALLED CLI version, so a provision-only seed goes stale the
+# first time the CLI moves and the "What's new" panel returns to cover the agent's
+# window. Concurrency with a running claude is safe by shape, not by luck: the merge
+# is read → temp → atomic mv, and a partial/locked read makes jq fail, which logs a
+# WARN and leaves the file untouched. Worst case a live claude's own later write wins
+# and the next refresh re-applies — never a corrupt file.
 # The Claude hooks block (assets/claude-hooks.json) is re-merged separately by
 # sb_refresh_base_artifacts — it is an asset, not a step, so it is not listed here.
 #
@@ -34,6 +46,7 @@
 # the agent-runners fingerprint and re-run the heavy provisioning chown/install).
 
 14-claude-stop-hook.sh
+15b-claude-onboarding.sh
 18c-git-telemetry-timer.sh
 19c-health-report.sh
 19d-account-registry.sh

@@ -55,7 +55,7 @@ workspace repos (credential helpers are pre-wired), and run `claude` manually.
 | Preflight, apt essentials, Node 22 | `01-preflight`, `02-system`, `05-node` |
 | GitHub CLI | `03-gh-cli` |
 | Desktop + RDP/VNC (xfce4, xrdp, x11vnc, Xvfb) + units | `04-desktop`, desktop units in `16/17` |
-| Claude Code CLI + onboarding/trust seed | `components/claude-code/install.sh` (default-on component), `15b-claude-onboarding` |
+| Claude Code CLI + onboarding/trust/notice seed | `components/claude-code/install.sh` (default-on component), `15b-claude-onboarding` (also refreshed on live agents — see `refresh-manifest.txt`) |
 | Agent user, RDP password, `~/.claude/settings.json`, dirs | `09-agent-user` |
 | Polkit (RDP auth popups) | `11-polkit` |
 | `~/.agent-env` template + `.bashrc` + **git credential helpers** + `~/workspace` | `12-workspace` |
