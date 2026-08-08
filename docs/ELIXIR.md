@@ -120,6 +120,24 @@ def project do
 end
 ```
 
+## Ordering constraint — the agent must own `~/.config` and `~/.local` first
+
+`base/09-agent-user.sh` creates `$AGENT_HOME/.config` and `$AGENT_HOME/.local/bin`
+with `mkdir -p` **as root**, and the first blanket `chown -R "$AGENT_HOME"` does not
+happen until `13-knowledge-packs` / `15-claude-mcp` — *after* the `run.sh` toolchain
+loop that sources this component. So `install.sh` explicitly `install -d -o agent`s
+`~/.config`, `~/.local`, `~/.local/share` and `~/.cache` before it drops to the agent
+user. Without that step `mise use -g` fails with
+
+```
+failed create_dir_all: ~/.local/share/mise/installs/…: Permission denied (os error 13)
+```
+
+which the component's `|| log WARN` swallows — a **green provision with no toolchain
+at all**. If the component is ever moved later in `run.sh` (past the blanket chown)
+the prep becomes a no-op, not a bug; `base/tests/test-elixir-component.sh` asserts it
+stays ahead of the first `runuser`.
+
 ## Gotcha — do not run the toolchain as root
 
 A mise shim resolves the toolchain from the **invoking** user's `$HOME`
@@ -129,7 +147,9 @@ env plumbing — but `sudo mix …` resolves `/root/.local/share/mise`, finds no
 and either errors with `mix is not a valid shim` or (mise's
 `not_found_system_fallback`, default on) **silently runs some other same-named
 binary**. Run Elixir commands as `agent`; use `sudo -u agent -H` if you are already
-root.
+root. This applies to `install.sh` itself, which runs as root — its closing
+`elixir: …` / `erlang: …` report lines are `runuser`-wrapped for exactly this reason,
+and the test asserts that every mise **and shim** invocation stays wrapped.
 
 ## Verify on a provisioned agent
 

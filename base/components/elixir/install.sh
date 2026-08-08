@@ -77,7 +77,10 @@ else
   # it here turns a mystery 20-minute provision into one greppable log line.
   _os_ver="$( . /etc/os-release 2>/dev/null && echo "${ID:-unknown}-${VERSION_ID:-unknown}" || echo unknown-unknown )"
   _arch="$(dpkg --print-architecture 2>/dev/null || echo amd64)"
-  if curl -fsI --connect-timeout 10 --max-time 30 \
+  # --retry matches the repo's fetch idiom (dotnet9/install.sh:14): a fresh cloud
+  # VM whose egress is still settling would otherwise fail the HEAD once and log
+  # the alarming "expect 10–20 min" line for an install that takes seconds.
+  if curl -fsI --connect-timeout 10 --max-time 30 --retry 2 --retry-connrefused \
        "https://builds.hex.pm/builds/otp/${_arch}/${_os_ver}/OTP-${ELIXIR_OTP_VERSION}.tar.gz" \
        >/dev/null 2>&1; then
     log "elixir: precompiled OTP-${ELIXIR_OTP_VERSION} available for ${_arch}/${_os_ver} — install is a download"
@@ -85,7 +88,23 @@ else
     log "elixir: NO precompiled OTP-${ELIXIR_OTP_VERSION} for ${_arch}/${_os_ver} — mise will kerl SOURCE-build it (expect 10–20 min)"
   fi
 
-  # ── 4. Pre-bake the pinned pair AS THE AGENT USER ──────────────────────────
+  # ── 4. Give the agent its own dotdirs BEFORE dropping to it ────────────────
+  # base/09-agent-user.sh creates $AGENT_HOME/.config and $AGENT_HOME/.local/bin
+  # with `mkdir -p` AS ROOT, and the first `chown -R "$AGENT_HOME"` does not run
+  # until 13-knowledge-packs / 15-claude-mcp — i.e. AFTER this toolchain loop
+  # (run.sh sources components at :50, those steps at :70/:72). So at this point
+  # both dirs are root:root 0755 and the agent cannot create anything under them.
+  # Without this block the `mise use -g` below dies with
+  #   failed create_dir_all: ~/.local/share/mise/installs/…: Permission denied (13)
+  # which `|| log WARN` swallows — a GREEN provision with no toolchain, no shims
+  # and `mix: command not found` on every dispatched job. `install -d` re-applies
+  # ownership to an existing dir, so this is also a no-op on a re-run.
+  for _d in "$AGENT_HOME/.config" "$AGENT_HOME/.local" "$AGENT_HOME/.local/share" "$AGENT_HOME/.cache"; do
+    install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0755 "$_d" \
+      || log "WARN: could not give ${AGENT_USER} ownership of ${_d}"
+  done
+
+  # ── 5. Pre-bake the pinned pair AS THE AGENT USER ──────────────────────────
   # `mise use -g` installs the tools AND records them in the agent's global
   # ~/.config/mise/config.toml. MISE_YES=1 keeps it non-interactive (the only
   # prompt on this path is the config-trust one). `runuser -u` (no -m) resets HOME
@@ -97,19 +116,27 @@ else
     || log "WARN: mise install of erlang@${ELIXIR_OTP_VERSION} + elixir@${ELIXIR_VERSION} failed"
   log "elixir: toolchain install took $(( $(date +%s) - _t0 ))s"
 
-  # ── 5. Bootstrap Hex + rebar3 (as the agent) ───────────────────────────────
+  # ── 6. Bootstrap Hex + rebar3 (as the agent) ───────────────────────────────
   # NOTE: mise's elixir plugin points MIX_HOME at the ELIXIR INSTALL DIR
   # (…/installs/elixir/<version>/.mix), NOT ~/.mix — so this bootstrap is
   # per-Elixir-version. A repo whose .tool-versions selects a different Elixir gets
   # its own empty MIX_HOME and re-fetches Hex on first use (needs network).
   # Called out in docs/ELIXIR.md.
-  for _mixtask in local.hex local.rebar; do
-    runuser -u "$AGENT_USER" -- env HOME="$AGENT_HOME" MISE_YES=1 \
-      "$MISE_BIN" exec -- mix "$_mixtask" --force >>"$LOG_FILE" 2>&1 \
-      || log "WARN: mix ${_mixtask} --force failed"
-  done
+  # GATED on the pre-bake having actually produced a mix shim: with MISE_YES=1,
+  # `mise exec` AUTO-INSTALLS a missing tool, so running this after a failed
+  # step 5 would re-attempt the (possibly 10–20 min kerl) Erlang build once per
+  # loop iteration, unbounded, and still end with no Hex.
+  if [ ! -x "$ELIXIR_SHIM_DIR/mix" ]; then
+    log "WARN: no mix shim after the pre-bake — skipping the Hex/rebar bootstrap"
+  else
+    for _mixtask in local.hex local.rebar; do
+      runuser -u "$AGENT_USER" -- env HOME="$AGENT_HOME" MISE_YES=1 \
+        "$MISE_BIN" exec -- mix "$_mixtask" --force >>"$LOG_FILE" 2>&1 \
+        || log "WARN: mix ${_mixtask} --force failed"
+    done
+  fi
 
-  # ── 6. Put the toolchain on the DISPATCHED-JOB PATH (see header) ───────────
+  # ── 7. Put the toolchain on the DISPATCHED-JOB PATH (see header) ───────────
   for _b in "${ELIXIR_SHIMS[@]}"; do
     if [ -e "$ELIXIR_SHIM_DIR/$_b" ]; then
       ln -sf "$ELIXIR_SHIM_DIR/$_b" "/usr/local/bin/$_b" || log "WARN: could not link ${_b} into /usr/local/bin"
@@ -126,14 +153,29 @@ else
     chown "$AGENT_USER":"$AGENT_USER" "$AGENT_HOME/.bashrc" 2>/dev/null || true
   fi
 
-  # ── 7. Dialyzer PLT cache ──────────────────────────────────────────────────
+  # ── 8. Dialyzer PLT cache ──────────────────────────────────────────────────
   # Agent-owned and OUTSIDE any repo, so the slow core PLT survives a fresh clone
   # or a branch switch. Repos opt in via `dialyzer: [plt_local_path: …]` in
   # mix.exs — see docs/ELIXIR.md.
   install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 0755 "$ELIXIR_PLT_DIR" \
     || log "WARN: could not create the Dialyzer PLT cache dir ${ELIXIR_PLT_DIR}"
 
-  # ── 8. Report what actually resolved ───────────────────────────────────────
-  log "elixir: $(/usr/local/bin/elixir --version 2>/dev/null | tail -1 || echo not-installed)"
-  log "erlang: OTP $(/usr/local/bin/erl -noshell -eval 'io:format("~s",[erlang:system_info(otp_release)])' -s init stop 2>/dev/null || echo unknown) — PLT cache ${ELIXIR_PLT_DIR}"
+  # ── 9. Report what actually resolved ───────────────────────────────────────
+  # AS THE AGENT, for the same reason everything else here is: these are the mise
+  # SHIMS, and a shim resolves the toolchain from the INVOKING user's $HOME. Run
+  # bare as root they look in /root/.local/share/mise, find nothing, and exit 1
+  # with "elixir is not a valid shim" — so a perfectly healthy install would log
+  # "elixir: not-installed" / "erlang: OTP unknown" every single time, breaking
+  # the exact triage path docs/ELIXIR.md tells operators to grep for. (With mise's
+  # not_found_system_fallback the root probe can also silently report an unrelated
+  # same-named binary.) One `elixir --version` carries BOTH the OTP and the Elixir
+  # banner, so this is also one BEAM start instead of two.
+  _elixir_v="$(runuser -u "$AGENT_USER" -- env HOME="$AGENT_HOME" \
+    /usr/local/bin/elixir --version 2>/dev/null || echo '')"
+  if [ -n "$_elixir_v" ]; then
+    log "elixir: $(printf '%s\n' "$_elixir_v" | grep -i '^Elixir' || echo unknown)"
+    log "erlang: $(printf '%s\n' "$_elixir_v" | grep -i '^Erlang' || echo unknown) — PLT cache ${ELIXIR_PLT_DIR}"
+  else
+    log "elixir: not-installed (the toolchain did not resolve as ${AGENT_USER} — see the WARNs above)"
+  fi
 fi
