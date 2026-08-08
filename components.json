@@ -59,6 +59,14 @@
       "chip": { "label": ".NET 9", "live": false }
     },
     {
+      "slug": "elixir",
+      "kind": "toolchain",
+      "title": "Elixir / Erlang OTP",
+      "description": "Erlang/OTP 28 + Elixir 1.20 via mise, pre-baked at provision time so no job pays a cold toolchain cost (mix, ExUnit, mix format, IEx; Hex + rebar3 bootstrapped). A repo's .tool-versions still overrides the pre-baked pair. Phoenix test suites need a REAL Postgres server — pair this with the Docker component; postgres-client alone is not enough. Prefer a Medium or larger machine with generous disk: deps/ + _build/ run 1–3 GB per app, plus Dialyzer PLT caches.",
+      "requires": [],
+      "chip": { "label": "Elixir", "live": false }
+    },
+    {
       "slug": "android-sdk",
       "kind": "toolchain",
       "title": "Android SDK",

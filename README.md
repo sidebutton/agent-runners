@@ -37,6 +37,7 @@ not dispatchable** — it's a manual / RDP agent.
 | `sidebutton-extension` | runtime | `chrome`, `sidebutton-server` | Chrome managed-policy force-install + handshake wait |
 | `knowledge-packs` | packs | `sidebutton-server` | universal `agents` ops pack + account registry |
 | `dotnet9` | toolchain | — | .NET 9 SDK |
+| `elixir` | toolchain | — | Erlang/OTP + Elixir via mise, one pair pre-baked at provision (Hex + rebar3 bootstrapped, shims on `/usr/local/bin` so dispatched jobs see them); repos override via `.tool-versions` (see [`docs/ELIXIR.md`](./docs/ELIXIR.md)) |
 | `android-sdk` | toolchain | — | OpenJDK 17 + Android SDK (cmdline-tools, platform 36, build-tools; licenses pre-accepted; `ANDROID_HOME` set) — headless Gradle build/lint/unit-test, no emulator |
 | `android-emulator` | toolchain | `android-sdk` | Android Emulator + headless AVD `sb-default` (API 36 x86_64) with on-demand `sb-avd-start`/`sb-avd-stop` — needs KVM (`/dev/kvm`), on-device UI discovery/testing |
 | `docker` | toolchain | — | Docker engine (+ agent in `docker` group) |
@@ -129,6 +130,7 @@ agent-runners/
 │   ├── 18b-heartbeat-timer.sh    # recurring online beat when serverless
 │   ├── components/               # per-component install + lifecycle scripts
 │   │   ├── dotnet9/install.sh
+│   │   ├── elixir/install.sh
 │   │   ├── docker/install.sh
 │   │   ├── postgres-client/install.sh
 │   │   ├── openvpn/{install.sh,sb-vpn-connect}
@@ -255,6 +257,7 @@ Component-model coverage (the catalog ↔ schema ↔ on-disk ↔ `run.sh` wiring
 | `test-component-resolution.sh` | every `base/components/<dir>` is a catalog slug **and** wired into `run.sh`; every non-base-installed slug has a dir; the base-installed allowlist (`chrome`/`sidebutton-server`/`knowledge-packs`) is justified by its `06`/`08`/`13` step; all `*.sh` parse |
 | `test-default-install-parity.sh` | default / empty / back-compat + every profile resolves to a byte-identical gate vector vs a committed snapshot (re-bless: `BLESS=1 bash …`) |
 | `test-claude-code-*` / `test-claude-code-router-component.sh` | the claude-code + CCR components' catalog shape, install dir, and `run.sh` wiring |
+| `test-elixir-component.sh` | the `elixir` component's catalog shape + `run.sh` wiring, and its install contract: versions pinned (no floating `latest`) with the Elixir `-otp-NN` suffix matching the pinned OTP major; mise, mix **and the shims** always `runuser`-wrapped as `$AGENT_USER` (a root-run shim resolves `/root`'s mise data dir); `~/.config`/`~/.local`/`~/.cache` made agent-owned **before** the first `runuser` (they are root-owned until 13/15, which run after the toolchain loop); shims symlinked onto `/usr/local/bin` **under their own basename** (dispatched-job PATH; mise dispatches on `argv[0]`) with no dangling `rebar3`/`mix.ps1`; Hex + rebar bootstrapped with `--force` on the invocation; the 5 apt packages; agent-owned Dialyzer PLT dir; no `exit`/`die` (sourced into `run.sh`); the description's docker-pairing + disk guidance. Assertions run against a comment-stripped copy of `install.sh`, so prose cannot satisfy a guard |
 | `test-component-config.sh` | `config_files[]` schema + the 3 declarations; `19f` refresh-safety (helper-signal detection, `run.sh`/manifest/fingerprint wiring); `sb-config-place` traversal/confinement rejection; `sb-config-reconcile` apply/sha-gate/teardown + service dispatch |
 | `test-19e-session-tidy.sh` | session-tidy (SCRUM-1769): the Stop-only sentinel writer lands **before** the job-session gate and can never abort the step-complete POST; the sweep spares the active job / fresh marks / unverified pids (comm + starttime) and honours `SB_SESSION_CLOSE_TTL_SEC=0`; `run.sh`/manifest wiring; the retired reaper names stay unused |
 
