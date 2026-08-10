@@ -60,7 +60,7 @@ sb_base_artifacts_fingerprint() {
     # the exact drift SCRUM-1380 exists to prevent).
     for f in assets/claude-hooks.json assets/sb-self-update.sh \
              assets/sb-config-place.sh assets/sb-config-reconcile.sh \
-             assets/report-health-snapshot.sh \
+             assets/report-health-snapshot.sh assets/sb-reboot.sh \
              lib-refresh.sh refresh-manifest.txt; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done
