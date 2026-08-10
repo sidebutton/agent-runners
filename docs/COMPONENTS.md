@@ -202,6 +202,12 @@ are optional and require the server.
 | **SideButton SWE .NET** (`swe-dotnet`, new) | Full Stack **+ `dotnet9`** | se, qa, sd, pm |
 | **SideButton SWE Android** (`swe-android`, new) | Full Stack **+ `android-sdk` + `android-emulator`** | se, qa, sd, pm |
 | **SideButton SWE Native** (`swe-native`) | `claude-code, chrome, sidebutton-server, knowledge-packs` (no extension) | se, qa |
+| **SideButton App Agent** (`app-builder`, new) | same set as Native — the difference is the held editing session, not the toolchain | se, qa, pm |
+
+`app-builder` (SCRUM-1937) needs no extra component: node 22 is unconditional in the base runner and
+`chrome` covers the ready-state screenshot. What makes it an app agent is the `app_edit_session`
+workflow plus base/14's per-turn autosave + staged republish, not its component set. `design` is
+deliberately absent from its roles — that is an account-level role, not a builtin slug.
 
 Plugins are selected separately, by role (§4b): `screen-record` for every role, `writing-quality` for `smm`.
 
@@ -211,7 +217,7 @@ Dropped: `qa-generalist`, `swe-bare`.
 {
   "version": 2,
   "default": "swe-full-stack",
-  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "swe-native"],
+  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "swe-native", "app-builder"],
   "runner": "ubuntu-claude-code",
   "profiles": [
     { "slug": "swe-full-stack", "name": "SideButton SWE Full Stack",
@@ -225,6 +231,9 @@ Dropped: `qa-generalist`, `swe-bare`.
       "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "android-sdk", "android-emulator"] },
     { "slug": "swe-native", "name": "SideButton SWE Native",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa"],
+      "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] },
+    { "slug": "app-builder", "name": "SideButton App Agent",
+      "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "pm"],
       "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] }
   ]
 }

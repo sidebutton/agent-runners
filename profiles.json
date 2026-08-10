@@ -2,7 +2,7 @@
   "$schema": "./profiles.schema.json",
   "version": 2,
   "default": "swe-full-stack",
-  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "swe-native"],
+  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "swe-native", "app-builder"],
   "runner": "ubuntu-claude-code",
   "aliases": {},
   "profiles": [
@@ -36,6 +36,14 @@
       "description": "SideButton MCP server + Claude-native browser (no Chrome extension).",
       "runner": "ubuntu-claude-code",
       "default_roles": ["se", "qa"],
+      "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"]
+    },
+    {
+      "slug": "app-builder",
+      "name": "SideButton App Agent",
+      "description": "SWE Full Stack + held editing sessions: runs the project's dev server for live preview, posts a ready-state screenshot, autosaves and republishes staged snapshots on every turn.",
+      "runner": "ubuntu-claude-code",
+      "default_roles": ["se", "qa", "pm"],
       "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"]
     }
   ]
