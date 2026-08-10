@@ -52,3 +52,4 @@
 19d-account-registry.sh
 19e-session-tidy.sh
 19f-component-config.sh
+19g-agent-reboot.sh
