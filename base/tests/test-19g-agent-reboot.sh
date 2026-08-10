@@ -40,6 +40,19 @@ bad() { printf 'FAIL - %s\n' "$1"; fail=1; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Comment-stripped views of the two files under test.
+#
+# Both scripts carry long prose headers that name the very strings these assertions look
+# for ("systemctl reboot --no-block", "PowerKeyIgnoreInhibited=yes", the drop-in path).
+# Grepping the raw file therefore passes on the strength of the COMMENT, so a mutation
+# that guts the code — swapping the reboot mechanism, dropping the load-bearing logind
+# option — still goes green. A test whose central assertions cannot fail is worse than no
+# test: it is a review signal that reads as coverage. Assert against code only.
+STEP_CODE="$TMP/19g.code.sh"
+WRAPPER_CODE="$TMP/sb-reboot.code.sh"
+sed 's/^[[:space:]]*#.*$//' "$STEP"    > "$STEP_CODE"
+sed 's/^[[:space:]]*#.*$//' "$WRAPPER" > "$WRAPPER_CODE"
+
 # ── 0. the files exist and parse ─────────────────────────────────────────────
 [ -f "$STEP" ]    && ok "base/19g-agent-reboot.sh exists"     || bad "base/19g-agent-reboot.sh missing"
 [ -f "$WRAPPER" ] && ok "base/assets/sb-reboot.sh exists"     || bad "base/assets/sb-reboot.sh missing"
@@ -98,7 +111,7 @@ grep -q 'rm -f /etc/sudoers.d/sb-reboot' "$STEP" \
   || bad "no rollback for an invalid sudoers drop-in"
 
 # Never write a grant pointing at a wrapper that failed to install.
-grep -q 'if \[ -x /usr/local/bin/sb-reboot \]' "$STEP" \
+grep -q 'if \[ -x /usr/local/bin/sb-reboot \]' "$STEP_CODE" \
   && ok "sudoers is written only when the wrapper installed" \
   || bad "sudoers may be written without the wrapper present"
 
@@ -106,39 +119,43 @@ grep -q 'if \[ -x /usr/local/bin/sb-reboot \]' "$STEP" \
 # `reboot(8)` / a power-key press goes through logind's handle-power-key path, which
 # unity-greeter blocks with an inhibitor on this image. `systemctl reboot` enqueues
 # reboot.target with systemd directly and ignores that inhibitor entirely.
-grep -q 'systemctl reboot --no-block' "$WRAPPER" \
+# Anchored at a command position, not merely "the string appears somewhere": the
+# wrapper echoes the same text back in its own `note "reboot enqueued (…)"` line, so an
+# unanchored grep matches even when the actual invocation has been swapped for
+# `systemctl poweroff`. The mechanism IS the fix (risk #3 above) — assert the call site.
+grep -qE '^[[:space:]]*(if[[:space:]]+)?systemctl[[:space:]]+reboot[[:space:]]+--no-block' "$WRAPPER_CODE" \
   && ok "wrapper reboots via 'systemctl reboot --no-block'" \
-  || bad "wrapper does not use 'systemctl reboot --no-block'"
+  || bad "wrapper does not invoke 'systemctl reboot --no-block'"
 
-grep -qE '^[[:space:]]*(exec[[:space:]]+)?(/usr/sbin/|/sbin/)?reboot([[:space:]]|$)' "$WRAPPER" \
+grep -qE '^[[:space:]]*(exec[[:space:]]+)?(/usr/sbin/|/sbin/)?reboot([[:space:]]|$)' "$WRAPPER_CODE" \
   && bad "wrapper calls plain reboot(8) — the ACPI path the greeter swallows" \
   || ok "wrapper does not fall back to plain reboot(8)"
 
 # Two --force to systemctl means reboot(2) with no unmount. One is the accepted
 # escalation; two would risk the filesystem on every routine portal reboot.
-grep -qE 'systemctl.*--force.*--force|systemctl.*-ff' "$WRAPPER" \
+grep -qE 'systemctl.*--force.*--force|systemctl.*-ff' "$WRAPPER_CODE" \
   && bad "wrapper uses a double --force (immediate reboot(2), no unmount)" \
   || ok "wrapper never escalates to an unsynced hard reboot"
 
 # ── 4. the wrapper reports a real result ─────────────────────────────────────
 # This is what lets the daemon answer truthfully instead of hard-coding ok:true.
-grep -q 'exit 1' "$WRAPPER" \
+grep -qE '^[[:space:]]*exit 1[[:space:]]*$' "$WRAPPER_CODE" \
   && ok "wrapper exits non-zero when the reboot was refused" \
   || bad "wrapper has no failure exit — the daemon could not report a real failure"
-grep -q 'SUDO_USER' "$WRAPPER" \
+grep -q 'SUDO_USER' "$WRAPPER_CODE" \
   && ok "wrapper records who asked (auditable privileged action)" \
   || bad "wrapper does not log the requester"
 
 # ── 5. logind power-key policy ───────────────────────────────────────────────
-grep -q 'PowerKeyIgnoreInhibited=yes' "$STEP" \
+grep -qE '^PowerKeyIgnoreInhibited=yes[[:space:]]*$' "$STEP_CODE" \
   && ok "logind drop-in sets PowerKeyIgnoreInhibited=yes (greeter can no longer swallow ACPI)" \
   || bad "logind drop-in does not set PowerKeyIgnoreInhibited"
-grep -q '/etc/systemd/logind.conf.d/50-agent-power.conf' "$STEP" \
+grep -qE '^[[:space:]]*cat >[[:space:]]*/etc/systemd/logind\.conf\.d/50-agent-power\.conf' "$STEP_CODE" \
   && ok "logind policy lands in a drop-in, not by editing logind.conf" \
   || bad "logind policy is not written as a conf.d drop-in"
 # Restarting logind on a live box with active RDP/X sessions is a real risk, and the
 # path we depend on (sb-reboot) does not need the drop-in to be live.
-grep -qE 'systemctl (restart|reload) systemd-logind' "$STEP" \
+grep -qE 'systemctl (restart|reload) systemd-logind' "$STEP_CODE" \
   && bad "19g restarts systemd-logind on a live box — the drop-in must wait for next boot" \
   || ok "19g does not restart systemd-logind (drop-in applies at next boot)"
 
