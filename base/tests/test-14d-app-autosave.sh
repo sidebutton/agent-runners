@@ -96,6 +96,11 @@ for a in "$@"; do
 done
 echo "curl ${url}" >> "$CALLS"
 [ -n "$body" ] && [ -f "$body" ] && cp "$body" "$LASTBODY" 2>/dev/null
+# Test hook (B5b): arm ONE "a turn landed while we were publishing" flag, on the first POST only,
+# so the drain loop is exercised the way the real race produces it.
+if [ -n "${SB_TEST_ARM_PENDING:-}" ] && [ ! -f "${SB_TEST_ARM_ONCE}" ]; then
+  : > "${SB_TEST_ARM_ONCE}" 2>/dev/null; : > "${SB_TEST_ARM_PENDING}" 2>/dev/null
+fi
 # Emulate -o <file> so the caller can read a response, and -w '%{http_code}'.
 prev=""; for a in "$@"; do
   [ "$prev" = "-o" ] && printf '{"domain":"lp-x.sidebutton.com","url":"https://lp-x.sidebutton.com","release_ts":"20260810-000000","unchanged":true}' > "$a"
@@ -216,6 +221,54 @@ reset_state; job_ctx app_edit_session sidA; before=$(head_of)
 SB_APP_AUTOSAVE_DISABLE=1 "$HELPER" turn "$WS" sidA >/dev/null 2>&1; settle
 [ "$(head_of)" = "$before" ] && ok "A9 SB_APP_AUTOSAVE_DISABLE=1 → no commit" || bad "A9 kill switch does not stop the lane"
 
+# A10 the project's own commit hooks must NOT gate the snapshot. husky + lint-staged is the norm in
+# exactly the scaffolded projects this lane serves; a lint error on half-written WIP would otherwise
+# fail every commit and silently disable durability for the whole session.
+reset_state; job_ctx app_edit_session sidA
+HOOKDIR="$(git -C "$REPO" rev-parse --absolute-git-dir)/hooks"; mkdir -p "$HOOKDIR"
+printf '#!/bin/sh\necho "lint failed" >&2\nexit 1\n' > "$HOOKDIR/pre-commit"; chmod +x "$HOOKDIR/pre-commit"
+dirty; before=$(head_of)
+turn sidA
+[ "$(head_of)" != "$before" ] \
+  && ok "A10 a failing pre-commit hook does not block the autosave (--no-verify)" \
+  || bad "A10 the project's pre-commit hook silently disabled durability for the session"
+rm -f "$HOOKDIR/pre-commit"
+
+# A11 `git add -A` sweeps in whatever the project does not ignore, and the detached half force-
+# pushes the result to the repo's OWN origin — so an untracked credential must never enter the
+# snapshot. A secret the repo already tracks is the project's own choice and stays untouched.
+reset_state; job_ctx app_edit_session sidA
+printf 'API_KEY=super-secret\n' > "$REPO/.env"
+printf 'PRIVATE\n' > "$REPO/server.pem"
+dirty; before=$(head_of)
+turn sidA
+[ "$(head_of)" != "$before" ] || bad "A11 no autosave commit was produced at all"
+git -C "$REPO" ls-tree -r --name-only HEAD | grep -qx '.env' \
+  && bad "A11 an untracked .env was committed and is force-pushed to the customer's origin" \
+  || ok "A11 an untracked .env is excluded from the autosave snapshot"
+git -C "$REPO" ls-tree -r --name-only HEAD | grep -qx 'server.pem' \
+  && bad "A11 an untracked private key was committed" \
+  || ok "A11 an untracked .pem is excluded from the autosave snapshot"
+[ -f "$REPO/.env" ] && ok "A11 the excluded secret is left in the worktree, not destroyed" \
+  || bad "A11 the excluded secret was removed from the worktree"
+rm -f "$REPO/.env" "$REPO/server.pem"
+
+# A12 THE fleet-critical case: the Stop hook declares no timeout, so Claude Code's 60s default bounds
+# the WHOLE hook and the completion POSTs come after this lane. A git that HANGS (huge untracked
+# tree, cold cache after a spot resume) must not eat that budget — every git call is bounded and the
+# half as a whole abandons at COMMIT_BUDGET. The other injection tests only cover git EXITING badly.
+reset_state; job_ctx app_edit_session sidA; dirty
+HANG="$TMP/hangbin"; mkdir -p "$HANG"
+printf '#!/bin/sh\nsleep 300\n' > "$HANG/git"; chmod +x "$HANG/git"
+t0=$(date +%s)
+PATH="$HANG:$PATH" "$HELPER" turn "$WS" sidA >/dev/null 2>&1; rc=$?
+t1=$(date +%s)
+[ "$rc" = "0" ] && ok "A12 a hanging git still exits 0" || bad "A12 the helper exited $rc on a hanging git"
+[ $((t1 - t0)) -le 40 ] \
+  && ok "A12 a hanging git is abandoned inside the hook budget ($((t1 - t0))s)" \
+  || bad "A12 a hanging git held the critical path for $((t1 - t0))s — the hook would be killed"
+settle
+
 # ── B. the deferred half: scratch push, then the debounced publish ───────────────
 # B0 the commit half must contain NO network call. It runs inside Claude Code's 60s hook
 # budget ahead of the completion POSTs; a blocking push there could get the whole hook
@@ -241,6 +294,21 @@ git -C "$BARE" show-ref --verify --quiet refs/heads/work \
   || ok "B0b the real branch is left untouched"
 [ -s "$HOME/.sidebutton/app-autosave-push-queue" ] \
   && bad "B0b the push queue was not drained" || ok "B0b the push queue is drained after the push"
+
+# B0c a FAILED push must be re-queued. The queue is destructive-on-read, so without a re-queue a
+# single transient failure (network blip, expired credential, a 5xx) strands that commit on the box
+# until some later turn happens to commit again — and a reclaim right after the session's last turn
+# is exactly the loss this feature exists to prevent.
+reset_state
+git -C "$REPO" remote set-url origin "$TMP/nope.git"    # a remote that cannot be pushed to
+job_ctx app_edit_session sidA; dirty
+turn sidA
+grep -qxF "$REPO" "$HOME/.sidebutton/app-autosave-push-queue" 2>/dev/null \
+  && ok "B0c a failed scratch push is re-queued for the next turn" \
+  || bad "B0c a failed push dropped the repo from the queue — that commit is stranded on the VM"
+grep -q 're-queued' "$HOME/.sidebutton/app-autosave.log" \
+  && ok "B0c the failure is logged" || bad "B0c the push failure was not logged"
+rm -f "$HOME/.sidebutton/app-autosave-push-queue"
 git -C "$REPO" remote remove origin 2>/dev/null
 
 git -C "$REPO" checkout -q -- . 2>/dev/null; git -C "$REPO" clean -qfd 2>/dev/null
@@ -301,7 +369,35 @@ reset_state; mkdir -p "$HOME/.sidebutton/app-publish.lock"; : > "$CALLS"
 LANDING_SLUG=acme "$HELPER" publish "$WS" sidA >/dev/null 2>&1
 grep -q 'landing/publish' "$CALLS" && bad "B5 a second publisher ran while one was pending" \
   || ok "B5 single-flight: a pending publish coalesces the next turn"
-grep -q 'coalesced' "$HOME/.sidebutton/app-autosave.log" && ok "B5 the coalesce is logged" || bad "B5 not logged"
+grep -q 'trailing pass' "$HOME/.sidebutton/app-autosave.log" && ok "B5 the coalesce is logged" || bad "B5 not logged"
+# The coalesced turn must LEAVE A MARK. Dropping it outright is only safe while the holder is still
+# in its debounce; once the holder is building or POSTing it has already read the tree, so without
+# this flag the coalesced turn's edits would never be published (worst on a session's last turn).
+[ -f "$HOME/.sidebutton/app-publish-pending" ] \
+  && ok "B5 the coalesced turn flags a trailing pass instead of being dropped" \
+  || bad "B5 the coalesced turn left no pending flag — its edits would never publish"
+
+# B5b the lock holder drains that flag: a turn that lands mid-publish still gets published.
+reset_state; : > "$CALLS"; rm -f "$LASTBODY" "$TMP/arm-once"
+LANDING_SLUG=acme SB_APP_PUBLISH_MIN_INTERVAL=0 \
+  SB_TEST_ARM_PENDING="$HOME/.sidebutton/app-publish-pending" SB_TEST_ARM_ONCE="$TMP/arm-once" \
+  "$HELPER" publish "$WS" sidA >/dev/null 2>&1
+[ "$(grep -c 'landing/publish' "$CALLS" 2>/dev/null)" -ge 2 ] \
+  && ok "B5b a turn that landed mid-publish is drained by a trailing pass" \
+  || bad "B5b the pending flag was not drained — the last turn's edits are lost"
+[ -f "$HOME/.sidebutton/app-publish-pending" ] \
+  && bad "B5b the pending flag survived its own drain (would re-publish forever)" \
+  || ok "B5b the pending flag is cleared once drained"
+
+# B5c the lock is released only by its OWNER: a publisher whose lock was broken as stale must not
+# delete the lock a NEW publisher now holds, or two builds + POSTs race in the same project.
+reset_state
+mkdir -p "$HOME/.sidebutton/app-publish.lock"
+echo "someone-else" > "$HOME/.sidebutton/app-publish.lock/owner"
+LANDING_SLUG=acme "$HELPER" publish "$WS" sidA >/dev/null 2>&1
+[ "$(cat "$HOME/.sidebutton/app-publish.lock/owner" 2>/dev/null)" = "someone-else" ] \
+  && ok "B5c a coalesced publisher never removes the live holder's lock" \
+  || bad "B5c the live holder's lock was destroyed by another process"
 
 # B6 stale lock is broken so the lane cannot be silenced forever by a dead publisher.
 touch -d '3 hours ago' "$HOME/.sidebutton/app-publish.lock" 2>/dev/null

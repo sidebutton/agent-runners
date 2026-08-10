@@ -560,12 +560,21 @@ BUILD_LOG="${SB_DIR}/app-build.log"
 PUBLISH_STAMP="${SB_DIR}/last-app-publish"
 PUSH_QUEUE="${SB_DIR}/app-autosave-push-queue"
 PUBLISH_LOCK="${SB_DIR}/app-publish.lock"
+PUBLISH_PENDING="${SB_DIR}/app-publish-pending"
 SCRATCH_NS="sb-autosave"
 MARKER_TTL=86400          # a marker older than this is a leftover, not a live session
 MIN_PUBLISH_INTERVAL=60   # debounce floor between two staged publishes
 MAX_LOCK_AGE=1800         # a publisher holding the lock longer than this is dead
 MAX_DIRTY_FILES=2000      # a bigger dirty set means a missing .gitignore, not a turn's work
-COMMIT_TIMEOUT=120
+# The commit half is the ONLY part of this helper on the Stop hook's critical path, and
+# base/assets/claude-hooks.json declares no `timeout` for Stop — so Claude Code's 60s default bounds
+# the WHOLE hook, and the usage/step-complete POSTs come after us. A single unbounded git call there
+# (a huge untracked tree, a cold page cache after a spot resume) would see the hook SIGTERMed and the
+# job stranded as `running` fleet-wide. So: every git invocation is individually bounded, AND the
+# half as a whole abandons at COMMIT_BUDGET, so N repos cannot stack their way past the budget.
+COMMIT_TIMEOUT=10         # ceiling for ONE git invocation
+GIT_PROBE_TIMEOUT=5       # ceiling for a cheap probe (rev-parse/symbolic-ref/config)
+COMMIT_BUDGET=25          # wall-clock ceiling for the entire synchronous half
 PUSH_TIMEOUT=60
 BUILD_TIMEOUT=600
 PUBLISH_TIMEOUT=180
@@ -665,25 +674,44 @@ app_turn_gate() {
 # --- commit half (synchronous, runs before capture_git_prs) --------------------
 # Same discovery walk as the hook's capture_git_prs: the workspace toplevel plus each
 # immediate subdirectory that is a repo.
+# Every git call in here is on the Stop hook's critical path, so each one is bounded and the walk
+# as a whole stops at CP_DEADLINE. An unbounded `rev-parse` over a workspace of repos is enough on
+# its own to blow the hook budget — the probe is cheap in the normal case and must stay cheap in
+# every other case too.
+cp_expired() {
+  [ -n "${CP_DEADLINE:-}" ] || return 1
+  [ "$(date +%s 2>/dev/null || echo 0)" -ge "$CP_DEADLINE" ]
+}
+
 discover_repos() {
   local entry="$1" top sub
   entry="${entry/#\~/$HOME}"
   [ -d "$entry" ] || return 0
-  top=$(git -C "$entry" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && printf '%s\n' "$top"
+  cp_expired && return 0
+  top=$(run_timeout "$GIT_PROBE_TIMEOUT" git -C "$entry" rev-parse --show-toplevel 2>/dev/null) \
+    && [ -n "$top" ] && printf '%s\n' "$top"
   for sub in "$entry"/*/; do
     [ -d "$sub" ] || continue
-    top=$(git -C "$sub" rev-parse --show-toplevel 2>/dev/null) || continue
+    cp_expired && break
+    top=$(run_timeout "$GIT_PROBE_TIMEOUT" git -C "$sub" rev-parse --show-toplevel 2>/dev/null) || continue
     [ -n "$top" ] && printf '%s\n' "$top"
   done
   return 0
 }
 
 autosave_commit() {
-  local entry="$1" sid="$2" r gitdir branch dirty n msg email
+  local entry="$1" sid="$2" r gitdir branch dirty n msg email secrets deadline now
   local -a ident
+  deadline=$(( $(date +%s 2>/dev/null || echo 0) + COMMIT_BUDGET ))
+  CP_DEADLINE="$deadline"   # shared with discover_repos, which runs concurrently in the substitution
   while IFS= read -r r; do
     [ -n "$r" ] && [ -d "$r" ] || continue
-    gitdir=$(git -C "$r" rev-parse --git-dir 2>/dev/null) || continue
+    now=$(date +%s 2>/dev/null || echo 0)
+    if [ "$now" -ge "$deadline" ]; then
+      alog "commit: ${COMMIT_BUDGET}s critical-path budget spent — stopping here so the completion POSTs still make the hook's deadline"
+      break
+    fi
+    gitdir=$(run_timeout "$GIT_PROBE_TIMEOUT" git -C "$r" rev-parse --git-dir 2>/dev/null) || continue
     case "$gitdir" in /*) ;; *) gitdir="$r/$gitdir" ;; esac
     # Never commit on top of an in-progress operation — `git add -A` would resolve
     # conflict markers into the tree and the user's rebase/merge would be lost.
@@ -692,9 +720,11 @@ autosave_commit() {
        || [ -f "$gitdir/REVERT_HEAD" ] || [ -f "$gitdir/BISECT_LOG" ]; then
       alog "commit: $r has a git operation in progress — skipped"; continue
     fi
-    branch=$(git -C "$r" symbolic-ref --quiet --short HEAD 2>/dev/null)
+    branch=$(run_timeout "$GIT_PROBE_TIMEOUT" git -C "$r" symbolic-ref --quiet --short HEAD 2>/dev/null)
     if [ -z "$branch" ]; then alog "commit: $r is on a detached HEAD — skipped"; continue; fi
-    dirty=$(git -C "$r" status --porcelain --untracked-files=all 2>/dev/null)
+    # Bounded like every other git call here: `status -uall` walks the whole worktree, and on a
+    # project whose node_modules/dist are not yet ignored that walk alone can outlive the hook.
+    dirty=$(run_timeout "$COMMIT_TIMEOUT" git -C "$r" status --porcelain --untracked-files=all 2>/dev/null)
     [ -n "$dirty" ] || continue
     n=$(printf '%s\n' "$dirty" | grep -c '' 2>/dev/null)
     case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
@@ -704,7 +734,7 @@ autosave_commit() {
     fi
     # Only supply an identity when the repo/box has none, so a real user identity is kept.
     ident=()
-    email=$(git -C "$r" config --get user.email 2>/dev/null)
+    email=$(run_timeout "$GIT_PROBE_TIMEOUT" git -C "$r" config --get user.email 2>/dev/null)
     if [ -z "$email" ]; then
       ident=(-c "user.name=${AGENT_NAME:-SideButton Agent}" -c "user.email=agent@sidebutton.com")
     fi
@@ -713,9 +743,32 @@ autosave_commit() {
 Automatic per-turn autosave from a SideButton app editing session (SCRUM-1937).
 Not a reviewed change — squash, amend or revert it freely.
 session: ${sid}"
-    if run_timeout "$COMMIT_TIMEOUT" git -C "$r" add -A >/dev/null 2>&1 \
-       && run_timeout "$COMMIT_TIMEOUT" git -C "$r" "${ident[@]}" commit -q -m "$msg" >/dev/null 2>&1; then
-      alog "commit: $r $branch +${n} path(s) → $(git -C "$r" rev-parse --short HEAD 2>/dev/null)"
+    if ! run_timeout "$COMMIT_TIMEOUT" git -C "$r" add -A >/dev/null 2>&1; then
+      alog "commit: $r staging failed — left dirty (nothing lost)"; continue
+    fi
+    # `git add -A` sweeps in everything the project does not ignore, and the detached half force-
+    # pushes the result to the repo's own origin — so a `.env` the template never gitignored would
+    # land in a real ref on the customer's remote. Anything git does not ALREADY track and that
+    # looks like a credential is unstaged again and simply left in the worktree. A secret the repo
+    # already tracks is the project's own choice and is never touched.
+    secrets=$(run_timeout "$COMMIT_TIMEOUT" git -C "$r" diff --cached --name-only --diff-filter=A 2>/dev/null \
+      | grep -Ei '(^|/)(\.env($|\..*)|\.npmrc|\.netrc|id_rsa|id_ed25519|.*\.pem|.*\.p12|.*\.pfx|.*\.keystore|secrets?\.(json|ya?ml|txt))$' 2>/dev/null)
+    if [ -n "$secrets" ]; then
+      while IFS= read -r s; do
+        [ -n "$s" ] && run_timeout "$COMMIT_TIMEOUT" git -C "$r" reset -q -- "$s" >/dev/null 2>&1
+      done <<< "$secrets"
+      alog "commit: $r excluded $(printf '%s\n' "$secrets" | grep -c '') untracked secret-like path(s) from the snapshot"
+    fi
+    if run_timeout "$GIT_PROBE_TIMEOUT" git -C "$r" diff --cached --quiet 2>/dev/null; then
+      alog "commit: $r had nothing left to snapshot after the secret exclusion — skipped"; continue
+    fi
+    # --no-verify is deliberate. The project's own pre-commit/commit-msg hooks (husky + lint-staged
+    # is the norm in exactly the scaffolded projects this lane serves) would otherwise run ON THE
+    # STOP HOOK'S CRITICAL PATH: a lint error on half-finished WIP would fail every commit and
+    # silently disable durability for the whole session, and a slow formatter would eat the hook
+    # budget. An autosave snapshot is not a reviewed commit and must never be gated on one.
+    if run_timeout "$COMMIT_TIMEOUT" git -C "$r" "${ident[@]}" commit -q --no-verify -m "$msg" >/dev/null 2>&1; then
+      alog "commit: $r $branch +${n} path(s) → $(run_timeout "$GIT_PROBE_TIMEOUT" git -C "$r" rev-parse --short HEAD 2>/dev/null)"
     else
       alog "commit: $r commit failed — left dirty (nothing lost)"; continue
     fi
@@ -745,7 +798,13 @@ drain_push_queue() {
          "HEAD:refs/heads/${SCRATCH_NS}/${branch}" >/dev/null 2>&1; then
       alog "push: $r → origin ${SCRATCH_NS}/${branch}"
     else
-      alog "push: scratch push failed for $r — the autosave commit is VM-local only"
+      # Re-queue: the queue is destructive-on-read, so without this a single transient failure
+      # (network blip, expired credential, a 5xx, PUSH_TIMEOUT on a big first push) would strand
+      # that commit on the box forever — it would only be retried if a LATER turn happened to
+      # produce another commit, and a reclaim after the session's last turn is precisely the case
+      # this feature exists to survive.
+      alog "push: scratch push failed for $r — re-queued for the next turn (VM-local for now)"
+      printf '%s\n' "$r" >> "$PUSH_QUEUE" 2>/dev/null || true
     fi
   done < <(sort -u "$q" 2>/dev/null)
   rm -f "$q" 2>/dev/null
@@ -781,7 +840,7 @@ is_kit_client() {
 # it publishes only a bundle whose root is already the site root, and only with an explicit
 # slug, because guessing either would ship a broken release.
 generic_publish() {
-  local proj="$1" dist slug f rel ext sz b64 n=0 bytes=0 code unchanged
+  local proj="$1" dist slug f rel ext sz b64 n=0 bytes=0 code unchanged skipped=0 skipped_eg=""
   local files_tmp payload resp
   dist=""
   for f in "$proj/dist" "$proj/build"; do [ -d "$f" ] && { dist="$f"; break; }; done
@@ -796,11 +855,16 @@ generic_publish() {
   : > "$files_tmp" 2>/dev/null || return 0
   while IFS= read -r -d '' f; do
     rel="${f#"$dist"/}"
-    [ "${#rel}" -le 200 ] || continue
+    if [ "${#rel}" -gt 200 ]; then
+      skipped=$((skipped + 1)); skipped_eg="${skipped_eg:-$rel}"; continue
+    fi
     ext=$(printf '%s' "${rel##*.}" | tr '[:upper:]' '[:lower:]')
     case "$ext" in
       html|css|js|mjs|svg|png|jpg|jpeg|webp|ico|txt|xml|woff2|webmanifest) ;;
-      *) continue ;;
+      # The server's allowlist is closed, so a dist/ carrying .json data, .ttf/.woff fonts, .gif or
+      # .avif publishes WITHOUT them and answers 200 — a green publish over a site that 404s its own
+      # assets. We cannot ship them, but a silent drop is undiagnosable: name them in the log.
+      *) skipped=$((skipped + 1)); skipped_eg="${skipped_eg:-$rel}"; continue ;;
     esac
     sz=$(wc -c < "$f" 2>/dev/null | tr -d ' '); case "${sz:-}" in ''|*[!0-9]*) sz=0 ;; esac
     n=$((n + 1)); bytes=$((bytes + sz))
@@ -826,6 +890,7 @@ generic_publish() {
   # answer that means "a release WAS written" (SP-H). Distinguish it from a missing field.
   unchanged=$(jq -r 'if has("unchanged") then (.unchanged|tostring) else "absent" end' "$resp" 2>/dev/null)
   alog "publish: generic POST slug=${slug} files=${n} bytes=${bytes} http=${code:-0} unchanged=${unchanged:-?}"
+  [ "$skipped" -gt 0 ] && alog "publish: WARNING ${skipped} file(s) in $dist were NOT published (unsupported extension or path >200 chars), e.g. ${skipped_eg} — the staged site will 404 on them"
   case "${code:-0}" in
     2*) ;;
     *) alog "publish: response $(head -c 400 "$resp" 2>/dev/null | tr '\n' ' ')" ;;
@@ -834,22 +899,60 @@ generic_publish() {
   return 0
 }
 
+# Release the publish lock, but ONLY if we still own it. A stale-lock breaker may have handed the
+# lock to another publisher while we were still running (a hung build when `timeout` is absent, or
+# an operator setting SB_APP_PUBLISH_MIN_INTERVAL above MAX_LOCK_AGE); an unconditional rmdir would
+# then delete THEIR lock and let two builds + POSTs race in the same project, publishing the site
+# from a half-written dist/.
+LOCK_TOKEN=""
+release_lock() {
+  [ -n "$LOCK_TOKEN" ] || return 0
+  [ "$(cat "${PUBLISH_LOCK}/owner" 2>/dev/null)" = "$LOCK_TOKEN" ] || return 0
+  rm -rf "$PUBLISH_LOCK" 2>/dev/null || true
+  LOCK_TOKEN=""
+  return 0
+}
+
 publish_staged() {
-  local entry="$1" sid="$2" proj last now wait rc out age
+  local entry="$1" sid="$2" age rounds=0
   mkdir -p "$SB_DIR" 2>/dev/null || return 0
   # A publisher that died mid-flight (spot reclaim, OOM) must not silence the lane forever.
   if [ -d "$PUBLISH_LOCK" ]; then
     age=$(( $(date +%s 2>/dev/null || echo 0) - $(stat -c %Y "$PUBLISH_LOCK" 2>/dev/null || echo 0) ))
     if [ "$age" -gt "$MAX_LOCK_AGE" ]; then
-      rmdir "$PUBLISH_LOCK" 2>/dev/null && alog "publish: broke a stale lock (${age}s old)"
+      rm -rf "$PUBLISH_LOCK" 2>/dev/null && alog "publish: broke a stale lock (${age}s old)"
     fi
   fi
-  # Single-flight: a publisher already waiting out the debounce will re-read the tree when
-  # it fires, so it covers this turn too. This IS the coalescing (the server does none).
+  # Single-flight. A turn that cannot take the lock RECORDS that the tree moved after the current
+  # publisher last read it, and the holder drains that flag below. Coalescing by dropping the turn
+  # outright is only safe while the holder is still sleeping out its debounce — once it has started
+  # building or POSTing it has already read the tree, so those edits would never be published. The
+  # last turn of a session is exactly when that silently loses the user's final work.
   if ! mkdir "$PUBLISH_LOCK" 2>/dev/null; then
-    alog "publish: a publish is already pending — coalesced into it"; return 0
+    : > "$PUBLISH_PENDING" 2>/dev/null || true
+    alog "publish: a publish is already running — flagged it for a trailing pass"
+    return 0
   fi
-  trap 'rmdir "$PUBLISH_LOCK" 2>/dev/null || true' EXIT INT TERM
+  LOCK_TOKEN="$$-$(date +%s 2>/dev/null || echo 0)"
+  echo "$LOCK_TOKEN" > "${PUBLISH_LOCK}/owner" 2>/dev/null || true
+  trap 'release_lock' EXIT INT TERM
+  rm -f "$PUBLISH_PENDING" 2>/dev/null || true
+  publish_once "$entry" "$sid"
+  # Drain anything that landed while we were building/POSTing. Bounded, and each pass re-enters the
+  # debounce, so a busy session cannot spin here.
+  while [ -f "$PUBLISH_PENDING" ] && [ "$rounds" -lt 3 ]; do
+    rm -f "$PUBLISH_PENDING" 2>/dev/null || true
+    rounds=$((rounds + 1))
+    alog "publish: a turn landed mid-publish — trailing pass ${rounds}"
+    publish_once "$entry" "$sid"
+  done
+  release_lock
+  trap - EXIT INT TERM
+  return 0
+}
+
+publish_once() {
+  local entry="$1" sid="$2" proj last now wait rc out
   last=$(cat "$PUBLISH_STAMP" 2>/dev/null); case "${last:-}" in ''|*[!0-9]*) last=0 ;; esac
   now=$(date +%s 2>/dev/null || echo 0)
   wait=$(( MIN_PUBLISH_INTERVAL - (now - last) ))
