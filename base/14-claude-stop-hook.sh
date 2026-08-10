@@ -395,6 +395,13 @@ JC="${HOME}/.sidebutton/job-context.json"
 # overwrite it. No job-context session id (no active job / old runtime) => proceed (legacy-safe).
 JOB_SID=$(jq -r '.session_id // empty' "$JC" 2>/dev/null || true)
 if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+# SCRUM-1937: stamp the app-editing-session marker here too. job-context is guaranteed
+# present at SessionStart (executePipeline writes it before launching claude), whereas the
+# boot turn's Stop races the very completion it triggers — and without a marker, every
+# later chat turn (the ones with work to save) would fail the autosave gate. Best-effort,
+# no-op for every other workflow, and the helper owns the marker's format.
+[ -x "${HOME}/.local/bin/sb-app-autosave.sh" ] \
+  && "${HOME}/.local/bin/sb-app-autosave.sh" mark "$SID" </dev/null >/dev/null 2>&1 || true
 ENTRY=$(jq -r '.entry_path // empty' "$JC" 2>/dev/null || true)
 [ -z "$ENTRY" ] && ENTRY="${HOME}/workspace"
 ENTRY="${ENTRY/#\~/$HOME}"
@@ -496,6 +503,442 @@ if command -v jq >/dev/null 2>&1 && [ -f "$CLAUDE_SETTINGS" ] \
     rm -f "${CLAUDE_SETTINGS}.tmp" 2>/dev/null || true
   fi
 fi
+
+# --- App editing session: per-turn autosave + debounced staged publish (SCRUM-1937) ---
+# The durable lane of an `app_edit_session` (SP-D). A live editing session's work exists
+# only in this VM's worktree until someone publishes, and the VM is a spot instance —
+# a reclaim eats every un-pushed turn. So every turn end now:
+#   1. commits the dirty worktree (WIP autosave) so HEAD advances before the Stop hook's
+#      capture_git_prs runs and the commit shows up in jobs.prs (SP-J AC #4), and
+#      best-effort pushes it to a NAMESPACED SCRATCH REF (sb-autosave/<branch>) — a local
+#      commit still dies with the reclaimed spot VM, which is the problem this ticket fixes;
+#   2. re-publishes the staged snapshot through the shipped POST /api/agents/landing/publish
+#      (SP-H, SCRUM-1940), debounced to ≥60s and detached so a project build never delays
+#      the Stop hook's completion POSTs.
+#
+# WHY A SEPARATE SCRIPT: the Stop hook is `set -euo pipefail` and everything before its
+# usage/step-complete POSTs is critical path — an unguarded failure there strands EVERY job
+# fleet-wide as `running`. The hook's insert is three guarded lines calling this file; all
+# the logic lives here, in a process whose failure the hook cannot even observe. This script
+# therefore deliberately does NOT `set -e`/`set -u`: every path must reach `exit 0`, and a
+# stray unset var or non-zero step must never abort it.
+#
+# THE GATE (why job-context alone is not enough): executePipeline clears
+# ~/.sidebutton/job-context.json when the session-open job completes — which happens on the
+# BOOT turn, the one with nothing to save. The user's chat then continues on the same live
+# Claude session with NO job-context at all, so those turns — the ones that actually produce
+# work — would never match. Hence a sticky marker (~/.sidebutton/app-session.json) written
+# while job-context is still readable, and matched afterwards on the session id:
+#
+#   job-context present + workflow_id == app_edit_session (+ sid match) → run, (re)write marker
+#   job-context present, any other workflow_id                          → never (another job owns the box)
+#   job-context absent + marker.session_id == this session (< 24h old)  → run (a chat turn)
+#   anything else                                                       → never
+#
+# The marker is written from BOTH SessionStart (below, where job-context is guaranteed
+# present) and the boot turn's Stop, so a job-context cleared early can't silence the whole
+# session. Foreign/lingering sessions are already filtered upstream by the hook's own v3
+# session gate, and the call site sits inside the `Stop` block so SubagentStop never fires it.
+cat > "$AGENT_HOME/.local/bin/sb-app-autosave.sh" <<'APPSAVEEOF'
+#!/usr/bin/env bash
+# sb-app-autosave.sh — per-turn durability for app editing sessions (SCRUM-1937 / SP-D).
+# Installed by agent-runners base/14-claude-stop-hook.sh. See that file for the design notes.
+#
+#   sb-app-autosave.sh mark <session_id>              # SessionStart: record the marker only
+#   sb-app-autosave.sh turn <entry_path> <session_id> # Stop: gate → commit → spawn `defer`
+#   sb-app-autosave.sh defer <entry_path> <sid>       # detached: scratch push + debounced publish
+#   sb-app-autosave.sh publish <entry_path> <sid>     # the publish half alone (manual / debugging)
+#
+# NO `set -e`/`set -u` on purpose — see the header in base/14. Always exits 0.
+
+APP_WORKFLOW_ID="app_edit_session"
+SB_DIR="${HOME}/.sidebutton"
+MARKER="${SB_DIR}/app-session.json"
+JOB_CONTEXT="${SB_DIR}/job-context.json"
+LOG="${SB_DIR}/app-autosave.log"
+BUILD_LOG="${SB_DIR}/app-build.log"
+PUBLISH_STAMP="${SB_DIR}/last-app-publish"
+PUSH_QUEUE="${SB_DIR}/app-autosave-push-queue"
+PUBLISH_LOCK="${SB_DIR}/app-publish.lock"
+SCRATCH_NS="sb-autosave"
+MARKER_TTL=86400          # a marker older than this is a leftover, not a live session
+MIN_PUBLISH_INTERVAL=60   # debounce floor between two staged publishes
+MAX_LOCK_AGE=1800         # a publisher holding the lock longer than this is dead
+MAX_DIRTY_FILES=2000      # a bigger dirty set means a missing .gitignore, not a turn's work
+COMMIT_TIMEOUT=120
+PUSH_TIMEOUT=60
+BUILD_TIMEOUT=600
+PUBLISH_TIMEOUT=180
+MAX_RELEASE_FILES=200         # mirrors the-assistant lib/landing/releases.ts
+MAX_RELEASE_BYTES=33554432    # 32 MB decoded, ditto
+
+alog() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$LOG" 2>/dev/null || true; }
+
+rotate_log() {
+  local sz
+  [ -f "$LOG" ] || return 0
+  sz=$(wc -c < "$LOG" 2>/dev/null | tr -d ' ')
+  case "${sz:-}" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$sz" -gt 1048576 ] && tail -c 262144 "$LOG" > "${LOG}.rot" 2>/dev/null; then
+    mv -f "${LOG}.rot" "$LOG" 2>/dev/null || rm -f "${LOG}.rot" 2>/dev/null
+  fi
+  return 0
+}
+
+run_timeout() {
+  local secs="$1"; shift
+  if command -v timeout >/dev/null 2>&1; then timeout "$secs" "$@"; else "$@"; fi
+}
+
+# --- marker -------------------------------------------------------------------
+# started_at_epoch is the SESSION's start and is preserved across rewrites — the TTL must
+# bound the session, not be pushed forward by every turn.
+write_marker() {
+  local sid="$1" entry="$2" prev started now tmp
+  mkdir -p "$SB_DIR" 2>/dev/null || return 0
+  prev=$(jq -r '.session_id // empty' "$MARKER" 2>/dev/null)
+  started=""
+  [ "$prev" = "$sid" ] && started=$(jq -r '.started_at_epoch // empty' "$MARKER" 2>/dev/null)
+  now=$(date +%s 2>/dev/null || echo 0)
+  case "${started:-}" in ''|*[!0-9]*) started="$now" ;; esac
+  tmp="${MARKER}.$$.tmp"
+  if jq -nc --arg sid "$sid" --arg entry "$entry" --arg wf "$APP_WORKFLOW_ID" \
+       --argjson started "$started" --argjson updated "$now" \
+       '{session_id:$sid, entry_path:$entry, workflow_id:$wf,
+         started_at_epoch:$started, updated_at_epoch:$updated}' > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$MARKER" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  else
+    rm -f "$tmp" 2>/dev/null
+  fi
+  return 0
+}
+
+# Records the marker when THIS session is an app editing session. Used by `mark` (SessionStart)
+# and by the gate below. Returns 1 when job-context says this is not an app session.
+mark_if_app_session() {
+  local sid="$1" wf jc_sid entry
+  [ -n "$sid" ] || return 1
+  [ -f "$JOB_CONTEXT" ] || return 1
+  wf=$(jq -r '.workflow_id // empty' "$JOB_CONTEXT" 2>/dev/null)
+  [ "$wf" = "$APP_WORKFLOW_ID" ] || return 1
+  jc_sid=$(jq -r '.session_id // empty' "$JOB_CONTEXT" 2>/dev/null)
+  if [ -n "$jc_sid" ] && [ "$jc_sid" != "$sid" ]; then return 1; fi
+  entry=$(jq -r '.entry_path // empty' "$JOB_CONTEXT" 2>/dev/null)
+  [ -n "$entry" ] || entry="${HOME}/workspace"
+  entry="${entry/#\~/$HOME}"
+  write_marker "$sid" "$entry"
+  GATE_ENTRY="$entry"
+  return 0
+}
+
+# Sets GATE_ENTRY (the session's project workspace) and returns 0 when this turn belongs to
+# a live app editing session. See the gate matrix in base/14.
+GATE_ENTRY=""
+app_turn_gate() {
+  local sid="$1" m_sid m_started now entry
+  [ -n "$sid" ] || return 1
+  command -v jq  >/dev/null 2>&1 || return 1
+  command -v git >/dev/null 2>&1 || return 1
+  if [ -f "$JOB_CONTEXT" ]; then
+    # A job owns the box right now; only the app workflow qualifies. A stale job-context
+    # from another workflow deliberately wins over the marker — safety over liveness.
+    mark_if_app_session "$sid" && return 0
+    return 1
+  fi
+  [ -f "$MARKER" ] || return 1
+  m_sid=$(jq -r '.session_id // empty' "$MARKER" 2>/dev/null)
+  [ -n "$m_sid" ] && [ "$m_sid" = "$sid" ] || return 1
+  m_started=$(jq -r '.started_at_epoch // 0' "$MARKER" 2>/dev/null)
+  case "${m_started:-}" in ''|*[!0-9]*) m_started=0 ;; esac
+  now=$(date +%s 2>/dev/null || echo 0)
+  if [ "$m_started" -gt 0 ] && [ "$now" -gt "$m_started" ] \
+     && [ $((now - m_started)) -gt "$MARKER_TTL" ]; then
+    alog "gate: marker for $sid is older than ${MARKER_TTL}s — treating the session as ended"
+    return 1
+  fi
+  entry=$(jq -r '.entry_path // empty' "$MARKER" 2>/dev/null)
+  [ -n "$entry" ] || entry="${HOME}/workspace"
+  GATE_ENTRY="${entry/#\~/$HOME}"
+  return 0
+}
+
+# --- commit half (synchronous, runs before capture_git_prs) --------------------
+# Same discovery walk as the hook's capture_git_prs: the workspace toplevel plus each
+# immediate subdirectory that is a repo.
+discover_repos() {
+  local entry="$1" top sub
+  entry="${entry/#\~/$HOME}"
+  [ -d "$entry" ] || return 0
+  top=$(git -C "$entry" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] && printf '%s\n' "$top"
+  for sub in "$entry"/*/; do
+    [ -d "$sub" ] || continue
+    top=$(git -C "$sub" rev-parse --show-toplevel 2>/dev/null) || continue
+    [ -n "$top" ] && printf '%s\n' "$top"
+  done
+  return 0
+}
+
+autosave_commit() {
+  local entry="$1" sid="$2" r gitdir branch dirty n msg email
+  local -a ident
+  while IFS= read -r r; do
+    [ -n "$r" ] && [ -d "$r" ] || continue
+    gitdir=$(git -C "$r" rev-parse --git-dir 2>/dev/null) || continue
+    case "$gitdir" in /*) ;; *) gitdir="$r/$gitdir" ;; esac
+    # Never commit on top of an in-progress operation — `git add -A` would resolve
+    # conflict markers into the tree and the user's rebase/merge would be lost.
+    if [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ] \
+       || [ -f "$gitdir/MERGE_HEAD" ] || [ -f "$gitdir/CHERRY_PICK_HEAD" ] \
+       || [ -f "$gitdir/REVERT_HEAD" ] || [ -f "$gitdir/BISECT_LOG" ]; then
+      alog "commit: $r has a git operation in progress — skipped"; continue
+    fi
+    branch=$(git -C "$r" symbolic-ref --quiet --short HEAD 2>/dev/null)
+    if [ -z "$branch" ]; then alog "commit: $r is on a detached HEAD — skipped"; continue; fi
+    dirty=$(git -C "$r" status --porcelain --untracked-files=all 2>/dev/null)
+    [ -n "$dirty" ] || continue
+    n=$(printf '%s\n' "$dirty" | grep -c '' 2>/dev/null)
+    case "${n:-0}" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -gt "$MAX_DIRTY_FILES" ]; then
+      alog "commit: $r has $n dirty paths (cap $MAX_DIRTY_FILES) — skipped, likely a missing .gitignore"
+      continue
+    fi
+    # Only supply an identity when the repo/box has none, so a real user identity is kept.
+    ident=()
+    email=$(git -C "$r" config --get user.email 2>/dev/null)
+    if [ -z "$email" ]; then
+      ident=(-c "user.name=${AGENT_NAME:-SideButton Agent}" -c "user.email=agent@sidebutton.com")
+    fi
+    msg="chore(autosave): WIP snapshot $(date -u +%Y-%m-%dT%H:%M:%SZ) [sb-autosave]
+
+Automatic per-turn autosave from a SideButton app editing session (SCRUM-1937).
+Not a reviewed change — squash, amend or revert it freely.
+session: ${sid}"
+    if run_timeout "$COMMIT_TIMEOUT" git -C "$r" add -A >/dev/null 2>&1 \
+       && run_timeout "$COMMIT_TIMEOUT" git -C "$r" "${ident[@]}" commit -q -m "$msg" >/dev/null 2>&1; then
+      alog "commit: $r $branch +${n} path(s) → $(git -C "$r" rev-parse --short HEAD 2>/dev/null)"
+    else
+      alog "commit: $r commit failed — left dirty (nothing lost)"; continue
+    fi
+    # The push is NOT done here. This half runs on the Stop hook's critical path, inside
+    # Claude Code's 60s hook budget, ahead of the only POSTs that mark the job complete —
+    # so it must stay local and fast. The repo is queued for the detached half instead.
+    printf '%s\n' "$r" >> "$PUSH_QUEUE" 2>/dev/null || true
+  done < <(discover_repos "$entry" | sort -u)
+  return 0
+}
+
+# Detached half, step 1: mirror each freshly autosaved repo to a NAMESPACED SCRATCH REF.
+# A commit that never leaves the box still dies with the reclaimed spot VM, which is the
+# problem this ticket exists to fix. The target is never the real branch, so the --force
+# cannot rewrite anything the user or the agent pushed themselves.
+drain_push_queue() {
+  local q r branch
+  [ -s "$PUSH_QUEUE" ] || return 0
+  q="${PUSH_QUEUE}.$$"
+  mv -f "$PUSH_QUEUE" "$q" 2>/dev/null || return 0
+  while IFS= read -r r; do
+    [ -n "$r" ] && [ -d "$r" ] || continue
+    git -C "$r" remote get-url origin >/dev/null 2>&1 || continue
+    branch=$(git -C "$r" symbolic-ref --quiet --short HEAD 2>/dev/null)
+    [ -n "$branch" ] || continue
+    if run_timeout "$PUSH_TIMEOUT" git -C "$r" push --force --quiet origin \
+         "HEAD:refs/heads/${SCRATCH_NS}/${branch}" >/dev/null 2>&1; then
+      alog "push: $r → origin ${SCRATCH_NS}/${branch}"
+    else
+      alog "push: scratch push failed for $r — the autosave commit is VM-local only"
+    fi
+  done < <(sort -u "$q" 2>/dev/null)
+  rm -f "$q" 2>/dev/null
+  return 0
+}
+
+# --- publish half (detached, debounced) ----------------------------------------
+# The project is the workspace itself when it holds a package.json, otherwise the single
+# project directory inside it. A kit-derived project (one carrying the landing publish
+# client) always wins, since that is the one we know how to ship.
+resolve_project() {
+  local entry="$1" d best="" n=0
+  entry="${entry/#\~/$HOME}"
+  if [ -f "$entry/package.json" ]; then printf '%s\n' "$entry"; return 0; fi
+  for d in "$entry"/*/; do
+    d="${d%/}"
+    [ -f "$d/package.json" ] || continue
+    n=$((n + 1))
+    if is_kit_client "$d/scripts/publish.mjs"; then printf '%s\n' "$d"; return 0; fi
+    [ -z "$best" ] && best="$d"
+  done
+  [ "$n" -eq 1 ] && { printf '%s\n' "$best"; return 0; }
+  return 1
+}
+
+# A `scripts/publish.mjs` is only OUR landing-kit client if it actually talks to the publish
+# endpoint — this script must never execute an unrelated file that happens to share the name.
+is_kit_client() {
+  [ -f "$1" ] && grep -q 'api/agents/landing/publish' "$1" 2>/dev/null
+}
+
+# Fallback for a project without the kit client: POST dist/ as-is. Deliberately strict —
+# it publishes only a bundle whose root is already the site root, and only with an explicit
+# slug, because guessing either would ship a broken release.
+generic_publish() {
+  local proj="$1" dist slug f rel ext sz b64 n=0 bytes=0 code unchanged
+  local files_tmp payload resp
+  dist=""
+  for f in "$proj/dist" "$proj/build"; do [ -d "$f" ] && { dist="$f"; break; }; done
+  [ -n "$dist" ] || { alog "publish: no dist/ or build/ in $proj — skipped"; return 0; }
+  slug="${LANDING_SLUG:-}"
+  [ -n "$slug" ] || { alog "publish: no landing kit client and no LANDING_SLUG — skipped"; return 0; }
+  [ -f "$dist/index.html" ] || { alog "publish: $dist has no index.html at its root — skipped"; return 0; }
+  command -v base64 >/dev/null 2>&1 || { alog "publish: base64 missing — skipped"; return 0; }
+  files_tmp="${SB_DIR}/.app-publish-files.$$"
+  payload="${SB_DIR}/.app-publish-payload.$$"
+  resp="${SB_DIR}/.app-publish-resp.$$"
+  : > "$files_tmp" 2>/dev/null || return 0
+  while IFS= read -r -d '' f; do
+    rel="${f#"$dist"/}"
+    [ "${#rel}" -le 200 ] || continue
+    ext=$(printf '%s' "${rel##*.}" | tr '[:upper:]' '[:lower:]')
+    case "$ext" in
+      html|css|js|mjs|svg|png|jpg|jpeg|webp|ico|txt|xml|woff2|webmanifest) ;;
+      *) continue ;;
+    esac
+    sz=$(wc -c < "$f" 2>/dev/null | tr -d ' '); case "${sz:-}" in ''|*[!0-9]*) sz=0 ;; esac
+    n=$((n + 1)); bytes=$((bytes + sz))
+    if [ "$n" -gt "$MAX_RELEASE_FILES" ] || [ "$bytes" -gt "$MAX_RELEASE_BYTES" ]; then
+      alog "publish: $dist exceeds the release caps (files>${MAX_RELEASE_FILES} or bytes>${MAX_RELEASE_BYTES}) — skipped"
+      rm -f "$files_tmp"; return 0
+    fi
+    b64=$(base64 -w0 "$f" 2>/dev/null) || continue
+    jq -nc --arg p "$rel" --arg c "$b64" '{path:$p, content_b64:$c}' >> "$files_tmp" 2>/dev/null || true
+  done < <(find "$dist" -type f ! -name '.*' -print0 2>/dev/null)
+  if [ "$n" -eq 0 ] || ! jq -s --arg slug "$slug" '{slug:$slug, files:.}' "$files_tmp" > "$payload" 2>/dev/null; then
+    alog "publish: could not build a payload from $dist — skipped"
+    rm -f "$files_tmp" "$payload"; return 0
+  fi
+  code=$(curl -4 -s -o "$resp" -w '%{http_code}' -X POST "${PORTAL_URL}/api/agents/landing/publish" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer ${AGENT_TOKEN}" \
+    --data-binary "@${payload}" --connect-timeout 10 --max-time "$PUBLISH_TIMEOUT" 2>/dev/null) || code=0
+  # SP-H (SCRUM-1940): `unchanged` — not a moved release_ts — is what says whether this
+  # publish wrote anything. A 422 here is the intended answer for a staged bundle posted
+  # after go-live: log it and drop it, never retry.
+  # `// empty` would be wrong here: jq treats `false` as absent, and false is exactly the
+  # answer that means "a release WAS written" (SP-H). Distinguish it from a missing field.
+  unchanged=$(jq -r 'if has("unchanged") then (.unchanged|tostring) else "absent" end' "$resp" 2>/dev/null)
+  alog "publish: generic POST slug=${slug} files=${n} bytes=${bytes} http=${code:-0} unchanged=${unchanged:-?}"
+  case "${code:-0}" in
+    2*) ;;
+    *) alog "publish: response $(head -c 400 "$resp" 2>/dev/null | tr '\n' ' ')" ;;
+  esac
+  rm -f "$files_tmp" "$payload" "$resp"
+  return 0
+}
+
+publish_staged() {
+  local entry="$1" sid="$2" proj last now wait rc out age
+  mkdir -p "$SB_DIR" 2>/dev/null || return 0
+  # A publisher that died mid-flight (spot reclaim, OOM) must not silence the lane forever.
+  if [ -d "$PUBLISH_LOCK" ]; then
+    age=$(( $(date +%s 2>/dev/null || echo 0) - $(stat -c %Y "$PUBLISH_LOCK" 2>/dev/null || echo 0) ))
+    if [ "$age" -gt "$MAX_LOCK_AGE" ]; then
+      rmdir "$PUBLISH_LOCK" 2>/dev/null && alog "publish: broke a stale lock (${age}s old)"
+    fi
+  fi
+  # Single-flight: a publisher already waiting out the debounce will re-read the tree when
+  # it fires, so it covers this turn too. This IS the coalescing (the server does none).
+  if ! mkdir "$PUBLISH_LOCK" 2>/dev/null; then
+    alog "publish: a publish is already pending — coalesced into it"; return 0
+  fi
+  trap 'rmdir "$PUBLISH_LOCK" 2>/dev/null || true' EXIT INT TERM
+  last=$(cat "$PUBLISH_STAMP" 2>/dev/null); case "${last:-}" in ''|*[!0-9]*) last=0 ;; esac
+  now=$(date +%s 2>/dev/null || echo 0)
+  wait=$(( MIN_PUBLISH_INTERVAL - (now - last) ))
+  [ "$wait" -gt "$MIN_PUBLISH_INTERVAL" ] && wait="$MIN_PUBLISH_INTERVAL"   # clock jumped backwards
+  if [ "$wait" -gt 0 ]; then
+    alog "publish: debouncing ${wait}s before the trailing publish"
+    sleep "$wait"
+  fi
+  if [ -z "${AGENT_TOKEN:-}" ]; then alog "publish: no agent token — skipped"; return 0; fi
+  proj=$(resolve_project "$entry") || proj=""
+  if [ -z "$proj" ]; then alog "publish: no single project under $entry — skipped"; return 0; fi
+  # Stamp BEFORE the work: an attempt has started, and the floor is the spacing between
+  # attempts. A build that outruns the interval must not make the next turn publish instantly.
+  date +%s > "$PUBLISH_STAMP" 2>/dev/null || true
+  if command -v npm >/dev/null 2>&1 && jq -e '.scripts.build' "$proj/package.json" >/dev/null 2>&1; then
+    if ( cd "$proj" && run_timeout "$BUILD_TIMEOUT" npm run build ) > "$BUILD_LOG" 2>&1; then
+      alog "publish: built $proj"
+    else
+      alog "publish: build failed in $proj (see ${BUILD_LOG}) — skipping the publish"
+      return 0
+    fi
+  fi
+  if is_kit_client "$proj/scripts/publish.mjs" && command -v node >/dev/null 2>&1; then
+    out=$( cd "$proj" && run_timeout "$PUBLISH_TIMEOUT" node scripts/publish.mjs 2>&1 ); rc=$?
+    alog "publish: kit client rc=${rc} :: $(printf '%s' "$out" | tr '\n' ' ' | tail -c 400)"
+  else
+    generic_publish "$proj"
+  fi
+  return 0
+}
+
+# --- entry point ---------------------------------------------------------------
+mkdir -p "$SB_DIR" 2>/dev/null || true
+rotate_log
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env" 2>/dev/null
+AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+# Operator controls, read AFTER ~/.agent-env so a single line in that file tunes or kills the
+# lane on a box (or fleet-wide via the secrets step) without waiting for a base refresh.
+case "${SB_APP_AUTOSAVE_DISABLE:-0}" in
+  1|true|yes|on) alog "disabled via SB_APP_AUTOSAVE_DISABLE — nothing to do"; exit 0 ;;
+esac
+case "${SB_APP_PUBLISH_MIN_INTERVAL:-}" in
+  ''|*[!0-9]*) ;;
+  *) MIN_PUBLISH_INTERVAL="$SB_APP_PUBLISH_MIN_INTERVAL" ;;
+esac
+# `turn` re-execs this file detached, so $0 must survive an inherited cwd change.
+SELF="$0"
+case "$SELF" in
+  /*) ;;
+  *)  SELF="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)/$(basename "$SELF")" ;;
+esac
+MODE="${1:-}"
+case "$MODE" in
+  mark)
+    command -v jq >/dev/null 2>&1 || exit 0
+    mark_if_app_session "${2:-}" && alog "marked app session ${2:-} (entry=${GATE_ENTRY})"
+    ;;
+  turn)
+    app_turn_gate "${3:-}" || exit 0
+    alog "turn: app session ${3:-} entry=${GATE_ENTRY}"
+    autosave_commit "$GATE_ENTRY" "${3:-}"
+    # Everything with a network or a build in it is detached, so nothing sits between the
+    # agent finishing and the portal learning the step completed. </dev/null + full
+    # redirection keeps Claude Code from waiting on an inherited pipe.
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$SELF" defer "$GATE_ENTRY" "${3:-}" </dev/null >/dev/null 2>&1 &
+    else
+      nohup "$SELF" defer "$GATE_ENTRY" "${3:-}" </dev/null >/dev/null 2>&1 &
+    fi
+    disown 2>/dev/null || true
+    ;;
+  defer)
+    # The push runs BEFORE the single-flight publish lock: a turn whose publish is
+    # coalesced into a pending one must still get its commit off the box.
+    drain_push_queue
+    publish_staged "${2:-}" "${3:-}"
+    ;;
+  publish)
+    publish_staged "${2:-}" "${3:-}"
+    ;;
+  *)
+    alog "unknown mode '${MODE}' — nothing to do"
+    ;;
+esac
+exit 0
+APPSAVEEOF
+chmod +x "$AGENT_HOME/.local/bin/sb-app-autosave.sh"
 
 # --- Stop/SubagentStop hook ---------------------------------------------------
 cat > "$AGENT_HOME/.local/bin/claude-stop-hook.sh" <<'HOOKEOF'
@@ -1012,6 +1455,15 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
   ENTRY_PATH=$(jq -r '.entry_path // empty' "$JOB_CONTEXT" 2>/dev/null || true)
   [ -z "$ENTRY_PATH" ] && ENTRY_PATH="${HOME}/workspace"
   ENTRY_PATH="${ENTRY_PATH/#\~/$HOME}"   # job-context stores the workspace as "~/workspace"; expand so the log + capture see a real path
+  # SCRUM-1937 (SP-D): on an app_edit_session turn ONLY, autosave the worktree and kick the
+  # debounced staged republish. Deliberately ahead of capture_git_prs so the autosave commit
+  # has already advanced HEAD and lands in jobs.prs. This is the critical path in front of the
+  # completion POSTs, so it is three lines that cannot fail: the helper itself is gate-first,
+  # never `set -e`, and always exits 0 (see its header) — the `|| true` and the -x test are
+  # belt on top, and a box without the helper simply skips it.
+  if [ -x "${HOME}/.local/bin/sb-app-autosave.sh" ]; then
+    "${HOME}/.local/bin/sb-app-autosave.sh" turn "$ENTRY_PATH" "$SESSION_ID" </dev/null >/dev/null 2>&1 || true
+  fi
   PRS_JSON=$(capture_git_prs "$ENTRY_PATH" "$SESSION_ID" 2>/dev/null || echo '[]')
   case "$PRS_JSON" in ''|'[]') PRS_JSON='[]' ;; esac
   log "git telemetry: $(echo "$PRS_JSON" | jq -c 'length') PR(s) from $ENTRY_PATH"
