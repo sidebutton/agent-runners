@@ -836,6 +836,22 @@ is_kit_client() {
   [ -f "$1" ] && grep -q 'api/agents/landing/publish' "$1" 2>/dev/null
 }
 
+# Does this project ship through git? (SCRUM-1965 / SP2-C)
+#
+# An origin remote is the whole test. A repo project's durable lane IS git — the v2 session contract
+# ends every turn with a commit pushed to the project's branch — so republishing it to the landing
+# floor as well would mint a SECOND durable copy: an `lp-<name>` site the user never asked for,
+# silently competing with their own repo for "where did my work go", and re-publishing whatever the
+# turn happened to leave in dist/. `git -C` walks up from the app directory, so a monorepo app whose
+# checkout root is a level or two above still answers correctly here.
+#
+# A project with NO remote (the Phase-1 landing-kit lane) is unaffected and keeps auto-republishing.
+# The scratch-ref push in drain_push_queue is likewise unaffected: it targets a namespaced ref rather
+# than a site, and it is the safety net for a commit that has not been pushed yet.
+has_origin_remote() {
+  run_timeout "$GIT_PROBE_TIMEOUT" git -C "$1" remote get-url origin >/dev/null 2>&1
+}
+
 # Fallback for a project without the kit client: POST dist/ as-is. Deliberately strict —
 # it publishes only a bundle whose root is already the site root, and only with an explicit
 # slug, because guessing either would ship a broken release.
@@ -964,6 +980,13 @@ publish_once() {
   if [ -z "${AGENT_TOKEN:-}" ]; then alog "publish: no agent token — skipped"; return 0; fi
   proj=$(resolve_project "$entry") || proj=""
   if [ -z "$proj" ]; then alog "publish: no single project under $entry — skipped"; return 0; fi
+  # Skip BEFORE the debounce stamp and the build: a repo project must cost nothing here, and a stamp
+  # written for a publish that never happens would delay a real one if the project later loses its
+  # remote. Deliberately not a debounce-worthy event — it is a permanent property of the project.
+  if has_origin_remote "$proj"; then
+    alog "publish: $proj has an origin remote — its durable lane is git (turn end = commit + push), floor publish skipped"
+    return 0
+  fi
   # Stamp BEFORE the work: an attempt has started, and the floor is the spacing between
   # attempts. A build that outruns the interval must not make the next turn publish instantly.
   date +%s > "$PUBLISH_STAMP" 2>/dev/null || true
@@ -1073,6 +1096,27 @@ normalize_repo_url() {
   fi
   echo "$u"
 }
+# Which remote ref does this repo's current branch publish to? (SCRUM-1965 / SP2-C)
+#
+# The v2 session contract ends every turn with a commit pushed to the project's branch, and the
+# portal's turn stamp has to say whether that push landed. It answers OFFLINE, from the
+# remote-tracking ref: the agent's own `git push` fast-forwards it, and a rejected push leaves it
+# behind — so `<upstream>..HEAD` is an exact, network-free count of commits that exist only locally.
+# No fetch, no gh call: this runs on the critical path in front of the completion POST.
+#
+# Configured @{upstream} first (what push actually targets), then origin/<branch> for a branch that
+# was never `-u`-tracked but does have a remote counterpart. Neither => no answer at all, and the
+# caller emits nulls rather than guessing: a detached HEAD or a never-pushed branch is unknown, NOT
+# unpushed, and the portal renders unknown as silence.
+upstream_ref() {
+  local r="$1" up br
+  up=$(git -C "$r" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null)
+  [ -n "$up" ] && { echo "$up"; return 0; }
+  br=$(git -C "$r" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  [ -n "$br" ] || return 1
+  git -C "$r" rev-parse --verify --quiet "refs/remotes/origin/${br}" >/dev/null 2>&1 || return 1
+  echo "origin/${br}"
+}
 capture_git_prs() {
   set +e
   local entry="$1"
@@ -1099,7 +1143,7 @@ capture_git_prs() {
   [ ${#uniq[@]} -eq 0 ] && { echo '[]'; return 0; }
   local -a elems=()
   local repo_url sha_end sha_start base_sha ss la ld fc co pr_url pr_number state merged_at ghj elem
-  local bb_auth bb_slug branch bbj bbpr
+  local bb_auth bb_slug branch bbj bbpr up remote_sha ahead
   for r in "${uniq[@]}"; do
     repo_url=$(normalize_repo_url "$(git -C "$r" remote get-url origin 2>/dev/null)")
     sha_end=$(git -C "$r" rev-parse HEAD 2>/dev/null)
@@ -1125,6 +1169,15 @@ capture_git_prs() {
       la=$(echo "$ss" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' | head -1)
       ld=$(echo "$ss" | grep -oE '[0-9]+ deletion'  | grep -oE '[0-9]+' | head -1)
       co=$(git -C "$r" rev-list --count "${sha_start}...HEAD" 2>/dev/null)
+    fi
+    # Pushed-ness (SCRUM-1965): where the branch's remote ref stands vs HEAD. ahead=0 means every
+    # commit of this turn is on the remote; ahead>0 means the push was rejected (or never ran) and
+    # the work is still only on this box. Both stay empty — i.e. null, never 0 — when there is no
+    # remote-tracking ref to compare against, so an old box or a never-pushed branch reads unknown.
+    remote_sha=""; ahead=""
+    if up=$(upstream_ref "$r"); then
+      remote_sha=$(git -C "$r" rev-parse "$up" 2>/dev/null)
+      ahead=$(git -C "$r" rev-list --count "${up}..HEAD" 2>/dev/null)
     fi
     # PR state + authoritative churn from gh (the agent's own token). Empty on no
     # PR / non-GitHub / unreachable — then we keep the git-derived churn above.
@@ -1174,10 +1227,12 @@ capture_git_prs() {
       --argjson la "${la:-null}" --argjson ld "${ld:-null}" \
       --argjson fc "${fc:-null}" --argjson co "${co:-null}" \
       --arg state "$state" --arg merged_at "$merged_at" \
+      --arg remote_sha "${remote_sha:-}" --argjson ahead "${ahead:-null}" \
       '{repo_url:$repo_url, pr_url:$pr_url, pr_number:$pr_number,
         sha_start:$sha_start, sha_end:$sha_end,
         lines_added:$la, lines_deleted:$ld, files_changed:$fc, commits:$co,
-        state:$state, pr_merged_at:(if $merged_at=="" then null else $merged_at end)}' 2>/dev/null)
+        state:$state, pr_merged_at:(if $merged_at=="" then null else $merged_at end),
+        remote_sha:(if $remote_sha=="" then null else $remote_sha end), ahead:$ahead}' 2>/dev/null)
     [ -n "$elem" ] && elems+=("$elem")
   done
   [ ${#elems[@]} -eq 0 ] && { echo '[]'; return 0; }

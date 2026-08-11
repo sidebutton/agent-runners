@@ -417,6 +417,34 @@ elapsed=$(( $(date +%s) - t0 ))
 [ "$(grep -c 'landing/publish' "$CALLS")" = "1" ] && ok "B7 the deferred publish fires exactly once" \
   || bad "B7 expected exactly one deferred POST, got $(grep -c 'landing/publish' "$CALLS")"
 
+# B8 floor gate (SCRUM-1965): a project that ships through git must NOT also claim a landing slug.
+# The v2 session contract ends every turn with a commit pushed to the project's branch, so a floor
+# republish here would mint a second durable copy of the same work — an lp-<name> site nobody asked
+# for — and leave the user with two answers to "where did my work go". Everything above this line
+# runs against a repo whose origin was removed, which is exactly the un-gated (landing-kit) lane.
+reset_state; : > "$CALLS"
+git -C "$REPO" remote add origin "$BARE" 2>/dev/null
+LANDING_SLUG=acme "$HELPER" publish "$WS" sidA >/dev/null 2>&1
+grep -q 'landing/publish' "$CALLS" \
+  && bad "B8 a repo project published to the landing floor — it now has two durable lanes" \
+  || ok "B8 a project with an origin remote does not publish to the landing floor"
+grep -q '^npm run build' "$CALLS" \
+  && bad "B8 the gate ran after the build — a skipped project must cost nothing" \
+  || ok "B8 the gate skips before the build, so a repo project costs nothing here"
+grep -q 'durable lane is git' "$HOME/.sidebutton/app-autosave.log" \
+  && ok "B8 the skip says why in the log" || bad "B8 the skip is silent — undebuggable in the field"
+[ -f "$HOME/.sidebutton/last-app-publish" ] \
+  && bad "B8 a skipped publish still stamped the debounce floor" \
+  || ok "B8 the skip leaves the debounce stamp alone"
+
+# B8b the same project without a remote still publishes: the gate keys on the remote, nothing else.
+git -C "$REPO" remote remove origin 2>/dev/null
+reset_state; : > "$CALLS"
+LANDING_SLUG=acme "$HELPER" publish "$WS" sidA >/dev/null 2>&1
+grep -q 'landing/publish' "$CALLS" \
+  && ok "B8b a remote-less project still auto-republishes (the Phase-1 landing lane is untouched)" \
+  || bad "B8b the gate broke the landing-kit lane it was supposed to leave alone"
+
 # ── C. failure injection on the critical path ────────────────────────────────────
 # The whole point: whatever the autosave lane does, the two completion POSTs must go out.
 git -C "$REPO" checkout -q -- . 2>/dev/null; git -C "$REPO" clean -qfd 2>/dev/null
