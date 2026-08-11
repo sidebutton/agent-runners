@@ -39,6 +39,11 @@ awk '/^normalize_repo_url\(\) \{/{p=1} p{print} /^capture_git_prs\(\) \{/{c=1} c
 grep -q '^capture_git_prs() {' "$TMP/funcs.sh" \
   && ok "extracted normalize_repo_url + capture_git_prs from the hook heredoc" \
   || bad "could not extract capture_git_prs from the hook"
+# The extraction above stops at capture_git_prs' closing brace, so a helper it calls MUST sit
+# between the two functions or every assertion below dies on "command not found".
+grep -q '^upstream_ref() {' "$TMP/funcs.sh" \
+  && ok "upstream_ref extracted with the capture helpers (declared before capture_git_prs)" \
+  || bad "upstream_ref is missing or declared after capture_git_prs — capture would break at runtime"
 
 # Build a fake workspace: $HOME/workspace/myrepo = a git repo with an origin remote
 # and a 2-line diff vs its merge-base, so capture has real churn + a repo_url.
@@ -175,6 +180,64 @@ if command -v jq >/dev/null 2>&1; then
   rm -f "$HOME/.sidebutton/job-context.json" "$HOME/.sidebutton/session-heads-sidT.json"
 else
   skip "jq not installed — skipping SCRUM-1394 baseline-scoping assertions"
+fi
+
+# ── SCRUM-1965 (SP2-C): pushed-ness rides on every element ──────────────────────────────────────
+# The v2 session contract ends each turn with a commit pushed to the project's branch, and the
+# portal's turn stamp says whether that push landed — so capture emits remote_sha + ahead per repo,
+# read OFFLINE from the remote-tracking ref (the agent's own push moves it; a rejected push does
+# not). The distinction that matters downstream is unknown (null) vs pushed (0): a box with no
+# tracking ref must never render as "not pushed".
+if command -v jq >/dev/null 2>&1; then
+  PWS="$HOME/pushws"; PREPO="$PWS/pushrepo"
+  mkdir -p "$PREPO"
+  git -C "$PREPO" init -q
+  git -C "$PREPO" config user.email t@t.io; git -C "$PREPO" config user.name t
+  git -C "$PREPO" remote add origin https://github.com/acme/pushrepo.git
+  printf 'a\n' > "$PREPO/f"; git -C "$PREPO" add f; git -C "$PREPO" commit -qm base
+  git -C "$PREPO" update-ref refs/remotes/origin/HEAD HEAD
+  printf 'a\nb\n' > "$PREPO/f"; git -C "$PREPO" add f; git -C "$PREPO" commit -qm change
+  PBRANCH="$(git -C "$PREPO" symbolic-ref --quiet --short HEAD)"
+  PHEAD="$(git -C "$PREPO" rev-parse HEAD)"
+
+  # 1. no remote-tracking ref for the branch => unknown, and unknown is null — NOT 0, NOT "behind".
+  J="$(capture_git_prs "$PWS" 2>/dev/null)"
+  rs="$(printf '%s' "$J" | jq -r '.[0].remote_sha' 2>/dev/null)"
+  ah="$(printf '%s' "$J" | jq -r '.[0].ahead'      2>/dev/null)"
+  [ "$rs" = "null" ] && [ "$ah" = "null" ] && ok "no tracking ref => remote_sha/ahead null (unknown, never a guessed 'not pushed')" \
+    || bad "expected null/null without a tracking ref, got remote_sha='$rs' ahead='$ah'"
+
+  # 2. tracking ref at HEAD (the push landed) => ahead 0 + remote_sha == sha_end.
+  git -C "$PREPO" update-ref "refs/remotes/origin/$PBRANCH" "$PHEAD"
+  J="$(capture_git_prs "$PWS" 2>/dev/null)"
+  rs="$(printf '%s' "$J" | jq -r '.[0].remote_sha' 2>/dev/null)"
+  ah="$(printf '%s' "$J" | jq -r '.[0].ahead'      2>/dev/null)"
+  se="$(printf '%s' "$J" | jq -r '.[0].sha_end'    2>/dev/null)"
+  [ "$ah" = "0" ] && ok "pushed branch => ahead 0" || bad "expected ahead 0 after the push, got '$ah'"
+  [ "$rs" = "$se" ] && [ "$rs" = "$PHEAD" ] && ok "pushed branch => remote_sha == sha_end" \
+    || bad "remote_sha '$rs' != sha_end '$se'"
+
+  # 3. a commit the push did not carry (rejected push / never pushed) => ahead 1, remote_sha behind.
+  printf 'a\nb\nc\n' > "$PREPO/f"; git -C "$PREPO" add f; git -C "$PREPO" commit -qm local-only
+  J="$(capture_git_prs "$PWS" 2>/dev/null)"
+  rs="$(printf '%s' "$J" | jq -r '.[0].remote_sha' 2>/dev/null)"
+  ah="$(printf '%s' "$J" | jq -r '.[0].ahead'      2>/dev/null)"
+  se="$(printf '%s' "$J" | jq -r '.[0].sha_end'    2>/dev/null)"
+  [ "$ah" = "1" ] && ok "unpushed commit => ahead 1 (the stamp degrades to 'Saved (local)')" \
+    || bad "expected ahead 1 for a local-only commit, got '$ah'"
+  [ "$rs" = "$PHEAD" ] && [ "$rs" != "$se" ] && ok "unpushed commit => remote_sha still the last pushed sha" \
+    || bad "remote_sha '$rs' should be the last pushed sha '$PHEAD', not sha_end '$se'"
+
+  # 4. a configured @{upstream} wins over origin/<branch> — it is what `git push` actually targets.
+  git -C "$PREPO" update-ref "refs/remotes/origin/other" "$(git -C "$PREPO" rev-parse HEAD)"
+  git -C "$PREPO" config "branch.$PBRANCH.remote" origin
+  git -C "$PREPO" config "branch.$PBRANCH.merge" refs/heads/other
+  J="$(capture_git_prs "$PWS" 2>/dev/null)"
+  ah="$(printf '%s' "$J" | jq -r '.[0].ahead' 2>/dev/null)"
+  [ "$ah" = "0" ] && ok "configured @{upstream} beats origin/<branch> (ahead 0 against the real push target)" \
+    || bad "expected ahead 0 against the configured upstream, got '$ah'"
+else
+  skip "jq not installed — skipping SCRUM-1965 pushed-ness assertions"
 fi
 
 echo
