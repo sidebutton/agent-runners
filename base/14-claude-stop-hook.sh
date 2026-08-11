@@ -836,6 +836,22 @@ is_kit_client() {
   [ -f "$1" ] && grep -q 'api/agents/landing/publish' "$1" 2>/dev/null
 }
 
+# Does this project ship through git? (SCRUM-1965 / SP2-C)
+#
+# An origin remote is the whole test. A repo project's durable lane IS git — the v2 session contract
+# ends every turn with a commit pushed to the project's branch — so republishing it to the landing
+# floor as well would mint a SECOND durable copy: an `lp-<name>` site the user never asked for,
+# silently competing with their own repo for "where did my work go", and re-publishing whatever the
+# turn happened to leave in dist/. `git -C` walks up from the app directory, so a monorepo app whose
+# checkout root is a level or two above still answers correctly here.
+#
+# A project with NO remote (the Phase-1 landing-kit lane) is unaffected and keeps auto-republishing.
+# The scratch-ref push in drain_push_queue is likewise unaffected: it targets a namespaced ref rather
+# than a site, and it is the safety net for a commit that has not been pushed yet.
+has_origin_remote() {
+  run_timeout "$GIT_PROBE_TIMEOUT" git -C "$1" remote get-url origin >/dev/null 2>&1
+}
+
 # Fallback for a project without the kit client: POST dist/ as-is. Deliberately strict —
 # it publishes only a bundle whose root is already the site root, and only with an explicit
 # slug, because guessing either would ship a broken release.
@@ -964,6 +980,13 @@ publish_once() {
   if [ -z "${AGENT_TOKEN:-}" ]; then alog "publish: no agent token — skipped"; return 0; fi
   proj=$(resolve_project "$entry") || proj=""
   if [ -z "$proj" ]; then alog "publish: no single project under $entry — skipped"; return 0; fi
+  # Skip BEFORE the debounce stamp and the build: a repo project must cost nothing here, and a stamp
+  # written for a publish that never happens would delay a real one if the project later loses its
+  # remote. Deliberately not a debounce-worthy event — it is a permanent property of the project.
+  if has_origin_remote "$proj"; then
+    alog "publish: $proj has an origin remote — its durable lane is git (turn end = commit + push), floor publish skipped"
+    return 0
+  fi
   # Stamp BEFORE the work: an attempt has started, and the floor is the spacing between
   # attempts. A build that outruns the interval must not make the next turn publish instantly.
   date +%s > "$PUBLISH_STAMP" 2>/dev/null || true
