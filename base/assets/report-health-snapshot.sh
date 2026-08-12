@@ -160,6 +160,18 @@ fi
 [ -z "$CHROME_COUNT" ] && export CHROME_COUNT=0
 [ -z "$CLAUDE_COUNT" ] && export CLAUDE_COUNT=0
 
+# ── Extension-bridge state from the local SB server (SCRUM-1095 idle rule) ──
+# The portal's health-report intake can only apply the shared error/online rule
+# (website lib/cloud/agent-idle-status.ts) when this report says whether the
+# extension bridge is up — process counts cannot answer that: Chrome running with
+# a dead extension WebSocket is exactly the 'error' case. Best-effort with a
+# short timeout: on any miss (server down, old server, invalid JSON) both vars
+# stay empty, the payload omits the fields, and the portal keeps its standing
+# verdict instead of guessing.
+HEALTH_JSON=$(curl -sf --max-time 3 -H "Authorization: Bearer ${SIDEBUTTON_AGENT_TOKEN}" http://localhost:9876/health 2>/dev/null || true)
+export BROWSER_CONNECTED=$(printf '%s' "$HEALTH_JSON" | jq -r 'select(type=="object") | .browser_connected | select(type=="boolean") | tostring' 2>/dev/null || true)
+export ANDROID_SIM_COUNT=$(printf '%s' "$HEALTH_JSON" | jq -r 'select(type=="object") | .system_metrics.android_sim_count // empty' 2>/dev/null || true)
+
 # ── Screenshot via SideButton Chrome extension (full mode only) ──
 export SS_FILE="$TMP/screenshot.png"
 rm -f "$SS_FILE"
@@ -551,6 +563,19 @@ payload = {
 if os.environ.get("CCR_STATUS"):
     payload["processes"]["ccr"] = os.environ["CCR_STATUS"]
     payload["processes"]["ccr_proxy"] = os.environ.get("CCR_PROXY", "unknown")
+
+# Extension-bridge state (SCRUM-1095 shared idle rule) — read from the local SB
+# server's /health above so the portal's health-report intake can apply the SAME
+# error/online rule the /health-polling writers use. Tri-state BY OMISSION: absent
+# fields mean "unknown" and the portal keeps its standing verdict, so an agent whose
+# SB server is briefly down (or predates /health's browser_connected) can never have
+# a real 'error' laundered away — or invented — by this report.
+bc = os.environ.get("BROWSER_CONNECTED", "")
+if bc in ("true", "false"):
+    payload["browser_connected"] = (bc == "true")
+sim = os.environ.get("ANDROID_SIM_COUNT", "")
+if sim.isdigit():
+    payload["android_sim_count"] = int(sim)
 
 # Screenshot (base64-encoded PNG)
 ss = os.environ.get("SS_FILE", "")
