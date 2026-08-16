@@ -53,3 +53,4 @@
 19e-session-tidy.sh
 19f-component-config.sh
 19g-agent-reboot.sh
+19h-tmux-status.sh
