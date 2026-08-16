@@ -51,6 +51,15 @@ mkdir -p "$TMP"
 # so the active session's terminal is the xfce4-terminal whose argv carries
 # `sbjob-<session_id>`. Titles are NON-unique across concurrent sessions, so we
 # key on the session id, never the title. --disable-server ⇒ 1 process = 1 window.
+#
+# Close semantics (sidebutton npm > 1.5.5, maxsv0/the-assistant#1410): the server
+# now watches that window process (packages/core terminal-window-watch.ts). An
+# operator CLOSING the window — clean exit, X still up, session still present —
+# kills the tmux session and fails the step via POST /api/jobs/step-complete.
+# So "window gone but session alive" only ever means an infra death now (X
+# restart / terminal crash), never an operator close. This capture keys on the
+# session id and needs no change: a killed session simply stops matching and the
+# terminal frame is cleanly omitted.
 
 # Echo the active Claude session id, or nothing. Primary source is the dispatch
 # job-context (the id base/14 also keys on); fallback — the running
