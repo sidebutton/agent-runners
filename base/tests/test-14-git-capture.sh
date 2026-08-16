@@ -160,14 +160,33 @@ if command -v jq >/dev/null 2>&1; then
   [ "$kept" = "keep" ] && ok "SessionStart is idempotent — resume/compact does not overwrite the baseline" \
     || bad "SessionStart overwrote an existing baseline (would lose the original job-start HEAD)"
 
+  # SCRUM-1973: capture now also reads the per-session pre/post bracket log the marker hook writes —
+  # `<repo>\t<branch>\t<sha>\t<pre|post>` around each tool call — and attributes only the commits that
+  # appeared inside this session's own bracket. So the fixture states a session's history as the
+  # bracket it would have produced: same sha on both sides = a tool call that changed nothing,
+  # different = one that committed. R_BRANCH is the repo's only branch, the one both cases scope to.
+  # The 5th field is the epoch second the bracket half was written; capture re-anchors at the newest
+  # commit that already existed one second before the tool call opened. These fixtures stamp the
+  # bracket just BEFORE the repo's commits, so that re-anchor finds nothing and the SHA anchors
+  # asserted below govern — which is what this file is about (SCRUM-1394 baseline scoping).
+  # test-14e covers the time anchor itself against real commit dates.
+  R_BRANCH="$(git -C "$REPO" symbolic-ref --quiet --short HEAD)"
+  R_T0=$(( $(git -C "$REPO" show -s --format=%ct HEAD) - 5 ))
+  set_session_start() {  # $1 = sha at the session's start, $2 = sha after its one tool call
+    printf '{"%s":"%s"}' "$R_KEY" "$1" > "$HOME/.sidebutton/session-heads-sidT.json"
+    printf '%s\t%s\t%s\tpre\t%s\n%s\t%s\t%s\tpost\t%s\n' \
+      "$R_KEY" "$R_BRANCH" "$1" "$R_T0" "$R_KEY" "$R_BRANCH" "$2" "$((R_T0 + 1))" \
+      > "$HOME/.sidebutton/session-branches-sidT.log"
+  }
+
   # 2. baseline == current HEAD (session committed nothing here) => repo SKIPPED (over-scope fix)
-  printf '{"%s":"%s"}' "$R_KEY" "$R_HEAD" > "$HOME/.sidebutton/session-heads-sidT.json"
+  set_session_start "$R_HEAD" "$R_HEAD"
   n="$(capture_git_prs "$WS" sidT 2>/dev/null | jq 'length' 2>/dev/null || echo x)"
   [ "$n" = "0" ] && ok "HEAD unchanged vs baseline => repo dropped (len=0)" \
     || bad "expected 0 elements for an un-advanced repo, got '$n'"
 
   # 3. baseline == parent (session advanced HEAD) => emit with sha_start=baseline, distinct from sha_end
-  printf '{"%s":"%s"}' "$R_KEY" "$R_PARENT" > "$HOME/.sidebutton/session-heads-sidT.json"
+  set_session_start "$R_PARENT" "$R_HEAD"
   ADV="$(capture_git_prs "$WS" sidT 2>/dev/null)"
   n="$(printf  '%s' "$ADV" | jq 'length'           2>/dev/null || echo x)"
   ss="$(printf '%s' "$ADV" | jq -r '.[0].sha_start' 2>/dev/null)"
@@ -177,7 +196,8 @@ if command -v jq >/dev/null 2>&1; then
     || bad "sha_start '$ss' != baseline '$R_PARENT'"
   [ "$ss" != "$se" ] && ok "sha_start != sha_end — no collapsed range (BUG 4 fix)" \
     || bad "sha_start==sha_end collapsed range persists"
-  rm -f "$HOME/.sidebutton/job-context.json" "$HOME/.sidebutton/session-heads-sidT.json"
+  rm -f "$HOME/.sidebutton/job-context.json" "$HOME/.sidebutton/session-heads-sidT.json" \
+        "$HOME/.sidebutton/session-branches-sidT.log"
 else
   skip "jq not installed — skipping SCRUM-1394 baseline-scoping assertions"
 fi
