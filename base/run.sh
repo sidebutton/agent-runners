@@ -124,4 +124,5 @@ done
 . "$BASE_DIR/19e-session-tidy.sh"     # close finished Claude TUIs after a TTL (SCRUM-1769)
 . "$BASE_DIR/19f-component-config.sh" # component config-file watchers + sb-config-place (SCRUM-1599)
 . "$BASE_DIR/19g-agent-reboot.sh"     # sb-reboot wrapper + power-key policy (SCRUM-1926)
+. "$BASE_DIR/19h-tmux-status.sh"      # tmux status line: portal job identity (role/ticket/job id)
 . "$BASE_DIR/20-mark-installed.sh"
