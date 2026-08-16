@@ -575,6 +575,145 @@ E2_OUT="$(capture_git_prs "$WS14" "$SID_E" 2>/dev/null)"
   && ok "and a later commit adds to it (+507/2 files/2 commits) — the first is not dropped" \
   || bad "second commit lost the first: $(agg "$E2_OUT") — expected +507/2 files/2 commits"
 
+# =================================================================================================
+# SCENARIOS 15-18 — WHEN the commits were made, not just which branch they are on (SCRUM-1973 review)
+#
+# Scenarios 9 and 14 establish that landing on a branch inside a tool call is anchored, not guessed.
+# But a sha anchor cannot say WHEN the commits between it and the branch head appeared, and that is
+# the whole question on a shared checkout: a branch a neighbour advanced in an EARLIER GAP looks
+# exactly like one this tool call built. Anchoring such an arrival at a sha alone hands this job the
+# neighbour's diff — the ticket's own defect, re-entered through the new path.
+#
+# So every bracket line carries the epoch second it was written, and capture re-anchors at the newest
+# commit that already existed one second before the tool call opened. `commit_back` below dates a
+# commit into the past, which is what the neighbour-in-the-gap and upstream-history shapes need.
+# =================================================================================================
+commit_back() {  # $1 = repo, $2 = seconds ago, $3 = message
+  local d; d=$(( $(date +%s) - $2 ))
+  GIT_AUTHOR_DATE="@$d" GIT_COMMITTER_DATE="@$d" git -C "$1" commit -qm "$3"
+}
+
+# --- 15: a neighbour advances a PRE-EXISTING branch in the gap; this job only checks it out --------
+new_home home15
+WS15="$HOME/workspace"; R15="$WS15/proj"
+new_repo "$R15" https://github.com/acme/proj15.git
+git -C "$R15" checkout -q -b feat/nb; git -C "$R15" checkout -q main   # exists at session open
+SID_N="sess-gap-existing"
+session_start "${SID_N}"
+tool_call "$SID_N"                                   # a read-only call, on main
+git -C "$R15" checkout -q feat/nb                    # ...the GAP: the neighbour takes the checkout
+mklines "nb" 1200 > "$R15/nb.txt"; git -C "$R15" add -A >/dev/null
+commit_back "$R15" 60 "neighbour: big work in the gap"
+git -C "$R15" checkout -q main
+n_look() { git -C "$R15" checkout -q feat/nb; }      # this job just switches to it, commits nothing
+tool_call "$SID_N" n_look
+N_OUT="$(capture_git_prs "$WS15" "$SID_N" 2>/dev/null)"
+[ "$(len "$N_OUT")" = "0" ] \
+  && ok "checking out a branch a neighbour advanced IN THE GAP claims none of it" \
+  || bad "the neighbour's gap work was attributed to this job: $(agg "$N_OUT")"
+
+# --- 16: the same, for a branch the neighbour both CUT and filled mid-session ----------------------
+new_home home16
+WS16="$HOME/workspace"; R16="$WS16/proj"
+new_repo "$R16" https://github.com/acme/proj16.git
+SID_C="sess-gap-cut"
+session_start "${SID_C}"
+tool_call "$SID_C"                                   # read-only on main — this job was last seen here
+git -C "$R16" checkout -q -b feat/cut                # the GAP: neighbour cuts from where we sit...
+mklines "cut" 900 > "$R16/cut.txt"; git -C "$R16" add -A >/dev/null
+commit_back "$R16" 60 "neighbour: cut and filled in the gap"
+git -C "$R16" checkout -q main
+c_look() { git -C "$R16" checkout -q feat/cut; }
+tool_call "$SID_C" c_look
+C_OUT="$(capture_git_prs "$WS16" "$SID_C" 2>/dev/null)"
+[ "$(len "$C_OUT")" = "0" ] \
+  && ok "a branch the neighbour cut from our own sha in the gap is not claimed either" \
+  || bad "the neighbour's freshly-cut branch was attributed to this job: $(agg "$C_OUT")"
+
+# --- 17: a repo that appears mid-session must fall back, never report a false zero -----------------
+# No session-open branch list exists for it, so the arrival cannot be anchored at all. Staying silent
+# made awk exit 0 with no candidates, which capture reads as the truthful "committed nothing" answer
+# and drops the repo — losing every line the job wrote in it.
+new_home home17
+WS17="$HOME/workspace"; R17pre="$WS17/existing"
+new_repo "$R17pre" https://github.com/acme/proj17a.git
+SID_L="sess-late-clone"
+session_start "${SID_L}"                             # only `existing` is known at session open
+l_clone() {                                          # one tool call: clone, branch, commit
+  new_repo "$WS17/late" https://github.com/acme/proj17b.git
+  git -C "$WS17/late" checkout -q -b feat/late
+  mklines "late" 120 > "$WS17/late/late.txt"; git -C "$WS17/late" add -A >/dev/null
+  git -C "$WS17/late" commit -qm "late: work in a repo cloned mid-session"
+}
+tool_call "$SID_L" l_clone
+L_OUT="$(capture_git_prs "$WS17" "$SID_L" 2>/dev/null)"
+L_LATE="$(printf '%s' "$L_OUT" | jq -c '[.[] | select(.repo_url | test("proj17b"))][0] // {}
+                                        | {lines_added,files_changed,commits}' 2>/dev/null)"
+[ "$L_LATE" = '{"lines_added":120,"files_changed":1,"commits":1}' ] \
+  && ok "a repo cloned mid-session falls back to the legacy range (+120), never a false zero" \
+  || bad "mid-session clone reported $L_LATE — expected the legacy +120/1 file/1 commit"
+
+# --- 18: a rebase must not drag the upstream history it pulled in into this job's range ------------
+# Every sha anchor this session recorded is still an ancestor after `git rebase`, so the sha rule
+# alone happily spans the upstream commits the rebase moved the branch onto. The rebase restamps
+# THIS job's commits and leaves upstream dates alone, so the time anchor separates them.
+new_home home18
+WS18="$HOME/workspace"; R18="$WS18/proj"
+new_repo "$R18" https://github.com/acme/proj18.git
+git -C "$R18" checkout -q -b upstream-sim            # 3 upstream commits, committed a while ago
+for i in 1 2 3; do
+  mklines "up$i" 500 > "$R18/up$i.txt"; git -C "$R18" add -A >/dev/null
+  commit_back "$R18" $((200 - i * 10)) "upstream: commit $i"
+done
+git -C "$R18" update-ref refs/remotes/origin/main "$(git -C "$R18" rev-parse HEAD)"
+UP_TIP="$(git -C "$R18" rev-parse refs/remotes/origin/main)"
+git -C "$R18" checkout -q main                       # this job branches off the OLD main
+SID_R="sess-rebase"
+session_start "${SID_R}"
+r_work()   { git -C "$R18" checkout -q -b feat/reb; mklines "mine" 1 > "$R18/mine.txt"
+             git -C "$R18" add -A >/dev/null; git -C "$R18" commit -qm "mine: one line"; }
+r_rebase() { git -C "$R18" rebase --quiet refs/remotes/origin/main; }
+tool_call "$SID_R" r_work
+tool_call "$SID_R" r_rebase
+R_OUT="$(capture_git_prs "$WS18" "$SID_R" 2>/dev/null)"
+[ "$(agg "$R_OUT")" = '{"lines_added":1,"lines_deleted":0,"files_changed":1,"commits":1}' ] \
+  && ok "a rebase onto 1500 lines of upstream still reports only this job's +1/1 commit" \
+  || bad "rebase pulled upstream history into the range: $(agg "$R_OUT") — expected +1/1 file/1 commit"
+[ "$(printf '%s' "$R_OUT" | jq -r '.[0].sha_start')" = "$UP_TIP" ] \
+  && ok "and re-anchors at the upstream tip the rebase landed on" \
+  || bad "sha_start '$(printf '%s' "$R_OUT" | jq -r '.[0].sha_start')' != upstream tip '$UP_TIP'"
+
+# =================================================================================================
+# SCENARIO 19 — the marker must never stamp last-tool-use from the OPENING half of a tool call
+# last-tool-use drives the portal's grace discriminator and idle recovery, so it has to mean "a tool
+# call finished". A @tsv pair read with IFS=$'\t' loses a LEADING empty field (tab is IFS whitespace),
+# so a payload with an empty session_id landed as SID=PreToolUse / EVT="" — which fails the guard and
+# stamps from the pre half.
+# =================================================================================================
+new_home home19
+rm -f "$HOME/.sidebutton/last-tool-use"
+printf '{"session_id":"","hook_event_name":"PreToolUse"}' | bash "$TMP/sb-mark-tool-use.sh" >/dev/null 2>&1
+[ ! -f "$HOME/.sidebutton/last-tool-use" ] \
+  && ok "PreToolUse with an empty session_id does not stamp last-tool-use" \
+  || bad "the pre half stamped last-tool-use — liveness now fires when a tool call STARTS"
+printf 'not json at all' | bash "$TMP/sb-mark-tool-use.sh" >/dev/null 2>&1
+MARK_RC=$?
+[ "$MARK_RC" -ne 2 ] \
+  && ok "the marker never exits 2 on garbage stdin (exit 2 from PreToolUse BLOCKS the tool call)" \
+  || bad "the marker exited 2 — every tool call on the box would be blocked"
+rm -f "$HOME/.sidebutton/last-tool-use"
+# ...and with jq unavailable entirely, where the parse yields nothing at all.
+PATH="$TMP/nojq:$PATH" bash -c 'mkdir -p "$1/nojq"; printf "#!/bin/sh\nexit 127\n" > "$1/nojq/jq"; chmod +x "$1/nojq/jq"' _ "$TMP"
+printf '{"session_id":"s19","hook_event_name":"PreToolUse"}' \
+  | PATH="$TMP/nojq:$PATH" bash "$TMP/sb-mark-tool-use.sh" >/dev/null 2>&1
+[ ! -f "$HOME/.sidebutton/last-tool-use" ] \
+  && ok "PreToolUse with jq broken still does not stamp last-tool-use" \
+  || bad "a broken jq let the pre half stamp last-tool-use"
+printf '{"session_id":"s19","hook_event_name":"PostToolUse"}' | bash "$TMP/sb-mark-tool-use.sh" >/dev/null 2>&1
+[ -f "$HOME/.sidebutton/last-tool-use" ] \
+  && ok "PostToolUse still stamps it (the liveness signal is not lost)" \
+  || bad "PostToolUse no longer stamps last-tool-use — the monitor would read the box as idle"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
 exit "$fail"

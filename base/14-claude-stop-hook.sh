@@ -43,7 +43,17 @@ IN=$(cat 2>/dev/null || true)
 # Both fields in ONE jq: this now runs twice per tool call, so a second fork here is a second fork on
 # every tool call the agent makes.
 SID=""; EVT=""
-IFS=$'\t' read -r SID EVT < <(echo "$IN" | jq -r '[.session_id // "", .hook_event_name // ""] | @tsv' 2>/dev/null)
+# One value per LINE, read with two plain `read`s. A @tsv pair read with IFS=$'\t' is WRONG here: tab
+# is an IFS *whitespace* character, so a payload with an empty session_id ("\tPreToolUse") has its
+# leading empty field collapsed and lands as SID=PreToolUse, EVT="" — which then fails the PreToolUse
+# guard below and stamps last-tool-use from the *opening* half of a tool call.
+{ read -r SID; read -r EVT; } < <(echo "$IN" | jq -r '.session_id // "", .hook_event_name // ""' 2>/dev/null)
+# Belt for a broken/absent jq, which leaves EVT empty and used to let the PRE half fall through to the
+# liveness stamp below. Only consulted when jq gave us nothing, so a payload that merely mentions the
+# string cannot suppress a real PostToolUse stamp.
+if [ -z "$EVT" ]; then
+  case "$IN" in *'"hook_event_name"'*'"PreToolUse"'*) EVT="PreToolUse" ;; esac
+fi
 # --- SCRUM-1973: per-session commit attribution (git telemetry) ---------------
 # Bracket every tool call with the git state BEFORE and AFTER it, per repo, keyed by the session's
 # OWN id. Two interleaved jobs share ONE checkout and take turns owning HEAD, so the branch the Stop
@@ -61,17 +71,31 @@ IFS=$'\t' read -r SID EVT < <(echo "$IN" | jq -r '[.session_id // "", .hook_even
 # would blind exactly the session whose attribution we are trying to fix. A per-SID file has no
 # cross-session overwrite risk. Pure builtins — no fork, no `git` call — because this fires twice per
 # tool call: .git/HEAD is read directly, and only a symbolic ref (a real branch, never a detached
-# HEAD) is recorded. Lines are `<repo>\t<branch>\t<sha>\t<pre|post>`. Measured on a 7-repo workspace:
-# ~18ms and ~1.2KB per tool call for both halves together, and the SessionStart janitor drops logs
-# older than 7 days. Always exits 0 with no stdout, so the PreToolUse half can never block or alter
-# the tool call it precedes.
+# HEAD) is recorded. Lines are `<repo>\t<branch>\t<sha>\t<pre|post>\t<epoch seconds>`. Measured on a
+# 7-repo workspace: ~18ms and ~1.2KB per tool call for both halves together, and the SessionStart
+# janitor drops logs older than 7 days. Always exits 0 with no stdout, so the PreToolUse half can
+# never block or alter the tool call it precedes.
+#
+# The TIMESTAMP is what bounds a mid-tool-call arrival (SCRUM-1973 review). Landing on a branch
+# inside a tool call says nothing about WHEN the commits on it were made: a neighbour that advanced
+# that branch in an earlier gap looks identical to this call having made them. `EPOCHSECONDS` (a bash
+# builtin, no fork) lets the reader re-anchor at the newest commit that already existed when this
+# call OPENED, so only what appeared during the call itself is attributed.
 case "$EVT" in
   PreToolUse)  _kind=pre ;;
   PostToolUse) _kind=post ;;
   *)           _kind="" ;;
 esac
 if [ -n "$SID" ] && [ -n "$_kind" ]; then
-  for _d in "${HOME}/workspace"/*/ "${HOME}/workspace"/; do
+  # Builtin test first so the normal path stays fork-free; a box whose ~/.sidebutton was cleared
+  # would otherwise emit a failed-redirect error to stderr once per repo per firing.
+  [ -d "${HOME}/.sidebutton" ] || mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+  # EPOCHSECONDS is a bash-5 builtin. Falling back to 0 on an older bash would stamp every line
+  # unusable and silently drop the whole repo to the legacy range, so pay the one fork there instead.
+  _now="${EPOCHSECONDS:-}"; [ -n "$_now" ] || _now=$(date +%s 2>/dev/null || echo 0)
+  # workspace* so a box with more than one workspace root (~/workspace-2, …) is still bracketed;
+  # an unmatched glob just fails the -f test below.
+  for _d in "${HOME}"/workspace*/*/ "${HOME}"/workspace*/; do
     _h="${_d%/}/.git/HEAD"
     [ -f "$_h" ] || continue
     read -r _ref < "$_h" 2>/dev/null || continue
@@ -79,8 +103,9 @@ if [ -n "$SID" ] && [ -n "$_kind" ]; then
       "ref: refs/heads/"*)
         _sha=""
         [ -f "${_d%/}/.git/${_ref#ref: }" ] && { read -r _sha < "${_d%/}/.git/${_ref#ref: }" 2>/dev/null || _sha=""; }
-        printf '%s\t%s\t%s\t%s\n' "${_d%/}" "${_ref#ref: refs/heads/}" "$_sha" "$_kind" \
-          >> "${HOME}/.sidebutton/session-branches-${SID}.log" 2>/dev/null || true ;;
+        # stderr is nulled BEFORE the append, or a failing `>>` reports itself to the real stderr.
+        printf '%s\t%s\t%s\t%s\t%s\n' "${_d%/}" "${_ref#ref: refs/heads/}" "$_sha" "$_kind" "$_now" \
+          2>/dev/null >> "${HOME}/.sidebutton/session-branches-${SID}.log" || true ;;
     esac
   done
 fi
@@ -490,7 +515,8 @@ for r in "${roots[@]}"; do
   # The repo path is prepended by awk, not interpolated into --format, so a `%` anywhere in it cannot
   # be eaten as a format directive.
   git -C "$r" for-each-ref --format='%(refname:short)%09%(objectname)' refs/heads 2>/dev/null \
-    | awk -F'\t' -v repo="$r" 'NF==2 && $1!="" {print repo"\t"$1"\t"$2"\tstart"}' \
+    | awk -F'\t' -v repo="$r" -v now="${EPOCHSECONDS:-$(date +%s 2>/dev/null || echo 0)}" \
+        'NF==2 && $1!="" {print repo"\t"$1"\t"$2"\tstart\t"now}' \
     >> "${HOME}/.sidebutton/session-branches-${SID}.log" 2>/dev/null
 done
 echo "$obj" > "$OUT" 2>/dev/null || true
@@ -1229,6 +1255,11 @@ job_branch_candidates() {
         # old refs while a branch cut afterwards stays loose, so the readable half looks complete
         # while the anchors it needs are missing. Refuse the whole repo rather than report a zero.
         $3=="" { if ($4=="pre" || $4=="post") blind++; next }
+        # A bracket line written by a pre-review marker carries no timestamp. Without one an arrival
+        # cannot be bounded (see the anchor rules below), so treat the repo the same way as a blind
+        # line: refuse it and let the caller keep the legacy range. Only ever true for a session that
+        # spans the roll-out of this change.
+        $4!="start" && $5=="" { notime++; next }
         # Branches that existed as the session opened, with the sha each had then. That sha is this
         # session own opening view of the branch, which makes it a safe anchor: it cannot reach back
         # into work a previous job did on the same branch.
@@ -1243,14 +1274,14 @@ job_branch_candidates() {
         # case that must fall back to the legacy path: a repo whose marker lines are all empty-sha
         # because the writer could not read the ref (packed refs, or a worktree where .git is a
         # file). Reporting zero there is a false zero, not an observation.
-        $4=="pre"  { seen++; pending[$2]=$3; last_pre=$3; next }
-        $4=="spre" {         pending[$2]=$3; last_pre=$3; next }
+        $4=="pre"  { seen++; pending[$2]=$3; ptime[$2]=$5; last_pre=$3; last_pre_t=$5; next }
+        $4=="spre" {         pending[$2]=$3; ptime[$2]=$5; last_pre=$3; last_pre_t=$5; next }
         $4=="post" || $4=="spost" {
           if ($4=="post") seen++
           if ($2 in pending) {
             if (pending[$2] != $3) {
               adv[$2]++; last[$2]=NR
-              if (!($2 in start)) start[$2]=pending[$2]
+              if (!($2 in start)) { start[$2]=pending[$2]; stime[$2]=ptime[$2] }
             }
             # Advance the anchor to what we just observed rather than clearing it: Claude Code
             # batches independent tool calls, so brackets interleave (pre A, pre B, post B, post A).
@@ -1259,35 +1290,53 @@ job_branch_candidates() {
             pending[$2]=$3
           } else if (have_start) {
             # Landed on a branch with no pre of its own, so the checkout happened inside this tool
-            # call. A branch that did not exist when the session opened was cut by this call, and the
-            # sha we came from is both the only possible anchor and the right one — that is where it
-            # was cut. This is `git checkout -b x && git commit`, the most common way work starts.
-            # A branch that DID exist is anchored at its session-open sha instead, which is what
-            # keeps `git checkout existing && git commit` from being discarded without letting it
-            # reach back before this session. Both are flagged cross-branch so the caller re-checks
-            # the anchor rather than falling back to the branch creation point, which is unbounded.
+            # call. This is `git checkout -b x && git commit`, the most common way work starts, and
+            # dropping it outright would report zero for a whole class of real jobs.
+            #
+            # But WHICH branch was arrived at cannot tell us who made the commits on it: a branch a
+            # neighbour advanced during an earlier gap looks exactly like one this call built. A sha
+            # anchor alone therefore over-claims — anchoring at the session-open sha hands this job
+            # every commit a neighbour made on that branch since the session opened, which is the
+            # very cross-attribution this ticket exists to close. So the anchor is a sha AND the
+            # time this tool call OPENED (`last_pre_t`): the caller re-anchors at the newest commit
+            # that already existed at that instant, so only what appeared during this call counts.
+            # Flagged cross-branch so the caller applies that bound and never falls back to the
+            # branch creation point, which is unbounded.
             anchor = ($2 in existed) ? startsha[$2] : last_pre
-            if (anchor != "" && $3 != anchor) {
+            if (anchor != "" && $3 != anchor && last_pre_t != "" && last_pre_t+0 > 0) {
               adv[$2]++; last[$2]=NR
-              if (!($2 in start)) { start[$2]=anchor; cross[$2]=1 }
+              if (!($2 in start)) { start[$2]=anchor; stime[$2]=last_pre_t; cross[$2]=1 }
             }
+            pending[$2]=$3
+          } else {
+            # An arrival in a repo with no session-open branch list — the repo was cloned or added
+            # to the workspace mid-session. There is nothing to anchor against, and staying silent
+            # here made awk exit 0 with no candidates, which the caller reads as the truthful "this
+            # job committed nothing" answer and drops the repo. That LOSES the work this job did,
+            # where the legacy range would have reported it. Refuse the repo instead.
+            # (No apostrophes anywhere in this awk body — it is inside a single-quoted program.)
+            unresolved++
             pending[$2]=$3
           }
           next
         }
         END {
-          # No marker line at all, or any unreadable one => no trustworthy data, which is NOT
-          # evidence of idleness. Say so with a non-zero exit so the caller falls back to the legacy
-          # range instead of reporting a false zero and losing real work outright.
-          if (seen == 0 || blind > 0) exit 1
-          for (k in adv) printf "%d\t%d\t%s\t%s\t%d\n", adv[k], last[k], k, start[k], (k in cross ? 1 : 0)
+          # No marker line at all, or any unreadable/unanchorable one => no trustworthy data, which
+          # is NOT evidence of idleness. Say so with a non-zero exit so the caller falls back to the
+          # legacy range instead of reporting a false zero and losing real work outright.
+          if (seen == 0 || blind > 0 || notime > 0 || unresolved > 0) exit 1
+          # cross first so a branch this session was genuinely ON always outranks one it merely
+          # landed on; then advance count, then recency.
+          for (k in adv) printf "%d\t%d\t%d\t%s\t%s\t%d\n", \
+            (k in cross ? 1 : 0), adv[k], last[k], k, start[k], (stime[k]+0)
         }
       ' "$log" 2>/dev/null) || return 1
   # Usable data but nothing advanced: succeed with NO output. That is the "this job committed
   # nothing of its own" answer, and it must not be confused with the no-data exit above — piping
   # awk straight into sort would have masked its status behind cut's.
   [ -n "$raw" ] || return 0
-  printf '%s\n' "$raw" | sort -k1,1nr -k2,2nr | cut -f3,4,5
+  # Emits `<cross>\t<branch>\t<anchor sha>\t<anchor epoch>` per line, best candidate first.
+  printf '%s\n' "$raw" | sort -k1,1n -k2,2nr -k3,3nr | cut -f1,4,5,6
 }
 # Where did this job's work on <branch> begin? (SCRUM-1973)
 #   $3 = this session's HEAD baseline, $4 = the sha the branch had when this session FIRST saw it.
@@ -1317,29 +1366,47 @@ job_branch_candidates() {
 # git: they always carry a real sha, so counting them as observations would mask a repo whose
 # marker lines are all empty (packed refs / worktrees) and turn its legacy fallback into a zero.
 mark_session_bracket() {
-  local entry="$1" sid="${2:-}" kind="${3:-spost}" d top br sha
+  local entry="$1" sid="${2:-}" kind="${3:-spost}" d top br sha now
   [ -n "$sid" ] || return 0
   entry="${entry/#\~/$HOME}"
   [ -n "$entry" ] || return 0
+  now="${EPOCHSECONDS:-}"; [ -n "$now" ] || now=$(date +%s 2>/dev/null || echo 0)
   for d in "$entry"/*/ "$entry"/; do
     top=$(git -C "${d%/}" rev-parse --show-toplevel 2>/dev/null) || continue
     br=$(git -C "$top" symbolic-ref --quiet --short HEAD 2>/dev/null) || continue
     sha=$(git -C "$top" rev-parse HEAD 2>/dev/null) || continue
     [ -n "$br" ] && [ -n "$sha" ] \
-      && printf '%s\t%s\t%s\t%s\n' "$top" "$br" "$sha" "$kind" \
-         >> "${HOME}/.sidebutton/session-branches-${sid}.log" 2>/dev/null
+      && printf '%s\t%s\t%s\t%s\t%s\n' "$top" "$br" "$sha" "$kind" "$now" \
+         2>/dev/null >> "${HOME}/.sidebutton/session-branches-${sid}.log"
   done
   return 0
 }
+#   $5 = the epoch second at which this job's first advancing tool call OPENED (0 = unknown).
+#
+# The TIME anchor is the one that survives a rewritten branch. The sha anchors are shas this session
+# observed, and `git commit --amend` / `git rebase` make every one of them a non-ancestor of the new
+# head — all three are then discarded and the range falls back to the branch creation point, so a
+# 3-line amend on a branch an earlier job filled re-reports that job's whole diff. The newest commit
+# that already existed when this job's first advancing call opened is immune: a rewrite restamps the
+# committer date, so rewritten commits sort AFTER the anchor instant and only they end up in range.
 branch_start_sha() {
-  local r="$1" br="$2" base="${3:-}" seen="${4:-}" head="" cand=""
+  local r="$1" br="$2" base="${3:-}" seen="${4:-}" atime="${5:-0}" head="" cand=""
   head=$(git -C "$r" rev-parse --verify --quiet "refs/heads/${br}" 2>/dev/null) || return 1
   [ -n "$head" ] || return 1
   cand=$(git -C "$r" reflog show --format='%H' "refs/heads/${br}" 2>/dev/null | tail -1)
   [ -n "$cand" ] && ! git -C "$r" merge-base --is-ancestor "$cand" "$head" 2>/dev/null && cand=""
   [ -z "$cand" ] && cand=$(git -C "$r" merge-base origin/HEAD "$head" 2>/dev/null)
-  local a
-  for a in "$base" "$seen"; do
+  # atime-1, never atime: `--before` is inclusive, and a `git commit` that lands in the SAME second
+  # the tool call opened would otherwise be folded into the anchor and the job's own work reported as
+  # zero. Erring one second wide can at worst re-admit a commit made in that same second.
+  # >1e9 (i.e. a real post-2001 epoch), not >0: git SILENTLY IGNORES a --before it considers
+  # implausible, and an ignored filter makes rev-list return the branch head — which would collapse
+  # the range and report a job with real commits as zero. A stamp we cannot trust is no stamp.
+  local a tsha=""
+  case "$atime" in ''|*[!0-9]*) atime=0 ;; esac
+  [ "$atime" -gt 1000000000 ] 2>/dev/null \
+    && tsha=$(git -C "$r" rev-list -1 --before="@$((atime - 1))" "refs/heads/${br}" 2>/dev/null)
+  for a in "$base" "$seen" "$tsha"; do
     [ -n "$a" ] || continue
     git -C "$r" merge-base --is-ancestor "$a" "$head" 2>/dev/null || continue
     if [ -z "$cand" ] || git -C "$r" merge-base --is-ancestor "$cand" "$a" 2>/dev/null; then cand="$a"; fi
@@ -1374,7 +1441,7 @@ capture_git_prs() {
   local -a elems=()
   local repo_url sha_end sha_start base_sha ss la ld fc co pr_url pr_number state merged_at ghj elem
   local bb_auth bb_slug branch bbj bbpr up remote_sha ahead git_churn
-  local cands cand_br cand_seen cand_start cand_end
+  local cands cand_br cand_seen cand_cross cand_time cand_t cand_start cand_end
   for r in "${uniq[@]}"; do
     repo_url=$(normalize_repo_url "$(git -C "$r" remote get-url origin 2>/dev/null)")
     # SCRUM-1394: the session-start HEAD baseline for this repo — where THIS session began.
@@ -1394,7 +1461,7 @@ capture_git_prs() {
     if cands=$(job_branch_candidates "$r" "$sid"); then
       # Candidates are already only branches this session advanced, best first; this walk just skips
       # one that has since been deleted or rewound. Falling off the end drops the repo.
-      while IFS=$'\t' read -r cand_br cand_seen cand_cross; do
+      while IFS=$'\t' read -r cand_cross cand_br cand_seen cand_time; do
         [ -n "$cand_br" ] || continue
         cand_end=$(git -C "$r" rev-parse --verify --quiet "refs/heads/${cand_br}" 2>/dev/null)
         [ -n "$cand_end" ] || continue
@@ -1403,10 +1470,29 @@ capture_git_prs() {
           # nothing else. Falling back to the branch creation point here would be unbounded: a
           # neighbour cutting a branch from an old commit during this call would hand us its whole
           # history. If that anchor is not even on the branch, this is not attributable — skip it.
-          git -C "$r" merge-base --is-ancestor "$cand_seen" "$cand_end" 2>/dev/null || continue
-          cand_start="$cand_seen"
+          cand_start=""
+          git -C "$r" merge-base --is-ancestor "$cand_seen" "$cand_end" 2>/dev/null && cand_start="$cand_seen"
+          # …and bound it by TIME. A sha anchor alone cannot say when the commits between it and the
+          # head were made, so a branch a neighbour advanced in an earlier gap was claimed whole
+          # (the session-open anchor spans the neighbour's entire session; a branch the neighbour
+          # cut from a commit we had been sitting on passes --is-ancestor trivially). Re-anchor at
+          # the newest commit that already existed when this tool call opened: everything older is
+          # by definition not this call's work. An empty answer means the whole branch postdates
+          # that instant, which is exactly `git checkout -b x && git commit` — keep the sha anchor.
+          case "$cand_time" in ''|*[!0-9]*) cand_time=0 ;; esac
+          if [ "$cand_time" -gt 1000000000 ] 2>/dev/null; then
+            # -1: see branch_start_sha — `--before` is inclusive, so a commit made in the same second
+            # the call opened must stay on this job's side of the anchor. And >1e9, because git
+            # silently ignores an implausible --before and then hands back the branch head.
+            cand_t=$(git -C "$r" rev-list -1 --before="@$((cand_time - 1))" "refs/heads/${cand_br}" 2>/dev/null)
+            if [ -n "$cand_t" ] && { [ -z "$cand_start" ] \
+                 || git -C "$r" merge-base --is-ancestor "$cand_start" "$cand_t" 2>/dev/null; }; then
+              cand_start="$cand_t"
+            fi
+          fi
+          [ -n "$cand_start" ] || continue
         else
-          cand_start=$(branch_start_sha "$r" "$cand_br" "$base_sha" "$cand_seen")
+          cand_start=$(branch_start_sha "$r" "$cand_br" "$base_sha" "$cand_seen" "$cand_time")
         fi
         [ -n "$cand_start" ] && [ "$cand_start" = "$cand_end" ] && continue
         branch="$cand_br"; sha_end="$cand_end"; sha_start="$cand_start"; break
