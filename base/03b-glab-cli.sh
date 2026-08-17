@@ -37,8 +37,14 @@ if ! command -v glab >/dev/null 2>&1; then
   esac
 
   glab_deb="/tmp/glab_${GLAB_VERSION}_linux_${glab_arch}.deb"
-  # Same curl flag set as 03 (fail hard on HTTP errors, bounded, retried).
-  curl -fsSL --connect-timeout 15 --max-time 120 --retry 3 --retry-connrefused \
+  # 03's flags, but NOT its --max-time 120: that bounds a ~2 KB keyring, whereas
+  # this asset is ~18 MB and a 120 s cap would hard-fail (and abort the provision)
+  # on any link slower than ~150 KB/s. Bound the failure mode that actually
+  # matters instead — a STALLED transfer: give up only if throughput stays under
+  # 1 KB/s for 30 s, with a generous absolute backstop. Same intent as 06's
+  # per-read `wget --timeout=30` on the (larger) Chrome .deb.
+  curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 30 \
+    --max-time 600 --retry 3 --retry-connrefused \
     -o "$glab_deb" \
     "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${glab_arch}.deb"
 
@@ -48,8 +54,11 @@ if ! command -v glab >/dev/null 2>&1; then
     die "glab: checksum mismatch for $glab_arch (expected $glab_sha, got $glab_got)"
   fi
 
-  # Single static binary + man pages + completions; no maintainer scripts, no
-  # services — apt is used for dpkg bookkeeping, not for dependency resolution.
+  # Single static binary + man pages; no maintainer scripts and no services, so
+  # nothing here starts or enables anything. `apt-get install <file>` rather than
+  # `dpkg -i` because the package declares `Depends: git` — already satisfied by
+  # 02-system.sh, but apt resolves it instead of leaving a half-configured dpkg
+  # state if that ever changes.
   apt-get install "${APT_OPTS[@]}" "$glab_deb"
   rm -f "$glab_deb"
 fi
