@@ -17,10 +17,13 @@
 #     install ONLY after the checksum matches, and a loud die with NO install on a
 #     mismatch or an unpinned architecture.
 #
-# Hermetic: no network, no root, nothing installed. The behaviour cases run with
-# PATH set to the stub dir ALONE (plus symlinks to the coreutils the step calls),
-# so `command -v glab` is decided by the sandbox and never by the host — the suite
-# stays green on a provisioned agent that legitimately has a real glab installed.
+# Hermetic: no network, no root, nothing installed, nothing written outside the
+# sandbox. The behaviour cases run with PATH set to the stub dir ALONE (plus
+# symlinks to the coreutils the step calls), so `command -v glab` is decided by
+# the sandbox and never by the host — the suite stays green on a provisioned agent
+# that legitimately has a real glab installed — and with TMPDIR pointed into the
+# sandbox, so the step's download dir never touches the host's real /tmp (where a
+# root-owned leftover from an aborted provision would otherwise false-fail it).
 # Stub-on-PATH idiom borrowed from the jq stub in test-19h-tmux-status.sh.
 # Run: bash base/tests/test-03b-glab-cli.sh
 set -uo pipefail
@@ -56,7 +59,10 @@ else
 fi
 
 # Ungated by construction: the step must not read any component/skip gate itself.
-if grep -qE 'has_component|SKIP_[A-Z_]+|INSTALL_[A-Z_]+' "$STEP"; then
+# Comments stripped first, same as the install-only scan below: the header
+# DOCUMENTS that it carries no SKIP_*/INSTALL_* gate, so scanning raw bytes would
+# fire on a prose edit that spells one of those names out (zero behaviour change).
+if sed 's/#.*//' "$STEP" | grep -qE 'has_component|SKIP_[A-Z_]+|INSTALL_[A-Z_]+'; then
   bad "step reads a component/SKIP_/INSTALL_ gate — glab must be unconditional"
 else
   ok "step reads no component/SKIP_/INSTALL_ gate (unconditional, like gh)"
@@ -88,15 +94,26 @@ SHA_ARM64="$(sed -n 's/^GLAB_SHA256_ARM64="\([0-9a-f]\{64\}\)"$/\1/p' "$STEP")"
 [ -n "$SHA_AMD64" ] && [ "$SHA_AMD64" != "$SHA_ARM64" ] \
   && ok "per-arch checksums differ" || bad "amd64/arm64 checksums identical — one arch is mispinned"
 
+# The download must be bounded in ABSOLUTE time, not just per attempt. curl's
+# --max-time applies to each attempt, so --max-time N --retry R alone allows
+# ~(R+1)*N of blocked provisioning; --retry-max-time is what caps the operation.
+# Comments stripped: the rationale above the curl call names the flag, so a raw
+# grep would pass on the prose alone even if the flag were dropped from the code.
+if sed 's/#.*//' "$STEP" | grep -q -- '--retry-max-time'; then
+  ok "download is bounded by --retry-max-time (retries cannot multiply --max-time)"
+else
+  bad "no --retry-max-time: --max-time is per-attempt, so --retry can multiply it into a provisioning hang"
+fi
+
 # ── sandbox: stubs for every external the step calls ─────────────────────────
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-BIN="$TMP/bin"; STUB_LOG="$TMP/log"; mkdir -p "$BIN" "$STUB_LOG"
+BIN="$TMP/bin"; STUB_LOG="$TMP/log"; DL="$TMP/dl"; mkdir -p "$BIN" "$STUB_LOG" "$DL"
 export BIN STUB_LOG
 
 # Real utilities the step (cut/rm/head) and the stubs themselves (bash for the
 # `#!/usr/bin/env bash` shebang, cat/chmod to fabricate the "installed" glab)
 # need, symlinked in so PATH can be the stub dir ALONE.
-for u in cut rm head sed bash cat chmod; do
+for u in cut rm head sed bash cat chmod mktemp; do
   p="$(command -v "$u")" && ln -sf "$p" "$BIN/$u" || { bad "missing coreutil for sandbox: $u"; exit 1; }
 done
 
@@ -137,10 +154,19 @@ chmod +x "$BIN"/curl "$BIN"/dpkg "$BIN"/sha256sum "$BIN"/apt-get
 # Echoes the step's combined output; the caller reads $? for die/no-die.
 run_step() { # $1 = STUB_ARCH, $2 = STUB_SHA
   rm -f "$STUB_LOG"/*.args
+  rm -rf "$DL"; mkdir -p "$DL"
   (
-    set -uo pipefail
-    export PATH="$BIN" STUB_ARCH="$1" STUB_SHA="$2" STUB_GLAB_VERSION="$VER"
-    APT_OPTS=(-y -qq)
+    # run.sh:15 is `set -euo pipefail` and SOURCES the step, so -e must be on
+    # here too: without it a command that fails mid-step keeps going in the
+    # sandbox while it would abort a real provision, and the guard reads green.
+    set -euo pipefail
+    # TMPDIR is what makes this hermetic — the step's `mktemp -d` lands inside
+    # the sandbox instead of the host's real /tmp.
+    export PATH="$BIN" TMPDIR="$DL" STUB_ARCH="$1" STUB_SHA="$2" STUB_GLAB_VERSION="$VER"
+    # The real array from 01-preflight.sh:51, not a shortened stand-in, so the
+    # recorded apt argv pins that the step passes the dpkg conf-old options through.
+    # shellcheck disable=SC2034  # read by the sourced step, not by this file
+    APT_OPTS=(-y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
     log()  { printf '%s\n' "$*"; }
     step() { printf '== %s\n' "$*"; }
     die()  { printf 'DIE: %s\n' "$*"; exit 1; }
@@ -149,6 +175,9 @@ run_step() { # $1 = STUB_ARCH, $2 = STUB_SHA
   ) 2>&1
 }
 called()     { [ -s "$STUB_LOG/$1.args" ]; }
+# The step downloads into a `mktemp -d` under TMPDIR and must remove that dir on
+# every exit path, so "cleaned up" == the sandbox download root is empty again.
+dl_clean()   { [ -z "$(ls -A "$DL" 2>/dev/null)" ]; }
 fresh_sandbox() { rm -f "$BIN/glab"; }
 
 # ── 5. idempotency: glab already present → pure no-op ────────────────────────
@@ -169,6 +198,7 @@ case "$out" in *"glab: glab $VER (preinstalled)"*) ok "already-installed: logs t
 for a in amd64 arm64; do
   fresh_sandbox
   eval "sha=\$SHA_${a^^}"
+  # shellcheck disable=SC2154  # assigned by the eval above
   out="$(run_step "$a" "$sha")"; rc=$?
   url="$(cat "$STUB_LOG/curl.args" 2>/dev/null)"
   [ "$rc" = "0" ] && ok "$a: exits clean" || bad "$a: rc=$rc ($out)"
@@ -182,7 +212,7 @@ for a in amd64 arm64; do
     *"glab_${VER}_linux_${a}.deb"*) ok "$a: apt-get installs the downloaded .deb" ;;
     *) bad "$a: apt-get did not receive the .deb ($(cat "$STUB_LOG/apt.args" 2>/dev/null))" ;;
   esac
-  [ -e "/tmp/glab_${VER}_linux_${a}.deb" ] && bad "$a: temp .deb left behind" || ok "$a: temp .deb cleaned up"
+  dl_clean && ok "$a: temp download dir cleaned up" || bad "$a: temp download dir left behind ($(ls -A "$DL"))"
   case "$out" in *"glab: glab $VER (stub)"*) ok "$a: logs the installed version" ;;
                  *) bad "$a: version log line missing ($out)" ;; esac
 done
@@ -195,8 +225,8 @@ out="$(run_step amd64 "$SHA_ARM64")"; rc=$?
 called apt && bad "checksum mismatch: installed unverified bytes" || ok "checksum mismatch: no install"
 case "$out" in *"DIE: glab: checksum mismatch"*) ok "checksum mismatch: names the failure" ;;
                *) bad "checksum mismatch: unclear failure output ($out)" ;; esac
-[ -e "/tmp/glab_${VER}_linux_amd64.deb" ] && bad "checksum mismatch: bad .deb left in /tmp" \
-  || ok "checksum mismatch: bad .deb removed"
+dl_clean && ok "checksum mismatch: bad .deb removed" \
+  || bad "checksum mismatch: bad .deb left behind ($(ls -A "$DL"))"
 
 # ── 8. unpinned architecture → die before touching the network ───────────────
 fresh_sandbox
