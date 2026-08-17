@@ -31,6 +31,7 @@ run_variant_hook "early-setup"
 # ── Install phase ───────────────────────────────────────────────────────────
 . "$BASE_DIR/02-system.sh"
 . "$BASE_DIR/03-gh-cli.sh"
+. "$BASE_DIR/03b-glab-cli.sh"        # GitLab CLI — ungated twin of 03 (SCRUM-1958)
 . "$BASE_DIR/04-desktop.sh"
 . "$BASE_DIR/05-node.sh"
 . "$BASE_DIR/06-chrome.sh"           # gated on INSTALL_CHROME
