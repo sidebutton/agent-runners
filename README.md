@@ -187,6 +187,8 @@ variant ships no hooks — component behaviour is driven from `run.sh`.
 | `SIDEBUTTON_DEFAULT_REGISTRY` | no | — | Per-account knowledge-pack registry (git URL); additive on top of the `agents` pack |
 | `SIDEBUTTON_DEFAULT_REGISTRY_TOKEN` | no | — | Auth token for a private registry; delivered via the secrets fetch |
 | `SIDEBUTTON_PLUGINS` | no | — | Comma plugin slugs (`plugins.json`); selected by the portal per role. Requires `sidebutton-server` |
+| `CLAUDE_PLUGINS` | no | — | Comma `name@marketplace` refs for **Claude Code's own** plugin store — a different system from `SIDEBUTTON_PLUGINS`. Installed by `base/19i-claude-plugins.sh`; needs the `claude-code` component |
+| `CLAUDE_PLUGIN_MARKETPLACES` | no | — | Comma `alias=owner/repo` — where to fetch the marketplaces `CLAUDE_PLUGINS` names, for any the box does not already know |
 
 ## No legacy
 

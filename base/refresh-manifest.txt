@@ -54,3 +54,4 @@
 19f-component-config.sh
 19g-agent-reboot.sh
 19h-tmux-status.sh
+19i-claude-plugins.sh
