@@ -122,10 +122,24 @@ _cc_installed_tsv() {
 # It also matches how both readers bound it — claude-plugins-ledger.ts and
 # claude-plugins.ts both `.slice(0, 300)`, i.e. from the front; truncating from
 # the other end here meant the two halves of the pipeline discarded opposite
-# halves of the message. A cut can land mid-UTF-8-sequence; jq --arg substitutes
-# U+FFFD rather than failing (verified), so the entry still lands in the ledger.
+# halves of the message.
+#
+# TRUNCATE FIRST, IN THE SHELL — do NOT end this in `… | head -c 300`. head exits
+# after its 300th byte, so on a CLI failure whose output exceeds the 64K pipe
+# buffer (a stack trace, a registry dump) sed is still writing when the pipe
+# closes and dies of SIGPIPE. Under `set -o pipefail` that is a non-zero
+# PIPELINE, and this runs in an ASSIGNMENT, which `set -e` does not forgive: the
+# sourced provision aborts at 19i with rc=141 — no ledger, and 20-mark-installed
+# never runs. Reproduced against a 720K error before this guard existed. The
+# whole point of the step is that a failed plugin is recorded, not fatal, so the
+# bound has to be taken with no early-closing reader in the pipeline at all.
+# Slicing by character (not `head`'s bytes) also stops a cut landing mid-UTF-8
+# and matches how both TS readers `.slice(0, 300)`.
 _cc_oneline() {
-  printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/[[:space:]]\{2,\}/ /g; s/^ //; s/ $//' | head -c 300
+  local s="${1:0:4000}"
+  s="$(printf '%s' "$s" | tr '\n\r\t' '   ' | sed 's/[[:space:]]\{2,\}/ /g; s/^ //; s/ $//')" \
+    || s="${1:0:300}"
+  printf '%s' "${s:0:300}"
 }
 
 # Persist a NORMALISED value (already validated above) in systemd EnvironmentFile

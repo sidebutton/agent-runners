@@ -191,7 +191,14 @@ case "${1:-}" in
       # keep the head when it bounds this to 300 bytes; keeping the tail stores only
       # the noise, which is what the operator gets in the chip tooltip.
       echo "Failed to install plugin \"$ref\": Plugin \"$name\" not found in marketplace \"$mkt\"." >&2
-      for _n in $(seq 1 20); do
+      # CC_VERBOSE_FAIL: pad past the 64K pipe buffer. A bound taken with a
+      # reader that exits early (`| head -c 300`) makes the writer ahead of it
+      # die of SIGPIPE, which `set -o pipefail` turns into a failed assignment
+      # and `set -e` turns into an aborted provision. 20 lines cannot reach that;
+      # 6000 can.
+      _pad=20
+      [ "${CC_VERBOSE_FAIL:-0}" = "1" ] && _pad=6000
+      for _n in $(seq 1 "$_pad"); do
         echo "  at step ${_n}: resolving manifest entries, this line is padding to push the reason out of a 300-byte tail window" >&2
       done
       exit 1
@@ -313,6 +320,48 @@ jq -e '.[]|select(.name=="ghost")|.error|startswith("Failed to install plugin")'
   || bad "the error was truncated from the wrong end — reason lost: $(jq -r '.[]|select(.name=="ghost")|.error' <<<"$(ledger "$B4")")"
 [ "$(status_of "$B4" beta)" = "installed" ] \
   && ok "entries AFTER the failure are still processed" || bad "the failure stopped the rest of the list"
+
+# A VERBOSE failure — bigger than the 64K pipe buffer — must still be recorded,
+# not fatal. This is not a variant of the case above: bounding the message with
+# `… | head -c 300` makes the reader close the pipe first, so sed dies of
+# SIGPIPE, and under `set -o pipefail` that non-zero pipeline lands in an
+# ASSIGNMENT, which `set -e` does not forgive. The step is SOURCED, so the whole
+# provision aborts at 19i — no ledger, and 20-mark-installed never runs. The
+# stub's 20 padding lines above are ~2K and stay inside the buffer, so only a
+# payload this size exercises it.
+#
+# It must run in a REAL script shell. Job control (`set -m`, on in an
+# interactive/`-c` parent) changes the outcome, so a case that passes when driven
+# by hand can still abort a cloud-init provision. `bash <file>` is how run.sh is
+# actually executed.
+B4b="$(new_box)"
+printf '%s\n' '{"name":"claude-plugins-official","source":"github","repo":"anthropics/claude-plugins-official"}' > "$B4b/mkt.ndjson"
+printf 'ghost\n' > "$B4b/missing.txt"
+: > "$B4b/claude.log"
+cat > "$B4b/driver.sh" <<DRVEOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="$BIN:\$PATH"
+export LOG_FILE="$TMP/install.log" AGENT_USER="$(id -un)" AGENT_HOME="$B4b" BASE_DIR="$BASE"
+export CC_LOG="$B4b/claude.log" CC_MKT_STATE="$B4b/mkt.ndjson" CC_INST_STATE="$B4b/inst.ndjson"
+export CC_MANIFEST_NAMES="$B4b/names.tsv" CC_MISSING="$B4b/missing.txt" CC_VERBOSE_FAIL=1
+export CLAUDE_PLUGINS='ghost,beta'
+. "$BASE/lib.sh"
+. "$STEP"
+echo "REACHED-THE-NEXT-STEP"
+DRVEOF
+if bash "$B4b/driver.sh" >"$B4b/run.out" 2>&1; then
+  ok "a >64K CLI error does not abort the sourced provision"
+else
+  bad "a >64K CLI error aborted the provision (rc=$?) — 20-mark-installed would never run"
+fi
+grep -q 'REACHED-THE-NEXT-STEP' "$B4b/run.out" \
+  && ok "provisioning continues past 19i after a verbose failure" || bad "the step never returned — provisioning stopped at 19i"
+[ "$(status_of "$B4b" ghost)" = "failed" ] && ok "the verbose failure is still recorded as failed" || bad "verbose failure not recorded: $(ledger "$B4b")"
+jq -e '.[]|select(.name=="ghost")|.error|startswith("Failed to install plugin") and (length<=300)' <<<"$(ledger "$B4b")" >/dev/null 2>&1 \
+  && ok "a verbose error is bounded to 300 chars, reason first" || bad "verbose error not bounded/reason lost: $(jq -r '.[]|select(.name=="ghost")|.error|length' <<<"$(ledger "$B4b")" 2>/dev/null)"
+[ "$(status_of "$B4b" beta)" = "installed" ] \
+  && ok "entries after a verbose failure are still processed" || bad "the verbose failure stopped the rest of the list"
 
 # ── 10. marketplace add + alias resolved by REPO, not by the operator's label ─
 # The manifest names itself: `marketplace add Acme/claude-packs` registers
