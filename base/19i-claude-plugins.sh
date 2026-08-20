@@ -148,10 +148,16 @@ _cc_oneline() {
 # sed replacement can never carry a delimiter, a quote or a newline.
 _cc_persist_env() {
   local key="$1" val="$2"
+  # Both writes are `|| log`, never bare: an unguarded failing simple command in a
+  # sourced step aborts the whole provision under run.sh's `set -e`. Losing the
+  # persist costs the refresh re-run its input — bad, and worth a WARN — but it is
+  # not worth killing a provision whose plugins are already installed.
   if grep -q "^${key}=" "$CC_ENV_FILE" 2>/dev/null; then
-    sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$CC_ENV_FILE"
+    sed -i "s|^${key}=.*|${key}=\"${val}\"|" "$CC_ENV_FILE" 2>/dev/null \
+      || log "WARN: could not update ${key} in ${CC_ENV_FILE} — the refresh re-run will not see it"
   else
-    printf '%s="%s"\n' "$key" "$val" >> "$CC_ENV_FILE"
+    printf '%s="%s"\n' "$key" "$val" >> "$CC_ENV_FILE" 2>/dev/null \
+      || log "WARN: could not append ${key} to ${CC_ENV_FILE} — the refresh re-run will not see it"
   fi
   return 0
 }
@@ -176,10 +182,6 @@ else
   for _cc_raw in "${_cc_raw_refs[@]}"; do
     _cc_tok="$(printf '%s' "$_cc_raw" | tr -d '[:space:]')"
     if [ -z "$_cc_tok" ]; then continue; fi
-    if [ "${#CC_REQ_NAME[@]}" -ge "$CC_MAX_PLUGINS" ]; then
-      CC_BAD_REF+=("$_cc_tok"); CC_BAD_WHY+=("over the ${CC_MAX_PLUGINS}-plugin cap — not installed")
-      continue
-    fi
     # `name` or `name@marketplace`. A trailing `@` is a typo, not "use the
     # default": the empty half fails the pattern and is rejected, as in the portal.
     _cc_name="${_cc_tok%%@*}"
@@ -193,7 +195,20 @@ else
       log "WARN: Claude Code plugin reference failed re-validation — rejected, not executed"
       continue
     fi
+    # DEDUPE BEFORE THE CAP, never after. A repeat costs no install and must not
+    # consume a slot — but more importantly a repeat rejected for being "over the
+    # cap" is recorded with the RAW TOKEN as its name, and a well-formed repeat's
+    # raw token is exactly the normalised `name@marketplace` of the entry already
+    # accepted. The portal keys its chips by that string
+    # (website/src/pages/portal/agents/[id].astro), and a `rejected` row is emitted
+    # after the requested rows, so `new Map()` lets it WIN: a plugin that installed
+    # cleanly renders amber "rejected" and is counted in "N did not install".
+    # Checking `CC_SEEN` first makes the duplicate a no-op, which is what it is.
     if [ -n "${CC_SEEN[${_cc_name}@${_cc_mkt}]:-}" ]; then continue; fi
+    if [ "${#CC_REQ_NAME[@]}" -ge "$CC_MAX_PLUGINS" ]; then
+      CC_BAD_REF+=("$_cc_tok"); CC_BAD_WHY+=("over the ${CC_MAX_PLUGINS}-plugin cap — not installed")
+      continue
+    fi
     CC_SEEN["${_cc_name}@${_cc_mkt}"]=1
     CC_REQ_NAME+=("$_cc_name"); CC_REQ_MKT+=("$_cc_mkt")
   done
@@ -339,7 +354,24 @@ else
   # plugin the CLI reports as installed IS installed, whatever this run did. The
   # `marketplace` field reports the REQUESTED alias (what the operator asked for
   # and what the portal stored); `version` and `status` come from the box.
-  _cc_nd="$(mktemp)"
+  #
+  # STAGE THE LEDGER WITHOUT AN UNGUARDED COMMAND — same rule as _cc_oneline above,
+  # and the same failure class. A bare `_cc_nd="$(mktemp)"` is an ASSIGNMENT whose
+  # command-substitution status `set -e` does not forgive, and a bare
+  # `mkdir -p "$CC_LEDGER_DIR"` is an unguarded simple command; either one failing
+  # (a full or read-only /tmp, or a stray FILE at ~/.sidebutton) aborts the sourced
+  # provision right here — no ledger written and 20-mark-installed.sh never
+  # reached, so the box never marks itself installed. Both reproduced: rc=1, "NO
+  # LEDGER — step died mid-way". That is the exact opposite of AC4 and of this
+  # file's own "SOURCED, SO IT MUST NEVER EXIT" contract, and 19b-plugins.sh
+  # already guards its own `mktemp -d` this way. Note the failure is MASKED under
+  # an interactive/`-c` parent (job control), so it must be checked with a real
+  # script shell — see the same warning on _cc_oneline.
+  if ! _cc_nd="$(mktemp 2>/dev/null)"; then _cc_nd=""; fi
+  if [ -z "$_cc_nd" ] || ! mkdir -p "$CC_LEDGER_DIR" 2>/dev/null; then
+    rm -f "${_cc_nd:-/nonexistent}" 2>/dev/null || true
+    log "WARN: could not stage the Claude Code plugin ledger (temp file or ${CC_LEDGER_DIR}) — not written, provisioning continues"
+  else
   for _cc_i in "${!CC_REQ_NAME[@]}"; do
     _cc_name="${CC_REQ_NAME[$_cc_i]}"
     _cc_mkt="${CC_REQ_MKT[$_cc_i]}"
@@ -360,7 +392,6 @@ else
       >> "$_cc_nd" 2>/dev/null || true
   done
 
-  mkdir -p "$CC_LEDGER_DIR"
   if jq -s '.' "$_cc_nd" > "${CC_LEDGER}.tmp" 2>/dev/null && [ -s "${CC_LEDGER}.tmp" ]; then
     mv "${CC_LEDGER}.tmp" "$CC_LEDGER"
     chown "${AGENT_USER}:${AGENT_USER}" "$CC_LEDGER_DIR" "$CC_LEDGER" 2>/dev/null || true
@@ -370,4 +401,5 @@ else
     log "WARN: could not write the Claude Code plugin ledger (${CC_LEDGER})"
   fi
   rm -f "$_cc_nd"
+  fi
 fi

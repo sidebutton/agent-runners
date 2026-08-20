@@ -433,6 +433,65 @@ grep -q 'clone_args=(' "$STEP_19B_CODE" \
 grep -q 'SC2086' "$STEP_19B_CODE" \
   && bad "19b still carries a word-splitting shellcheck suppression" || ok "19b no longer needs the SC2086 suppression"
 
+# ── 13. staging the ledger must never abort the sourced provision ───────────
+# Same rule as the >64K case in §9, different commands. `_cc_nd="$(mktemp)"` is an
+# ASSIGNMENT whose command-substitution status `set -e` does not forgive, and
+# `mkdir -p "$CC_LEDGER_DIR"` is an unguarded simple command — so a full/read-only
+# /tmp, or a stray FILE where ~/.sidebutton should be, aborted the whole provision
+# at 19i with no ledger and 20-mark-installed never reached. Both drive a REAL
+# script shell for the §9 job-control reason: under an interactive/`-c` parent
+# these cases PASS even when the step is broken.
+_stage_case() {                   # _stage_case <label> <extra-PATH-dir> <pre-hook>
+  local label="$1" extra="$2" pre="$3" h
+  h="$(new_box)"
+  eval "$pre"
+  cat > "$h/driver.sh" <<DRVEOF
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="${extra}${extra:+:}$BIN:\$PATH"
+export LOG_FILE="$TMP/install.log" AGENT_USER="$(id -un)" AGENT_HOME="$h" BASE_DIR="$BASE"
+export CC_LOG="$h/claude.log" CC_MKT_STATE="$h/mkt.ndjson" CC_INST_STATE="$h/inst.ndjson"
+export CC_MANIFEST_NAMES="$h/names.tsv" CC_MISSING="$h/missing.txt"
+export CLAUDE_PLUGINS='alpha'
+. "$BASE/lib.sh"
+. "$STEP"
+echo "REACHED-THE-NEXT-STEP"
+DRVEOF
+  if bash "$h/driver.sh" >"$h/run.out" 2>&1 && grep -q 'REACHED-THE-NEXT-STEP' "$h/run.out"; then
+    ok "${label}: the step returns and provisioning continues"
+  else
+    bad "${label}: the step aborted the provision — 20-mark-installed would never run"
+  fi
+  grep -q 'could not stage the Claude Code plugin ledger' "$h/run.out" \
+    && ok "${label}: logs why the ledger was skipped" || bad "${label}: skipped the ledger silently"
+}
+FAILMK="$TMP/failmktemp"; mkdir -p "$FAILMK"
+printf '#!/bin/bash\necho "mktemp: failed to create file" >&2\nexit 1\n' > "$FAILMK/mktemp"
+chmod +x "$FAILMK/mktemp"
+_stage_case "mktemp fails" "$FAILMK" ':'
+_stage_case "~/.sidebutton is a file" "" 'rm -rf "$h/.sidebutton"; : > "$h/.sidebutton"'
+
+# ── 14. dedupe runs BEFORE the cap ──────────────────────────────────────────
+# A repeat must be a no-op, not a cap victim. An over-cap entry is recorded with
+# the RAW TOKEN as its name, and a well-formed repeat's raw token is exactly the
+# normalised `name@marketplace` already accepted — which is the key the portal
+# uses for its chips ([id].astro). Rejected rows are emitted after requested rows,
+# so `new Map()` would let the bogus "rejected" WIN and paint an installed plugin
+# amber. Cap still has to bite for genuinely distinct refs.
+B8="$(new_box)"
+dup_refs=""; for i in $(seq 1 20); do dup_refs="${dup_refs:+$dup_refs,}p${i}"; done
+run_step "$B8" "${dup_refs},p1" >/dev/null 2>&1
+[ "$(jq '[.[]|select(.status=="rejected")]|length' <<<"$(ledger "$B8")" 2>/dev/null)" = "0" ] \
+  && ok "a duplicate past the cap is a no-op, not a bogus 'rejected' row" \
+  || bad "a duplicate produced a rejected row that would override the real chip: $(ledger "$B8")"
+[ "$(jq 'length' <<<"$(ledger "$B8")" 2>/dev/null)" = "20" ] \
+  && ok "the duplicate consumed no cap slot" || bad "duplicate changed the ledger length"
+B9="$(new_box)"
+many=""; for i in $(seq 1 21); do many="${many:+$many,}q${i}"; done
+run_step "$B9" "$many" >/dev/null 2>&1
+jq -e '.[]|select(.status=="rejected")|select(.error|test("cap"))' <<<"$(ledger "$B9")" >/dev/null 2>&1 \
+  && ok "21 DISTINCT refs still trip the ${CC_MAX:-20}-plugin cap" || bad "the cap no longer bites: $(ledger "$B9")"
+
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASS"; else echo "SOME FAILED"; fi
 exit "$fail"
