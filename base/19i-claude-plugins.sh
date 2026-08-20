@@ -86,8 +86,16 @@ CC_SOURCE_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$'
 # Run a command as the agent user with every value bound to a POSITIONAL — see
 # the "never a shell string" note above. `-s /bin/bash` pins the shell so an
 # operator-changed login shell cannot change the argv contract.
+#
+# The `--` is load-bearing. util-linux `su` parses options with GNU getopt
+# PERMUTATION: with no terminator it keeps scanning past the username and eats
+# dash-arguments meant for the command. `claude plugin list --json` dies on
+# `su: unrecognized option '--json'`, and `claude plugin install <ref> -s user`
+# is worse — `-s` is a real su option, so su swallows it as --shell and then
+# tries to exec a shell literally named `user`. Both failures are total and
+# silent-looking (every plugin just lands as `failed`). `--` ends the scan.
 _cc_as_agent() {
-  su - "$AGENT_USER" -s /bin/bash -c 'exec "$@"' _ "$@"
+  su - "$AGENT_USER" -s /bin/bash -c 'exec "$@"' -- _ "$@"
 }
 
 # `<alias>\t<repo>` for every marketplace already on the box. Local state only —

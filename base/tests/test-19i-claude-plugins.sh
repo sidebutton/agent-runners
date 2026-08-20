@@ -96,28 +96,58 @@ for f in "$STEP_CODE" "$STEP_19B_CODE"; do
     ok "${n}: no interpolated su -c command string"
   fi
 done
-grep -qF -e "-c 'exec \"\$@\"' _" "$STEP_CODE"     && ok "19i uses the argv form (-c 'exec \"\$@\"' _ …)" || bad "19i is not using the argv su form"
-grep -qF -e "-c 'exec \"\$@\"' _" "$STEP_19B_CODE" && ok "19b uses the argv form (-c 'exec \"\$@\"' _ …)" || bad "19b is not using the argv su form"
+# The `--` is not style. util-linux su permutes options past the username, so
+# without a terminator it swallows the command's own flags (`--json`, `--depth`,
+# `-d`) — and `-s user` worst of all, because `-s` IS an su option. Static check
+# here, behavioural proof via the permuting stub below.
+grep -qF -e "-c 'exec \"\$@\"' -- _" "$STEP_CODE"     && ok "19i uses the argv form, option-terminated (-c 'exec \"\$@\"' -- _ …)" || bad "19i is not using the option-terminated argv su form"
+grep -qF -e "-c 'exec \"\$@\"' -- _" "$STEP_19B_CODE" && ok "19b uses the argv form, option-terminated (-c 'exec \"\$@\"' -- _ …)" || bad "19b is not using the option-terminated argv su form"
 
 # ── 3. stubs ─────────────────────────────────────────────────────────────────
 BIN="$TMP/bin"; mkdir -p "$BIN"
 
 # `su` stub. Accepts ONLY the argv form the steps are required to use, so a
 # regression to `su -c "string"` fails here loudly instead of silently working.
+#
+# It also models the half of util-linux `su` that a naive stub hides: GNU getopt
+# PERMUTATION. Real su keeps scanning for its own options PAST the username, so
+# without a `--` terminator it eats the command's flags — `mktemp -d` becomes
+# `su: invalid option -- 'd'`, `claude plugin list --json` becomes `unrecognized
+# option '--json'`, and `claude plugin install ref -s user` is worse still: `-s`
+# is a real su option, silently swallowed as --shell so su tries to exec a shell
+# named `user` and the flag never reaches the CLI. Every one of those failures
+# looks like "the plugin just didn't install". Verified against util-linux
+# 2.39.3 (Ubuntu 24.04, what the agents run). So: options before `--` are
+# consumed here exactly as su would consume them, and an unknown one is fatal.
 cat > "$BIN/su" <<'SUEOF'
 #!/usr/bin/env bash
-args=("$@"); i=0; body=""
+args=("$@"); operands=(); body=""; term=0; i=0
 while [ $i -lt ${#args[@]} ]; do
-  if [ "${args[$i]}" = "-c" ]; then body="${args[$((i+1))]}"; fi
-  if [ "${args[$i]}" = "_" ]; then break; fi
-  i=$((i+1))
+  a="${args[$i]}"
+  if [ "$term" -eq 0 ]; then
+    case "$a" in
+      --) term=1; i=$((i+1)); continue ;;
+      -)  operands+=("$a"); i=$((i+1)); continue ;;        # the login dash is an operand
+      -c|--command) body="${args[$((i+1))]:-}"; i=$((i+2)); continue ;;
+      -s|--shell|-g|--group|-G|--supp-group|-w|--whitelist-environment)
+          i=$((i+2)); continue ;;                          # option + its value
+      -l|--login|-m|-p|--preserve-environment|-P|--pty|-f|--fast|-h|--help|-V|--version)
+          i=$((i+1)); continue ;;
+      -*) echo "su stub: unrecognized option '$a' — real su permutes past the username; terminate with '--'" >&2
+          exit 96 ;;
+    esac
+  fi
+  operands+=("$a"); i=$((i+1))
 done
 if [ "$body" != 'exec "$@"' ]; then
   echo "su stub: refusing a non-argv -c body: $body" >&2
   exit 97
 fi
-if [ $i -ge ${#args[@]} ]; then echo "su stub: no _ sentinel" >&2; exit 98; fi
-exec "${args[@]:$((i+1))}"
+k=0
+[ "${operands[$k]:-}" = "-" ] && k=$((k+1))   # login dash
+k=$((k+1))                                    # username
+if [ "${operands[$k]:-}" != "_" ]; then echo "su stub: no _ sentinel" >&2; exit 98; fi
+exec "${operands[@]:$((k+1))}"
 SUEOF
 chmod +x "$BIN/su"
 
@@ -307,7 +337,10 @@ for d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
     [ -e "$NOCLAUDE/$b" ] || ln -s "$f" "$NOCLAUDE/$b" 2>/dev/null || true
   done
 done
-cp "$BIN/su" "$NOCLAUDE/su"
+# The farm loop above already symlinked the system `su` here; `cp` over that
+# symlink would write through it to /usr/bin/su (permission denied, and noise on
+# stderr). Replace the link with our own stub instead.
+ln -sf "$BIN/su" "$NOCLAUDE/su"
 command -v claude >/dev/null 2>&1 && PATH="$NOCLAUDE" command -v claude >/dev/null 2>&1 \
   && bad "the no-claude PATH still resolves claude — case 11 proves nothing"
 if (

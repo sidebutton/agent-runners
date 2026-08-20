@@ -38,8 +38,16 @@ PLUGIN_APT_RE='^[a-z0-9][a-z0-9.+-]{0,99}$'
 
 # Run a command as the agent user with each value bound to a POSITIONAL, so the
 # value is never re-parsed as shell. Twin of _cc_as_agent in base/19i.
+#
+# The `--` is load-bearing, not decoration. util-linux `su` parses its options
+# with GNU getopt PERMUTATION: without a terminator it keeps scanning past the
+# username and eats any dash-argument meant for the command. `mktemp -d` dies on
+# `su: invalid option -- 'd'`, `git clone --depth 1` on `unrecognized option
+# '--depth'`, and `claude plugin install ref -s user` is worse still — `-s` is a
+# real su option, so it is silently swallowed as --shell and never reaches the
+# command. `--` stops the scan; everything after it is an operand.
 _19b_as_agent() {
-  su - "$AGENT_USER" -s /bin/bash -c 'exec "$@"' _ "$@"
+  su - "$AGENT_USER" -s /bin/bash -c 'exec "$@"' -- _ "$@"
 }
 
 if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
