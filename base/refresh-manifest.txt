@@ -25,7 +25,17 @@
 #   18-heartbeat.sh    re-registers the agent + swaps in a fresh sb_token
 #   18b-heartbeat-timer / 20-mark-installed  install-lifecycle, not artifacts
 #   01..13, 15..17     OS/toolchain/desktop install + one-time user/workspace setup
-#                      — EXCEPT 15b (listed below), see its carve-out note.
+#                      — EXCEPT 12b and 15b (listed below), see their carve-out notes.
+#
+# CARVE-OUT — 12b-git-credential-helpers.sh is listed despite sitting in the 01..13
+# range. It installs nothing and sets up no user/workspace: it is a set of idempotent
+# `git config` writes into ~/.gitconfig, and it MUST re-run on live agents or a helper
+# added or corrected after provisioning never reaches the existing fleet — which is
+# exactly how gitlab.com ended up with no credential helper at all while `glab` was
+# already installed (03b), and every private GitLab clone died with "could not read
+# Username". The helpers hold no credential: each sources ~/.agent-env at call time, so
+# re-running only rewrites the indirection, never a token. Splitting it out of
+# 12-workspace.sh is what makes this safe — 12 itself stays excluded.
 #
 # CARVE-OUT — 15b-claude-onboarding.sh is listed despite sitting in the 15..17 range.
 # It installs nothing and sets up no user/workspace: it is a pure jq merge into
@@ -45,6 +55,7 @@
 # the CATALOG version), NOT as a manifest step (which would wrongly gate the pack on
 # the agent-runners fingerprint and re-run the heavy provisioning chown/install).
 
+12b-git-credential-helpers.sh
 14-claude-stop-hook.sh
 15b-claude-onboarding.sh
 18c-git-telemetry-timer.sh

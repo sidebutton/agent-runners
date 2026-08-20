@@ -10,8 +10,9 @@
 #     live-agent refresh path.
 #   * INSTALL ONLY — no `auth login`, no credential helper, no GITLAB_TOKEN read
 #     anywhere in the step: a fresh image must carry glab with NO GitLab
-#     connection configured. Auth is a separate story (SCRUM-1952), gated on
-#     GITLAB_TOKEN at boot; baking it here would put a credential in the image.
+#     connection configured. Git auth is a separate story, owned by
+#     12b-git-credential-helpers.sh (a stateless call-time credential helper — no
+#     `glab auth login` anywhere); baking it here would put a credential in the image.
 #   * BEHAVIOUR — the step is EXECUTED against stubbed curl/apt-get/dpkg/sha256sum:
 #     idempotent skip when glab is present, correct per-arch asset + checksum,
 #     install ONLY after the checksum matches, and a loud die with NO install on a
