@@ -114,8 +114,18 @@ _cc_installed_tsv() {
 }
 
 # One line of CLI output, trimmed, safe to put in a JSON string.
+#
+# `head`, not `tail`: the CLI puts the reason FIRST ("Plugin "ghost" not found in
+# marketplace …") and any transcript or usage noise after it, so keeping the last
+# 300 bytes throws away the only part worth reading. This string is the entire
+# content of the chip tooltip the agent-detail copy tells the operator to hover.
+# It also matches how both readers bound it — claude-plugins-ledger.ts and
+# claude-plugins.ts both `.slice(0, 300)`, i.e. from the front; truncating from
+# the other end here meant the two halves of the pipeline discarded opposite
+# halves of the message. A cut can land mid-UTF-8-sequence; jq --arg substitutes
+# U+FFFD rather than failing (verified), so the entry still lands in the ledger.
 _cc_oneline() {
-  printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/[[:space:]]\{2,\}/ /g; s/^ //; s/ $//' | tail -c 300
+  printf '%s' "$1" | tr '\n\r\t' '   ' | sed 's/[[:space:]]\{2,\}/ /g; s/^ //; s/ $//' | head -c 300
 }
 
 # Persist a NORMALISED value (already validated above) in systemd EnvironmentFile

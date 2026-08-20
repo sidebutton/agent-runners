@@ -187,7 +187,13 @@ case "${1:-}" in
       exit 1
     fi
     if grep -qxF "$name" "$CC_MISSING" 2>/dev/null; then
+      # Reason FIRST, then a long transcript — the real CLI's shape. The step has to
+      # keep the head when it bounds this to 300 bytes; keeping the tail stores only
+      # the noise, which is what the operator gets in the chip tooltip.
       echo "Failed to install plugin \"$ref\": Plugin \"$name\" not found in marketplace \"$mkt\"." >&2
+      for _n in $(seq 1 20); do
+        echo "  at step ${_n}: resolving manifest entries, this line is padding to push the reason out of a 300-byte tail window" >&2
+      done
       exit 1
     fi
     if ! jq -e --arg i "$ref" 'select(.id==$i)' "$CC_INST_STATE" >/dev/null 2>&1; then
@@ -298,6 +304,13 @@ if run_step "$B4" 'alpha,ghost,beta'; then ok "missing-plugin path: a non-zero i
 [ "$(status_of "$B4" ghost)" = "failed" ] && ok "missing plugin recorded status=failed" || bad "missing plugin not recorded as failed: $(ledger "$B4")"
 jq -e '.[]|select(.name=="ghost")|.error|test("not found in marketplace")' <<<"$(ledger "$B4")" >/dev/null 2>&1 \
   && ok "the CLI's own error is captured in the ledger" || bad "the install error was not captured"
+# The stub's failure is reason-first then 20 lines of padding, so a tail-truncation
+# keeps only the padding. That string IS the chip tooltip the agent-detail copy tells
+# the operator to hover, and both readers slice(0,300) from the front — so the step
+# has to bound it from the front too.
+jq -e '.[]|select(.name=="ghost")|.error|startswith("Failed to install plugin")' <<<"$(ledger "$B4")" >/dev/null 2>&1 \
+  && ok "a long CLI error is truncated from the FRONT, keeping the reason" \
+  || bad "the error was truncated from the wrong end — reason lost: $(jq -r '.[]|select(.name=="ghost")|.error' <<<"$(ledger "$B4")")"
 [ "$(status_of "$B4" beta)" = "installed" ] \
   && ok "entries AFTER the failure are still processed" || bad "the failure stopped the rest of the list"
 
