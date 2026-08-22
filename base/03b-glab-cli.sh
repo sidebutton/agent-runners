@@ -8,8 +8,11 @@
 #
 # INSTALL ONLY. No `glab auth login`, no credential helper, no GITLAB_TOKEN read:
 # a fresh instance must come up with glab present and NO GitLab connection
-# configured. Auth is conditional on GITLAB_TOKEN at boot and owned by a separate
-# step (SCRUM-1952) — adding it here would bake a credential into the golden image.
+# configured. Git auth is owned by a separate step:
+# 12b-git-credential-helpers.sh registers a STATELESS gitlab.com credential helper
+# that reads GITLAB_TOKEN from ~/.agent-env at CALL time, so there is no `glab auth
+# login` anywhere and no token is needed at image-build time. Adding auth here would
+# bake a credential into the golden image.
 #
 # Why a pinned release .deb instead of 03's apt-repo idiom: gitlab-org/cli ships no
 # apt repo, and pinning is what makes the golden image reproducible — the same

@@ -68,6 +68,7 @@ fi
 
 . "$BASE_DIR/11-polkit.sh"
 . "$BASE_DIR/12-workspace.sh"
+. "$BASE_DIR/12b-git-credential-helpers.sh"   # per-host git credential helpers — refresh-safe twin of 12
 . "$BASE_DIR/13-knowledge-packs.sh"  # gated on SKIP_KNOWLEDGE_PACKS
 . "$BASE_DIR/14-claude-stop-hook.sh"
 . "$BASE_DIR/15-claude-mcp.sh"       # gated on SKIP_SIDEBUTTON_SERVER
