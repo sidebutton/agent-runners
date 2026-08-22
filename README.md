@@ -222,6 +222,14 @@ The manifest is the source of truth for which steps are safe to re-run on a live
 box — token-rotating / re-registering / OS-install steps are deliberately
 excluded. Add new refresh-safe steps there so they reach existing agents.
 
+**It takes no arguments.** `sb-self-update --help` / `-h` prints usage and exits
+`0` without fetching, writing or creating a temp dir, so the wrapper is safe to
+probe on a live agent (with or without `sudo`); any other argument is rejected
+with usage on stderr and exit `2`, and a run that is not root refuses with exit
+`1` rather than half-applying an update it cannot finish (SCRUM-2029). Before
+that gate the wrapper ignored `$@` entirely, so even a `--help` probe ran a real,
+unprivileged, partially-applied update.
+
 **Drift visibility:** the heartbeat (`base/18`, and the serverless `18b` timer)
 reports the *effective* `runners_ref` + a `base_artifacts_sha` from the markers
 (`/etc/sidebutton/updated`, else the provision-time `/etc/sidebutton/installed`),

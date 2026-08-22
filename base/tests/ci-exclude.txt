@@ -15,4 +15,7 @@
 #   resolves the REAL binary, the install looks healthy, the sandbox relink is skipped,
 #   and the case false-fails. It is green on a clean runner with no global sidebutton.
 #   Out of T4 scope (component model + CCR); fix = make that health check prefix-local.
+#   NOTE: this exclusion does NOT leave the wrapper unguarded — its CLI surface (the
+#   SCRUM-2029 argument + root gates, and `bash -n` on the asset) lives in the sibling
+#   test-sb-self-update-cli.sh, which is hermetic and deliberately NOT excluded.
 test-sb-self-update.sh
