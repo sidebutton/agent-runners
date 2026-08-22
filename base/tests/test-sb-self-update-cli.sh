@@ -8,7 +8,7 @@
 # file is fully hermetic — it never fetches, never needs root, and asserts nothing
 # about host state — so it runs everywhere and the gate stays actually guarded.
 #
-# WHAT IT EXERCISES: the wrapper asset is executed for real, with LOG_FILE and
+# WHAT IT EXERCISES: the wrapper asset is executed for real, with LOG_FILE, HOME and
 # AGENT_HOME pointed at a sandbox, and every case is one that exits BEFORE the
 # first side effect. The bare (production) invocation is only ever run unprivileged,
 # where the root gate stops it — running it as root would trigger a real fleet
@@ -37,6 +37,14 @@ trap 'rm -rf "$TMP"' EXIT
 [ -f "$WRAPPER" ] || { bad "wrapper asset missing: $WRAPPER"; echo; echo "SOME FAILED"; exit 1; }
 
 # Sandbox every path the wrapper could write to, so "wrote nothing" is checkable.
+# HOME is redirected alongside AGENT_HOME on purpose. AGENT_HOME is only what the
+# wrapper passes around; the two things that actually write under a home directory
+# resolve HOME themselves — the pack reconcile shells out to the `sidebutton` CLI
+# (~/.sidebutton) and the CLI upgrade runs npm (~/.npm). With AGENT_HOME alone a
+# regressed gate would force-refresh the REAL agent's packs — the exact SCRUM-2029
+# mutation — before wrote_nothing could report it. Confirmed against the pre-gate
+# wrapper: with HOME sandboxed it reports "'agents' not installed ... skipped" and
+# both writes land in the sandbox; without it, the live pack is refreshed.
 SB_LOG="$TMP/sidebutton-update.log"
 SB_HOME="$TMP/home"
 mkdir -p "$SB_HOME"
@@ -47,7 +55,7 @@ mkdir -p "$SB_HOME"
 OUT=""; ERR=""; RC=0
 run_wrapper() {
   OUT="$TMP/out"; ERR="$TMP/err"
-  env LOG_FILE="$SB_LOG" AGENT_USER="$(id -un)" AGENT_HOME="$SB_HOME" \
+  env LOG_FILE="$SB_LOG" AGENT_USER="$(id -un)" AGENT_HOME="$SB_HOME" HOME="$SB_HOME" \
     bash "$WRAPPER" "$@" >"$OUT" 2>"$ERR"
   RC=$?
 }
@@ -59,10 +67,19 @@ wrote_nothing() {
   [ ! -e "$SB_LOG" ] && [ -z "$(ls -A "$SB_HOME" 2>/dev/null)" ]
 }
 
-# The wrapper's temp dir is a hardcoded /tmp path (TMPDIR is not consulted), so
-# count the siblings rather than redirect them.
-count_tmpdirs() { ls -d /tmp/agent-runners-selfupdate.* 2>/dev/null | wc -l | tr -d ' '; }
-TMPDIRS_BEFORE="$(count_tmpdirs)"
+# The wrapper's temp dir is a hardcoded /tmp path (TMPDIR is not consulted), so it
+# cannot be redirected into the sandbox — diff the siblings around the run instead.
+# Matched by SET and by OWNER, never by a bare count: a real `sudo sb-self-update`
+# tick creates and removes a ROOT-owned dir here at any moment, and the ops job runs
+# one on a schedule on exactly the live agents where this suite gets run. A count
+# would report that neighbour as this test's leak (and mask a real one behind a
+# concurrent removal). Everything THIS test could create is owned by the user running
+# it, since every case below exits at a gate above the mktemp.
+my_tmpdirs() {
+  find /tmp -maxdepth 1 -type d -name 'agent-runners-selfupdate.*' -user "$(id -u)" \
+    2>/dev/null | sort
+}
+TMPDIRS_BEFORE="$(my_tmpdirs)"
 
 # ── 1. --help / -h: usage on STDOUT, rc 0, no side effects, root or not ──────
 for flag in --help -h; do
@@ -141,9 +158,10 @@ else
 fi
 
 # ── 5. no temp dir escaped any gated run ────────────────────────────────────
-[ "$(count_tmpdirs)" = "$TMPDIRS_BEFORE" ] \
+LEAKED="$(comm -13 <(printf '%s\n' "$TMPDIRS_BEFORE") <(my_tmpdirs))"
+[ -z "$LEAKED" ] \
   && ok "no /tmp/agent-runners-selfupdate.* left behind by any gated run" \
-  || bad "a gated run leaked a temp dir (before=$TMPDIRS_BEFORE now=$(count_tmpdirs))"
+  || bad "a gated run leaked a temp dir: $(printf '%s' "$LEAKED" | tr '\n' ' ')"
 
 # ── 6. syntax + install shape of the asset ──────────────────────────────────
 # Duplicated from the CI-excluded sibling on purpose: this is the only file that
