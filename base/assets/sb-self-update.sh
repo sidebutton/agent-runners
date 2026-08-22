@@ -56,8 +56,10 @@ three idempotent, change-gated steps from ONE fresh download of agent-runners@<r
      ~/.local/bin helpers), change-gated by a fingerprint vs /etc/sidebutton/updated.
   3. Reconcile the universal "agents" catalog ops pack (rides step 2).
 
-Repo and ref are resolved from /etc/sidebutton/updated, else
-/etc/sidebutton/installed, else sidebutton/agent-runners@main.
+The REF is resolved from /etc/sidebutton/updated, else /etc/sidebutton/installed,
+else "main". The REPO comes from /etc/sidebutton/installed, else
+sidebutton/agent-runners — a refresh only ever rewrites the ref, so the repo is
+never read from the updated marker.
 
 Options:
   -h, --help   Print this help and exit 0. Fetches nothing, writes nothing, and

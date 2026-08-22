@@ -49,14 +49,29 @@ SB_LOG="$TMP/sidebutton-update.log"
 SB_HOME="$TMP/home"
 mkdir -p "$SB_HOME"
 
+# The two root-owned paths lib-refresh.sh writes are overridable for exactly this
+# reason (lib-refresh.sh:30-31) and the sibling guard already isolates both
+# (test-sb-self-update.sh:26-27). Every case here exits at a gate above the fetch,
+# so nothing should reach them — but this file's whole job is to fail when a gate
+# regresses, and on that day it must not be the thing that reinstalls the wrapper
+# and rewrites the marker on whatever box is running the suite.
+export SB_UPDATED_MARKER="$TMP/updated"
+export SB_SELF_UPDATE_BIN="$TMP/sb-self-update.bin"
+
 # run_wrapper <args...> — execute the asset with a sandboxed env, capturing rc,
 # stdout and stderr separately (the stdout-vs-stderr split IS the contract: usage
 # on stdout for --help so it can be piped, on stderr for a rejection).
 OUT=""; ERR=""; RC=0
 run_wrapper() {
   OUT="$TMP/out"; ERR="$TMP/err"
+  # </dev/null: run_wrapper is called from inside a `while read … done <<CASES`
+  # loop, so a child that reads stdin would swallow the remaining cases (they would
+  # then produce neither an ok nor a FAIL). Gated runs read nothing, but a regressed
+  # gate reaches curl/tar/npm, which do.
+  # timeout: same reasoning — a gated run cannot block, a regressed one can hang the
+  # whole suite on a runner with black-holed egress. 30s, then rc 124 fails loudly.
   env LOG_FILE="$SB_LOG" AGENT_USER="$(id -un)" AGENT_HOME="$SB_HOME" HOME="$SB_HOME" \
-    bash "$WRAPPER" "$@" >"$OUT" 2>"$ERR"
+    timeout 30 bash "$WRAPPER" "$@" >"$OUT" 2>"$ERR" </dev/null
   RC=$?
 }
 
@@ -64,7 +79,11 @@ run_wrapper() {
 # run — the incident behind SCRUM-2029 was a "help probe" that still mutated
 # agent-owned state (~/.sidebutton packs) on its way to failing.
 wrote_nothing() {
-  [ ! -e "$SB_LOG" ] && [ -z "$(ls -A "$SB_HOME" 2>/dev/null)" ]
+  [ ! -e "$SB_LOG" ] || return 1
+  # Fail CLOSED: a discarded `ls` error (sandbox gone, or unreadable) would otherwise
+  # read as "nothing was written" — the one assertion that must never pass by accident.
+  [ -d "$SB_HOME" ] && [ -r "$SB_HOME" ] && [ -x "$SB_HOME" ] || return 1
+  [ -z "$(ls -A "$SB_HOME")" ]
 }
 
 # The wrapper's temp dir is a hardcoded /tmp path (TMPDIR is not consulted), so it
@@ -125,7 +144,15 @@ CASES
 # ── 3. gate ordering: both gates sit ABOVE every side effect ─────────────────
 # Structural, so a later edit that moves the fetch up (or the gates down) fails
 # here even though every behavioural case above would still pass.
-line_of() { grep -n -m1 -- "$1" "$WRAPPER" | cut -d: -f1; }
+# Against a COMMENT-STRIPPED view, per the convention test-19g-agent-reboot.sh:43-54
+# set for the twin wrapper (and README.md:270 documents): this wrapper's header names
+# the very strings these assertions look for, so grepping the raw file would let a
+# refactor that moves the gates below the fetch pass on the strength of a comment —
+# and would equally go red on a comment that merely mentions `curl -fsSL`. Blanking
+# comment lines in place keeps the reported line numbers true to the real file.
+WRAPPER_CODE="$TMP/sb-self-update.code.sh"
+sed 's/^[[:space:]]*#.*$//' "$WRAPPER" > "$WRAPPER_CODE"
+line_of() { grep -n -m1 -- "$1" "$WRAPPER_CODE" | cut -d: -f1; }
 L_ARGGATE="$(line_of 'unrecognized argument')"
 L_ROOTGATE="$(line_of 'must run as root')"
 L_MKTEMP="$(line_of 'mktemp -d /tmp/agent-runners-selfupdate')"
@@ -142,7 +169,12 @@ fi
 # Unprivileged: must refuse with rc 1 having done NOTHING. rc 1 + the root message
 # (rather than rc 2) is also what proves the no-argument path cleared the argument
 # gate — i.e. `sudo sb-self-update` still reaches the update body unchanged.
-if [ "$(id -u)" -ne 0 ]; then
+# String-compared, like the wrapper's own root gate: the numeric form errors out and
+# evaluates false if `id` is ever broken, which would silently SKIP the only
+# end-to-end coverage of the production zero-argument form while still reporting
+# ALL PASS. An unreadable uid instead runs the case, where the wrapper's identically
+# fail-closed gate answers it.
+if [ "$(id -u 2>/dev/null)" != "0" ]; then
   run_wrapper
   [ "$RC" -eq 1 ] && ok "unprivileged bare run refuses with rc 1" || bad "unprivileged bare run exited $RC (want 1)"
   grep -q 'must run as root' "$ERR" \
@@ -158,6 +190,11 @@ else
 fi
 
 # ── 5. no temp dir escaped any gated run ────────────────────────────────────
+# Scope note: the wrapper arms `trap 'rm -rf "$RUNNERS_TMP"' EXIT` on the line after
+# its mktemp, so a dir it creates is gone before the child exits — this catches a
+# LEAK (a killed or trap-less run), not the creation itself. That the gated paths
+# never reach the mktemp at all is established by the exit code (which gate fired)
+# plus the ordering assertion in section 3.
 LEAKED="$(comm -13 <(printf '%s\n' "$TMPDIRS_BEFORE") <(my_tmpdirs))"
 [ -z "$LEAKED" ] \
   && ok "no /tmp/agent-runners-selfupdate.* left behind by any gated run" \
