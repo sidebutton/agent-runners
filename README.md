@@ -35,7 +35,7 @@ not dispatchable** — it's a manual / RDP agent.
 | `chrome` | runtime | — | Chrome browser |
 | `sidebutton-server` | runtime | — | MCP server on :9876 — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | `chrome`, `sidebutton-server` | Chrome managed-policy force-install + handshake wait |
-| `knowledge-packs` | packs | `sidebutton-server` | universal `agents` ops pack + account registry |
+| `knowledge-packs` | packs | `sidebutton-server` | **`required: true`** — universal `agents` ops pack + account registry |
 | `dotnet9` | toolchain | — | .NET 9 SDK |
 | `elixir` | toolchain | — | Erlang/OTP + Elixir via mise, one pair pre-baked at provision (Hex + rebar3 bootstrapped, shims on `/usr/local/bin` so dispatched jobs see them); repos override via `.tool-versions` (see [`docs/ELIXIR.md`](./docs/ELIXIR.md)) |
 | `android-sdk` | toolchain | — | OpenJDK 17 + Android SDK (cmdline-tools, platform 36, build-tools; licenses pre-accepted; `ANDROID_HOME` set) — headless Gradle build/lint/unit-test, no emulator |
@@ -52,6 +52,20 @@ read, and enforces `requires` defensively. Component
 install logic lives under `base/components/<slug>/` (`install.sh` for
 runtime/toolchain installs; `pre-services.sh` / `post-services.sh` for lifecycle
 phases — e.g. the extension's managed-policy + handshake).
+
+A component may declare **`required: true`** — *globally required*: the portal is to union it
+into every agent's component set regardless of profile or wizard selection, so it cannot be
+unchecked. `knowledge-packs` is the only one today; because its own `requires` pulls
+`sidebutton-server` in, unioning the required set and closing over `requires` will make every
+agent dispatchable — retiring the RDP-only path by design.
+
+**This field is published, not yet enforced** (SCRUM-2035 ships the data; SCRUM-2036 ships the
+union in the portal's `resolveProfile`). Until then the paragraph above still holds: a
+component set without `sidebutton-server` yields a manual / RDP agent, and `base/components.sh`
+forces the server only when packs are *already* selected — it never adds packs itself.
+
+Note this DATA field is distinct from the JSON-Schema `required` keyword that lists a
+component object's mandatory keys — they sit side by side in the same `$defs`.
 
 `components.json` is validated against
 [`components.schema.json`](./components.schema.json), enforced by
@@ -85,16 +99,33 @@ selection is sent as `SIDEBUTTON_PLUGINS` and installed by `base/19b-plugins.sh`
 ### Profiles (`profiles.json`) — wizard presets
 
 A profile is a named **preset** of components (+ default roles) the Create-Agent
-wizard pre-checks; the user may uncheck or add any component.
+wizard pre-checks; the user may uncheck or add any component — except the ones the
+profile **locks**.
 
-| Profile | Components | Roles |
-|---|---|---|
-| **SideButton SWE Full Stack** (default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
-| **SideButton SWE .NET** | Full Stack + `dotnet9` | se, qa, sd, pm |
-| **SideButton SWE Android** | Full Stack + `android-sdk` + `android-emulator` | se, qa, sd, pm |
-| **SideButton SWE Native** | `claude-code, chrome, sidebutton-server, knowledge-packs` | se, qa |
+| Profile | Components | Locked | Roles |
+|---|---|---|---|
+| **SideButton SWE Full Stack** (default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | `sidebutton-extension` | se, qa, sd, pm |
+| **SideButton SWE .NET** | Full Stack + `dotnet9` | `sidebutton-extension` | se, qa, sd, pm |
+| **SideButton SWE Android** | Full Stack + `android-sdk` + `android-emulator` | — | se, qa, sd, pm |
+| **SideButton App Agent** | `claude-code, chrome, sidebutton-server, knowledge-packs` | — | se, qa, pm |
+
+**`locked[]`** pins components the wizard must not let the user untick — a
+*SideButton SWE Full Stack* without the Chrome extension is no longer the thing its name
+promises. Every locked slug must also appear in that profile's own `components[]`.
+Globally-required components (`required` in `components.json`) are the separate,
+catalog-wide mechanism.
+
+`profiles.json` is validated against [`profiles.schema.json`](./profiles.schema.json),
+enforced by [`base/tests/test-profiles-schema.sh`](./base/tests) — which also pins the
+cross-file semantics (`order`/`default` coherence, `components[]` and `locked[]` resolution,
+and that every profile's closure over `requires` unlocks dispatch).
 
 Plugins are selected separately, by role (see Plugins above) — not baked into profile presets.
+
+**Dropped:** `swe-native` (SCRUM-2035) — unused, and its component set is identical to
+`app-builder`'s. `aliases` is declared in the schema but consumed nowhere, so the slug does
+NOT fall back: a stored `profile: 'swe-native'` is rejected on re-provision, while existing
+agents keep running (dispatchability derives from components, not the profile).
 
 ## Portal display metadata (single source of truth)
 
@@ -263,7 +294,8 @@ Component-model coverage (the catalog ↔ schema ↔ on-disk ↔ `run.sh` wiring
 
 | Guard | Asserts |
 |---|---|
-| `test-components-schema.sh` | `components.json` is valid against `components.schema.json` (structure, enums, slug pattern, `additionalProperties:false`) + unique slugs + every `requires[]` resolves |
+| `test-components-schema.sh` | `components.json` is valid against `components.schema.json` (structure, enums, slug pattern, `additionalProperties:false`, `required` is a boolean and at least one component carries it) + unique slugs + every `requires[]` resolves |
+| `test-profiles-schema.sh` | `profiles.json` is valid against `profiles.schema.json` (required/allowed keys, slug pattern, `additionalProperties:false`) + `default` and `order` cohere with `profiles[]`, every `components[]` slug resolves in `components.json`, every `locked[]` slug is one the profile itself installs, and every profile's component closure (incl. globally-`required` components, over `requires`) unlocks dispatch |
 | `test-component-resolution.sh` | every `base/components/<dir>` is a catalog slug **and** wired into `run.sh`; every non-base-installed slug has a dir; the base-installed allowlist (`chrome`/`sidebutton-server`/`knowledge-packs`) is justified by its `06`/`08`/`13` step; all `*.sh` parse |
 | `test-default-install-parity.sh` | default / empty / back-compat + every profile resolves to a byte-identical gate vector vs a committed snapshot (re-bless: `BLESS=1 bash …`) |
 | `test-claude-code-*` / `test-claude-code-router-component.sh` | the claude-code + CCR components' catalog shape, install dir, and `run.sh` wiring |

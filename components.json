@@ -48,6 +48,7 @@
       "title": "Knowledge packs",
       "description": "Universal 'agents' ops pack (dispatch ops workflows) + the per-account knowledge-pack registry and its update timer.",
       "requires": ["sidebutton-server"],
+      "required": true,
       "chip": { "label": "Knowledge packs", "live": false }
     },
     {

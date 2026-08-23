@@ -90,7 +90,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | `chrome` | runtime | `06-chrome` + `chrome.service` | — | Chrome (live) |
 | `sidebutton-server` | runtime | `08-sidebutton` + `sidebutton.service` + `15-claude-mcp` + `14-claude-stop-hook` + `19c-health-report` + server start (`19b`) | — | SB server (live) — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | ext `pre-services` (Chrome managed-policy force-install) + `post-services` (browser_connected wait) | `chrome`, `sidebutton-server` | Extension (live) |
-| `knowledge-packs` | packs | `13-knowledge-packs` + `19d-account-registry` (+ update timer) | `sidebutton-server` | Knowledge packs |
+| `knowledge-packs` | packs | `13-knowledge-packs` + `19d-account-registry` (+ update timer) — **`required: true`** (globally required, see below) | `sidebutton-server` | Knowledge packs |
 | `dotnet9` | toolchain | **new** — Microsoft apt repo → `dotnet-sdk-9.0`; `DOTNET_ROOT` in `/etc/environment` | — | .NET 9 |
 | `elixir` | toolchain | **new** — `components/elixir/install.sh`: pinned `mise` → `/usr/local/bin/mise`, then ONE pinned Erlang/OTP + Elixir pair pre-baked **as `$AGENT_USER`** (`mise use -g`) so no job pays a cold toolchain cost; `mix local.hex`/`local.rebar` bootstrapped; mise shims symlinked into `/usr/local/bin` (systemd's default PATH — a dispatched job reads neither `~/.bashrc` nor `/etc/environment`); `mise activate` in `.bashrc` for RDP; agent-owned Dialyzer PLT cache at `~/.cache/dialyzer`; system pkgs `inotify-tools build-essential autoconf libssl-dev libncurses-dev`. Repos override via `.tool-versions`. **Pair with `docker`** for a real Postgres server — `postgres-client` alone will not run a Phoenix test suite (see [`ELIXIR.md`](./ELIXIR.md)) | — | Elixir |
 | `android-sdk` | toolchain | **new** — `openjdk-17-jdk-headless` + pinned Android cmdline-tools → `/opt/android-sdk` (platform-tools, platform 36, build-tools; licenses pre-accepted so AGP can self-serve further packages at build time); SDK tree chowned to `$AGENT_USER`; `ANDROID_HOME`/`ANDROID_SDK_ROOT` in `/etc/environment`. **No emulator/AVD** — headless build/lint/unit-test only (add `android-emulator` for on-device runs) | — | Android SDK |
@@ -100,6 +100,21 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 | `openvpn` | toolchain | **new** — `openvpn` + `sb-vpn-connect` helper; .ovpn applied manually post-provision (MVP — see [`OPENVPN.md`](./OPENVPN.md)) | — | VPN |
 | `wireguard` | toolchain | **new** — `wireguard-tools` + `sb-wg-connect` helper; .conf applied manually post-provision (split-tunnel MVP — see [`WIREGUARD.md`](./WIREGUARD.md)) | — | VPN |
 | `rdp-client` | toolchain | **new** — `freerdp2-x11` (`xfreerdp`) + `sb-rdp-connect` helper + `sb-rdp.service`; outbound RDP session rendered as a fixed-geometry window on `:10` (computer-use driveable), creds applied post-provision (see [`RDP.md`](./RDP.md)) | — | RDP |
+
+### Globally-required components (`required`)
+
+A component may declare **`required: true`** (SCRUM-2035): the portal unions it into every
+agent's component set regardless of the chosen profile or what the wizard user unticks. It is
+catalog-wide, unlike a profile's per-profile `locked[]` (§5).
+
+`knowledge-packs` is the only one today. Its own `requires` pulls `sidebutton-server` in, so the
+required set closed over `requires` always contains the dispatch-unlocking component — **every
+agent is dispatchable and the RDP-only path is gone by design**.
+
+Two cautions. First, the DATA field `properties.required` sits next to the JSON-Schema `required`
+KEYWORD (the list of mandatory keys) in the same `$defs.component` — different things, same word.
+Second, WZ-3 only **publishes** this data: nothing enforces the union until `resolveProfile` does
+(SCRUM-2036). `base/components.sh` forces the server when packs are selected, but never adds packs.
 
 ### `components.json` shape
 
@@ -116,7 +131,8 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
       "requires": ["chrome", "sidebutton-server"],
       "chip": { "label": "Extension", "live": true } },
     { "slug": "knowledge-packs", "kind": "packs", "label": "Knowledge packs",
-      "requires": ["sidebutton-server"], "chip": { "label": "Knowledge packs", "live": false } },
+      "requires": ["sidebutton-server"], "required": true,
+      "chip": { "label": "Knowledge packs", "live": false } },
     { "slug": "dotnet9", "kind": "toolchain", "label": ".NET 9 SDK",
       "requires": [], "chip": { "label": ".NET 9", "live": false } },
     { "slug": "docker", "kind": "toolchain", "label": "Docker",
@@ -197,13 +213,18 @@ are optional and require the server.
 
 ## 5. Profiles (presets — `profiles.json`)
 
-| Profile (slug) | Pre-checked components | Default roles |
-|---|---|---|
-| **SideButton SWE Full Stack** (`swe-full-stack`, default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | se, qa, sd, pm |
-| **SideButton SWE .NET** (`swe-dotnet`, new) | Full Stack **+ `dotnet9`** | se, qa, sd, pm |
-| **SideButton SWE Android** (`swe-android`, new) | Full Stack **+ `android-sdk` + `android-emulator`** | se, qa, sd, pm |
-| **SideButton SWE Native** (`swe-native`) | `claude-code, chrome, sidebutton-server, knowledge-packs` (no extension) | se, qa |
-| **SideButton App Agent** (`app-builder`, new) | same set as Native — the difference is the held editing session, not the toolchain | se, qa, pm |
+| Profile (slug) | Pre-checked components | Locked | Default roles |
+|---|---|---|---|
+| **SideButton SWE Full Stack** (`swe-full-stack`, default) | `claude-code, chrome, sidebutton-server, sidebutton-extension, knowledge-packs` | `sidebutton-extension` | se, qa, sd, pm |
+| **SideButton SWE .NET** (`swe-dotnet`, new) | Full Stack **+ `dotnet9`** | `sidebutton-extension` | se, qa, sd, pm |
+| **SideButton SWE Android** (`swe-android`, new) | Full Stack **+ `android-sdk` + `android-emulator`** | — | se, qa, sd, pm |
+| **SideButton App Agent** (`app-builder`, new) | `claude-code, chrome, sidebutton-server, knowledge-packs` (no extension) | — | se, qa, pm |
+
+**`locked[]`** (SCRUM-2035) is the preset's non-negotiable core: those slugs stay pre-checked and
+the wizard must not offer to untick them, because a *SWE Full Stack* without the Chrome extension is
+not the thing the name promises. Every locked slug must also be in that profile's own `components[]`
+(guarded by `base/tests/test-profiles-schema.sh`). It is per-profile — orthogonal to `required` in
+§4, which is catalog-wide.
 
 `app-builder` (SCRUM-1937) needs no extra component: node 22 is unconditional in the base runner and
 `chrome` covers the ready-state screenshot. What makes it an app agent is the `app_edit_session`
@@ -212,27 +233,30 @@ deliberately absent from its roles — that is an account-level role, not a buil
 
 Plugins are selected separately, by role (§4b): `screen-record` for every role, `writing-quality` for `smm`.
 
-Dropped: `qa-generalist`, `swe-bare`.
+Dropped: `qa-generalist`, `swe-bare`, and — as of SCRUM-2035 — `swe-native`, which was unused and
+carried the exact component set `app-builder` already ships. `aliases` is declared in
+`profiles.schema.json` but consumed nowhere, so a dropped slug does **not** fall back: re-provisioning
+with `profile: 'swe-native'` is rejected, while existing agents keep running (dispatchability is
+derived from components, not from the profile).
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "default": "swe-full-stack",
-  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "swe-native", "app-builder"],
+  "order": ["swe-full-stack", "swe-dotnet", "swe-android", "app-builder"],
   "runner": "ubuntu-claude-code",
   "profiles": [
     { "slug": "swe-full-stack", "name": "SideButton SWE Full Stack",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
-      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs"] },
+      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs"],
+      "locked": ["sidebutton-extension"] },
     { "slug": "swe-dotnet", "name": "SideButton SWE .NET",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
-      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "dotnet9"] },
+      "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "dotnet9"],
+      "locked": ["sidebutton-extension"] },
     { "slug": "swe-android", "name": "SideButton SWE Android",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "sd", "pm"],
       "components": ["claude-code", "chrome", "sidebutton-server", "sidebutton-extension", "knowledge-packs", "android-sdk", "android-emulator"] },
-    { "slug": "swe-native", "name": "SideButton SWE Native",
-      "runner": "ubuntu-claude-code", "default_roles": ["se", "qa"],
-      "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] },
     { "slug": "app-builder", "name": "SideButton App Agent",
       "runner": "ubuntu-claude-code", "default_roles": ["se", "qa", "pm"],
       "components": ["claude-code", "chrome", "sidebutton-server", "knowledge-packs"] }
