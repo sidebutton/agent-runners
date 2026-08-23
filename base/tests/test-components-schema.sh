@@ -20,6 +20,7 @@
 #   $defs.component.properties.slug.pattern L24              -> section 7
 #   $defs.component.properties.kind.enum L29                 -> section 8
 #   requires items:string L35-36                             -> section 9
+#   $defs.component.properties.required (boolean)            -> section 9b
 #   $defs.component.properties.unlocks.items.enum L41        -> section 10
 #   $defs...chip.required L48 / addlProps:false L54          -> sections 11-12
 #   chip.processKey/versionKey enums L51-52                  -> sections 13-14
@@ -103,6 +104,23 @@ none "every kind in $KIND_ENUM" \
 # ── 9. requires is an array of strings ───────────────────────────────────────
 none "every requires is an array of strings" \
   '.components[] | select((.requires|type)!="array" or ([.requires[]?|select(type!="string")]|length>0)) | "\(.slug): bad requires"'
+
+# ── 9b. `required` is a boolean when present (SCRUM-2035) ────────────────────
+# NAMING TRAP: `$defs.component.properties.required` (this DATA field: "the portal
+# unions this component into every agent") sits next to `$defs.component.required`
+# (the JSON-Schema KEYWORD listing mandatory keys, read into COMP_REQ above for
+# section 5). They are different things in the same object — do not conflate them.
+jq -e '.["$defs"].component.properties.required.type=="boolean"' "$SCHEMA" >/dev/null 2>&1 \
+  && ok "schema declares component.properties.required as boolean (validator assumption holds)" \
+  || bad "schema no longer declares a boolean component.properties.required — update this validator"
+none "every component.required is a boolean (when present)" \
+  '.components[] | select(has("required")) | select((.required|type)!="boolean") | "\(.slug): required=\(.required|tostring)"'
+# Semantics: a globally-required component must be installable everywhere, so its own
+# requires[] closure is force-installed with it. Assert the closure is resolvable (the
+# targets exist — section 16 covers that) AND that at least one component is required,
+# so a catalog that silently loses the flag fails here rather than in the portal.
+none "at least one component is marked required:true" \
+  '[.components[]|select(.required==true)] | select(length==0) | "no component carries required:true"'
 
 # ── 10. unlocks enum (when present) ──────────────────────────────────────────
 none "every unlocks[] in $UNLOCKS_ENUM" \

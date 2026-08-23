@@ -24,7 +24,7 @@
     "aliases": {
       "type": "object",
       "additionalProperties": { "type": "string" },
-      "description": "Legacy slug → canonical slug (e.g. 'qa-generalist' → 'swe-full-stack', 'swe-bare' → 'swe-native'). The portal canonicalises on resolve + display so persisted rows keep working after a rename."
+      "description": "Legacy slug → canonical slug (e.g. 'qa-generalist' → 'swe-full-stack'). Reserved for a future rename: DECLARED HERE BUT CONSUMED NOWHERE today — the portal's canonicalProfileSlug only trims, so a dropped slug does not fall back. Keep it {} unless alias machinery ships with it."
     },
     "profiles": {
       "type": "array",
@@ -50,6 +50,11 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Infra component slugs (components.json) pre-checked in the wizard for this profile. The user may uncheck or add any component before provisioning; the final set is threaded as AGENT_COMPONENTS. Plugins are NOT components — they are a separate role-driven catalog (plugins.json) selected in wizard Step 2 and sent as SIDEBUTTON_PLUGINS."
+        },
+        "locked": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Component slugs this profile PINS: pre-checked like the rest of components[] but not un-checkable in the wizard — unticking one would make the profile something other than what its name promises (e.g. SWE Full Stack without the Chrome extension). Every entry MUST also appear in this profile's own components[]. Absent → nothing is locked; the whole preset stays editable. Globally-required components (components.json `required`) are a separate, catalog-wide mechanism."
         }
       },
       "additionalProperties": false

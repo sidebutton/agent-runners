@@ -36,6 +36,11 @@
           "items": { "type": "string" },
           "description": "Other component slugs that must also be selected. The wizard auto-checks these; unchecking a required-by component unchecks its dependents."
         },
+        "required": {
+          "type": "boolean",
+          "default": false,
+          "description": "GLOBALLY REQUIRED: the portal unions this component into every agent's set regardless of profile or wizard selection (it cannot be unchecked). Note this is a DATA field and is distinct from the JSON-Schema `required` keyword above, which lists the mandatory keys of a component object. Absent ⇒ false (optional add-on). knowledge-packs is required, and its `requires` pulls sidebutton-server in, so every agent is dispatchable."
+        },
         "unlocks": {
           "type": "array",
           "items": { "type": "string", "enum": ["dispatch", "capabilities"] },
