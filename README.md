@@ -53,12 +53,19 @@ install logic lives under `base/components/<slug>/` (`install.sh` for
 runtime/toolchain installs; `pre-services.sh` / `post-services.sh` for lifecycle
 phases — e.g. the extension's managed-policy + handshake).
 
-A component may declare **`required: true`** — *globally required*: the portal unions it
-into every agent's component set regardless of profile or wizard selection, and it cannot
-be unchecked. `knowledge-packs` is the only one today; because its own `requires` pulls
-`sidebutton-server` in, every agent ends up dispatchable (the RDP-only path is gone by
-design). Note this DATA field is distinct from the JSON-Schema `required` keyword that
-lists a component object's mandatory keys — they sit side by side in the same `$defs`.
+A component may declare **`required: true`** — *globally required*: the portal is to union it
+into every agent's component set regardless of profile or wizard selection, so it cannot be
+unchecked. `knowledge-packs` is the only one today; because its own `requires` pulls
+`sidebutton-server` in, unioning the required set and closing over `requires` will make every
+agent dispatchable — retiring the RDP-only path by design.
+
+**This field is published, not yet enforced** (SCRUM-2035 ships the data; SCRUM-2036 ships the
+union in the portal's `resolveProfile`). Until then the paragraph above still holds: a
+component set without `sidebutton-server` yields a manual / RDP agent, and `base/components.sh`
+forces the server only when packs are *already* selected — it never adds packs itself.
+
+Note this DATA field is distinct from the JSON-Schema `required` keyword that lists a
+component object's mandatory keys — they sit side by side in the same `$defs`.
 
 `components.json` is validated against
 [`components.schema.json`](./components.schema.json), enforced by
