@@ -23,8 +23,11 @@ See [`docs/COMPONENTS.md`](./docs/COMPONENTS.md) for the full design.
 XFCE desktop + `xrdp`/`x11vnc`/`Xvfb`, Node 22, the Claude Code CLI,
 `~/.agent-env` + git credential helpers + `~/workspace`, per-agent secrets,
 portal registration, and a recurring heartbeat (keeps the agent online even
-without the SideButton server). A base-only agent has **no capabilities and is
-not dispatchable** — it's a manual / RDP agent.
+without the SideButton server). A base-only agent — one booted with an empty
+`AGENT_COMPONENTS` — has **no capabilities and is not dispatchable**: a manual /
+RDP agent. The portal no longer produces that set (see *globally required* below);
+it remains reachable for hand-rolled cloud-init and for agents provisioned before
+SCRUM-2036.
 
 ### Components (`components.json`)
 
@@ -53,16 +56,20 @@ install logic lives under `base/components/<slug>/` (`install.sh` for
 runtime/toolchain installs; `pre-services.sh` / `post-services.sh` for lifecycle
 phases — e.g. the extension's managed-policy + handshake).
 
-A component may declare **`required: true`** — *globally required*: the portal is to union it
-into every agent's component set regardless of profile or wizard selection, so it cannot be
+A component may declare **`required: true`** — *globally required*: the portal unions it into
+every agent's component set regardless of profile or wizard selection, so it cannot be
 unchecked. `knowledge-packs` is the only one today; because its own `requires` pulls
-`sidebutton-server` in, unioning the required set and closing over `requires` will make every
-agent dispatchable — retiring the RDP-only path by design.
+`sidebutton-server` in, unioning the required set and closing over `requires` makes every
+portal-provisioned agent dispatchable — retiring the RDP-only path by design.
 
-**This field is published, not yet enforced** (SCRUM-2035 ships the data; SCRUM-2036 ships the
-union in the portal's `resolveProfile`). Until then the paragraph above still holds: a
-component set without `sidebutton-server` yields a manual / RDP agent, and `base/components.sh`
-forces the server only when packs are *already* selected — it never adds packs itself.
+**Enforced since SCRUM-2036** (SCRUM-2035 shipped the data; SCRUM-2036 shipped the union in the
+portal's `resolveProfile`, which also honours each profile's `locked` list). The enforcement is
+at *resolve* time in the portal, not in these scripts: `base/components.sh` still takes
+`AGENT_COMPONENTS` at face value and forces the server only when packs are *already* selected —
+it never adds packs itself. One consequence worth knowing when hand-rolling cloud-init: the
+portal's floor is non-empty and does **not** name `claude-code`, so an agent provisioned from
+`components: []` skips the default-on Claude Code install (that branch fires only for a
+genuinely empty set) — name `claude-code` explicitly if you want the CLI.
 
 Note this DATA field is distinct from the JSON-Schema `required` keyword that lists a
 component object's mandatory keys — they sit side by side in the same `$defs`.
