@@ -323,6 +323,43 @@ grep -qx "url=$OWNREPO" "$H/.sidebutton/account-registry" 2>/dev/null \
   || bad "the record was not rewritten after the successful retry: $(record)"
 cp "$SANDBOX/sidebutton.real" "$FAKEBIN/sidebutton"
 
+# ── 6c. 19d's add+record must NOT clobber a record naming a different url ────
+# base/19d is the ONLY writer of SIDEBUTTON_DEFAULT_REGISTRY into ~/.agent-env, so on a
+# switch 19d always runs FIRST: it persists the new url, `add`s it (which SUCCEEDS —
+# new url, new name — stacking it on the old registry) and `record`s it. If either write
+# overwrote the record, the next tick would see REC_URL == the delivered url and
+# reconcile nothing, and every switch the portal-shape sweep cannot cover (own-repo ->
+# own-repo, own-repo -> hosted) would stay stacked forever. That is the KAN-150 state.
+switch_via_19d() {  # <old-name> <old-url> <new-url> -> urls left after 19d + two ticks
+  setup_case "$3" - "$1 $2"
+  printf 'name=%s\nurl=%s\n' "$1" "$2" > "$H/.sidebutton/account-registry"
+  run_sync add    "$3" >/dev/null 2>&1   # 19d one-shot add
+  run_sync record "$3" >/dev/null 2>&1   # 19d record call
+  run_sync update      >/dev/null 2>&1   # timer tick 1
+  run_sync update      >/dev/null 2>&1   # timer tick 2
+  cut -f2 "$SANDBOX/state" | grep -c .
+}
+[ "$(switch_via_19d acme-packs-old https://github.com/acme/packs-old.git "$OWNREPO")" = "1" ] \
+  && ok "19d then ticks: own-repo -> own-repo switch reconciles to exactly one registry" \
+  || bad "own-repo -> own-repo stayed stacked: $(tr '\n' ' ' < "$SANDBOX/state")"
+[ "$(switch_via_19d acme-packs-old https://github.com/acme/packs-old.git "$HOSTED")" = "1" ] \
+  && ok "19d then ticks: own-repo -> hosted switch reconciles to exactly one registry" \
+  || bad "own-repo -> hosted stayed stacked: $(tr '\n' ' ' < "$SANDBOX/state")"
+[ "$(switch_via_19d gitsidebuttoncom-4021 "$HOSTED" "$OWNREPO")" = "1" ] \
+  && ok "19d then ticks: hosted -> own-repo switch reconciles to exactly one registry" \
+  || bad "hosted -> own-repo stayed stacked: $(tr '\n' ' ' < "$SANDBOX/state")"
+# and the record must be left alone by add/record while the old one is still configured
+setup_case "$OWNREPO" - "acme-packs-old https://github.com/acme/packs-old.git"
+printf 'name=acme-packs-old\nurl=https://github.com/acme/packs-old.git\n' > "$H/.sidebutton/account-registry"
+run_sync add "$OWNREPO" >/dev/null 2>&1
+grep -qx "url=https://github.com/acme/packs-old.git" "$H/.sidebutton/account-registry" \
+  && ok "add leaves a differing record intact (the switch evidence 'update' needs)" \
+  || bad "add clobbered the previous account-registry record: $(record)"
+run_sync record "$OWNREPO" >/dev/null 2>&1
+grep -qx "url=https://github.com/acme/packs-old.git" "$H/.sidebutton/account-registry" \
+  && ok "record leaves a differing record intact too" \
+  || bad "'record' clobbered the previous account-registry record: $(record)"
+
 # ── 7. a third-party registry is NEVER auto-removed ─────────────────────────
 setup_case "$OWNREPO" - "acme-extra-packs $THIRD" "gitsidebuttoncom-4021 $HOSTED"
 run_sync update >/dev/null
@@ -408,9 +445,13 @@ grep -qE '^GIT_CONFIG_(COUNT|KEY_|VALUE_)' "$SANDBOX/env" \
 setup_case "$HOSTED" - "gitsidebuttoncom-4021 $HOSTED"
 printf 'name=gitsidebuttoncom-4021\nurl=%s\n' "$HOSTED" > "$H/.sidebutton/account-registry"
 run_sync update >/dev/null
-grep -qE '^GIT_CONFIG_(COUNT|KEY_|VALUE_)|^GIT_TERMINAL_PROMPT=' "$SANDBOX/env" \
+grep -qE '^GIT_CONFIG_(COUNT|KEY_|VALUE_)' "$SANDBOX/env" \
   && bad "empty token: GIT_CONFIG_* was still exported" \
   || ok "empty token: no GIT_CONFIG exports (nothing to force)"
+# ...but a git child must still never sit on a credential prompt (no tty in the timer).
+grep -qx 'GIT_TERMINAL_PROMPT=0' "$SANDBOX/env" \
+  && ok "GIT_TERMINAL_PROMPT=0 is exported even with no token (fail fast, never hang)" \
+  || bad "GIT_TERMINAL_PROMPT=0 was not exported — a prompt could hang the add"
 
 # A white-label portal host is honoured for both the scope and the shape guard.
 setup_case "-" "portal-tok" "gitexamplecom-77 https://git.example.com/77.git"

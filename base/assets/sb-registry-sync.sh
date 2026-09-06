@@ -30,9 +30,15 @@
 # uninstalls the old registry's packs — so `update` now reconciles:
 #
 #   1. ~/.sidebutton/account-registry records WHICH registry is the account's
-#      (name= + url=, 0600). `add` and `record` write it; `update` reads it.
+#      (name= + url=, 0600). `add` and `record` write it; `update` reads it. Neither
+#      OVERWRITES a record naming a different url, though: base/19d is the only writer
+#      of SIDEBUTTON_DEFAULT_REGISTRY into ~/.agent-env, so on a switch 19d runs first
+#      and would otherwise erase the very evidence `update` needs (see
+#      record_account_registry).
 #   2. A recorded url that differs from the delivered one is a switch: bundle any
-#      unpushed work, `sidebutton registry remove <name>`, re-add, rewrite the record.
+#      unpushed work, `sidebutton registry remove <name>`, re-add, rewrite the record —
+#      and only once the removal has actually succeeded, so a failure is retried
+#      rather than silently forgotten.
 #   3. Boxes provisioned before the record existed get a narrow fallback: a
 #      configured registry whose url has the PORTAL's per-account shape
 #      (<git-host-base>/<digits>.git) and is not what the portal is delivering can
@@ -73,6 +79,12 @@ fi
 # override it by delivering SIDEBUTTON_GIT_HOST_BASE in ~/.agent-env.
 PORTAL_GIT_BASE="${SIDEBUTTON_GIT_HOST_BASE:-https://git.sidebutton.com}"
 while [ "${PORTAL_GIT_BASE%/}" != "$PORTAL_GIT_BASE" ]; do PORTAL_GIT_BASE="${PORTAL_GIT_BASE%/}"; done
+
+# A git child of `sidebutton registry add|update` must never sit on an interactive
+# credential prompt: the timer has no tty, and 19d's `su - agent -c "... add"` from an
+# interactive break-glass redeploy would otherwise hang on `Username for ...` instead of
+# failing fast. This is NOT a credential override — it only turns a prompt into an error.
+export GIT_TERMINAL_PROMPT=0
 
 # ── url helpers ──────────────────────────────────────────────────────────────
 url_host() {  # https://host/path -> host  (empty for anything not http(s))
@@ -140,8 +152,17 @@ registry_list() {
   printf '%s\n' "$REG_LIST_CACHE"
 }
 
-registry_configured() {  # is this url one of the configured registries?
-  registry_list | grep -qF "$1"
+registry_configured() {  # is this url one of the configured git registries?
+  # Exact match on the parsed rows, NOT a substring grep over the whole render: with
+  # `grep -qF` a delivered url that is a PREFIX of an unrelated configured one
+  # (…/packs vs …/packs-extra.git) reads as "already configured", so the SCRUM-1167
+  # add-if-missing self-heal never fires and the account registry is never added.
+  # It also has to agree with configured_name_for(), which has always been exact.
+  local u
+  while IFS=$'\t' read -r _ u; do
+    [ "${u:-}" = "$1" ] && return 0
+  done < <(configured_registries)
+  return 1
 }
 
 configured_registries() {  # "<name>\t<url>" per configured GIT registry
@@ -203,6 +224,26 @@ write_record() {  # write_record <name> <url>; silent + no-op when already curre
   return 1
 }
 
+# record_account_registry <url> — write the record, UNLESS a DIFFERENT url is already
+# recorded. That record is the only evidence of which registry was the account's
+# before the change, and `update`'s reconcile needs it to know what to remove.
+# base/19d is the ONLY writer of SIDEBUTTON_DEFAULT_REGISTRY into ~/.agent-env, so on a
+# switch 19d necessarily gets here FIRST — it persists the new url, then `add`s it
+# (which succeeds, because the new url and name are both free) and `record`s it, all
+# while the OLD registry is still configured. Clobbering the record here would make the
+# next tick see REC_URL == the delivered url and reconcile nothing, leaving the two
+# stacked forever for every switch the portal-shape sweep cannot cover (own-repo ->
+# own-repo, own-repo -> hosted). Leaving it is what lets `update` do its job.
+record_account_registry() {
+  local url="$1"
+  read_record
+  if [ -n "$REC_URL" ] && [ "$REC_URL" != "$url" ]; then
+    log "a different account registry is on record (${REC_URL}) — leaving it so 'update' reconciles the switch to ${url}"
+    return 0
+  fi
+  write_record "$(registry_name_for_url "$url")" "$url"
+}
+
 # ── credentials ──────────────────────────────────────────────────────────────
 # Scope the portal token to the portal git host, and only when a portal-hosted url
 # is actually in play. GIT_CONFIG_* is the highest-precedence config source and is
@@ -224,7 +265,6 @@ export_registry_credential() {
   export GIT_CONFIG_VALUE_0=""
   export GIT_CONFIG_KEY_1="credential.https://${host}.helper"
   export GIT_CONFIG_VALUE_1='!f(){ [ "$1" = get ] || exit 0; echo "username=x-access-token"; echo "password=${SIDEBUTTON_DEFAULT_REGISTRY_TOKEN}"; }; f'
-  export GIT_TERMINAL_PROMPT=0
   log "portal registry token scoped to https://${host}"
 }
 
@@ -232,12 +272,31 @@ export_registry_credential() {
 # `sidebutton registry remove` deletes the clone, so anything committed there and
 # never pushed would be lost. Bundle it first and say where it went.
 backup_unpushed_commits() {
-  local name="$1" clone="${CLONES_DIR}/${1}" out
+  local name="$1" clone="${CLONES_DIR}/${1}" out tip sha b
   [ -d "$clone/.git" ] || return 0
-  [ -n "$(git -C "$clone" log --branches --not --remotes --format=%H 2>/dev/null | head -n1)" ] || return 0
+  # Uncommitted tracked changes die with the clone too, and an SD agent may be mid-edit
+  # in it (the workflow AGENTS.md documents) when a switch tick lands. `stash create`
+  # builds a commit object WITHOUT touching the worktree or the stash list; parking it
+  # on a ref is what gets it into `bundle --all`. (Untracked files are still not saved.)
+  sha="$(git -C "$clone" stash create 2>/dev/null)"
+  [ -n "${sha:-}" ] && git -C "$clone" update-ref refs/sb-rescue/uncommitted "$sha" 2>/dev/null
+  # --all, not --branches: commits reachable only from a detached HEAD or a tag — and
+  # the rescue ref above — are just as unrecoverable, and `bundle --all` would save them.
+  tip="$(git -C "$clone" log --all --not --remotes --format=%H 2>/dev/null | head -n1)"
+  [ -n "$tip" ] || return 0
+  # A remove that keeps failing comes back here every 5 minutes and nothing prunes
+  # ~/.sidebutton/*.bundle, so skip when this tip is already bundled and keep a few.
+  for b in "${SB_DIR}"/registry-"${name}"-*.bundle; do
+    [ -e "$b" ] || continue
+    if git bundle list-heads "$b" 2>/dev/null | grep -qF "$tip"; then
+      log "unpushed work in ${clone} is already bundled to ${b}"
+      return 0
+    fi
+  done
   out="${SB_DIR}/registry-${name}-$(date -u +%Y%m%d-%H%M%S).bundle"
   if git -C "$clone" bundle create "$out" --all >/dev/null 2>&1; then
     log "unpushed commits in ${clone} — bundled to ${out}"
+    ls -1t "${SB_DIR}"/registry-"${name}"-*.bundle 2>/dev/null | tail -n +4 | xargs -r rm -f
   else
     log "WARN: unpushed commits in ${clone} but 'git bundle create' failed — clone will be removed" >&2
   fi
@@ -260,7 +319,7 @@ case "$ACTION" in
     # on the refresh path). A genuinely failed add records nothing.
     load_registry_list
     if registry_configured "$REGISTRY_URL"; then
-      write_record "$(registry_name_for_url "$REGISTRY_URL")" "$REGISTRY_URL"
+      record_account_registry "$REGISTRY_URL"
     fi
     exit "$rc"
     ;;
@@ -275,7 +334,7 @@ case "$ACTION" in
       log "WARN: ${REGISTRY_URL} is not configured — nothing recorded" >&2
       exit 1
     fi
-    write_record "$(registry_name_for_url "$REGISTRY_URL")" "$REGISTRY_URL"
+    record_account_registry "$REGISTRY_URL"
     ;;
   update)
     NEW_URL="${SIDEBUTTON_DEFAULT_REGISTRY:-}"
