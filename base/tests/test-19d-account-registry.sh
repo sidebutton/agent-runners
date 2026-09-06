@@ -295,6 +295,34 @@ grep -q "configured registry absent — reconciling" <<<"$out" && has_url "$OWNR
   && ok "absent registry: add-if-missing still self-heals (SCRUM-1167)" \
   || bad "absent registry: the reconcile add did not happen"
 
+# ── 6b. a FAILED remove must not advance the record ─────────────────────────
+# The retry the WARN promises only happens if the next tick still sees REC_URL !=
+# the delivered url. Advancing the record while the old registry is still configured
+# strands it forever for any switch the portal-shape sweep does not cover (own-repo
+# -> own-repo), which is the stacked state this reconcile exists to prevent.
+OWN_OLD="https://github.com/acme/packs-old.git"
+setup_case "$OWNREPO" - "acme-packs-old $OWN_OLD"
+printf 'name=acme-packs-old\nurl=%s\n' "$OWN_OLD" > "$H/.sidebutton/account-registry"
+cp "$FAKEBIN/sidebutton" "$SANDBOX/sidebutton.real"
+# make ONLY `registry remove` fail, exactly once (a transient CLI/filesystem failure)
+sed -i 's|^  remove)$|  remove) [ -f "$SB_STATE.removefail" ] \|\| { : > "$SB_STATE.removefail"; echo "  transient failure" >\&2; exit 1; }|' \
+  "$FAKEBIN/sidebutton"
+run_sync update >/dev/null 2>&1
+grep -qx "url=$OWN_OLD" "$H/.sidebutton/account-registry" 2>/dev/null \
+  && ok "a failed remove leaves the record on the OLD url (so the next tick retries)" \
+  || bad "a failed remove advanced the record to the new url — the switch is never retried: $(record)"
+# next tick: the remove succeeds and the switch completes
+out="$(run_sync update)"
+if [ "$(state_urls)" = "1" ] && has_url "$OWNREPO"; then
+  ok "the retry tick completes the switch (exactly the delivered registry remains)"
+else
+  bad "the switch never completed after a transient remove failure: $(tr '\n' ' ' < "$SANDBOX/state")"
+fi
+grep -qx "url=$OWNREPO" "$H/.sidebutton/account-registry" 2>/dev/null \
+  && ok "the record is advanced only once the old registry is really gone" \
+  || bad "the record was not rewritten after the successful retry: $(record)"
+cp "$SANDBOX/sidebutton.real" "$FAKEBIN/sidebutton"
+
 # ── 7. a third-party registry is NEVER auto-removed ─────────────────────────
 setup_case "$OWNREPO" - "acme-extra-packs $THIRD" "gitsidebuttoncom-4021 $HOSTED"
 run_sync update >/dev/null

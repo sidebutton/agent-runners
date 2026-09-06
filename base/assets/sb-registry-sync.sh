@@ -311,6 +311,7 @@ case "$ACTION" in
     fi
 
     SWITCHED_FROM=""
+    REMOVE_FAILED=0
     if [ "${#STALE_NAMES[@]}" -gt 0 ]; then
       for i in "${!STALE_NAMES[@]}"; do
         log "account registry changed: ${STALE_URLS[$i]} -> ${NEW_URL} — removing ${STALE_NAMES[$i]}"
@@ -320,6 +321,7 @@ case "$ACTION" in
           [ -n "$SWITCHED_FROM" ] || SWITCHED_FROM="${STALE_URLS[$i]}"
         else
           log "WARN: could not remove ${STALE_NAMES[$i]} — will retry next tick" >&2
+          REMOVE_FAILED=1
         fi
       done
       load_registry_list
@@ -342,7 +344,14 @@ case "$ACTION" in
     fi
 
     # ── 3. record + switch log, once the new registry is really configured ───
-    if [ -n "$NEW_URL" ] && { [ -n "$SWITCHED_FROM" ] || [ "$REC_URL" != "$NEW_URL" ]; } \
+    # Only once EVERY stale registry is actually gone. Advancing the record while a
+    # remove is still outstanding would make the next tick see REC_URL == NEW_URL and
+    # stop looking — the "will retry next tick" above would never happen, and for a
+    # switch the portal-shape sweep does not cover (own-repo -> own-repo) the old
+    # registry would stay configured forever, which is the exact stacked state this
+    # whole reconcile exists to prevent.
+    if [ -n "$NEW_URL" ] && [ "$REMOVE_FAILED" = 0 ] \
+       && { [ -n "$SWITCHED_FROM" ] || [ "$REC_URL" != "$NEW_URL" ]; } \
        && registry_configured "$NEW_URL"; then
       write_record "$(registry_name_for_url "$NEW_URL")" "$NEW_URL"
       [ -n "$SWITCHED_FROM" ] && log "registry switched ${SWITCHED_FROM} -> ${NEW_URL}"
