@@ -58,6 +58,17 @@ else
       log "WARN: registry add failed — account modules unavailable until rerun (${SYNC_DEST} add) as ${AGENT_USER}"
     fi
 
+    # Record WHICH registry is the account's, in ~/.sidebutton/account-registry
+    # (name= + url=, 0600, agent-owned). The update timer reads it to notice the
+    # portal delivering a DIFFERENT url — an account switching from the hosted pack
+    # repo to a bring-your-own one — and reconcile remove-then-add instead of
+    # stacking a second registry that fights the first over ~/.sidebutton/skills
+    # (KAN-150). The add above already writes it on success; this second call is
+    # what covers the REFRESH path, where the add fails with "already exists" and
+    # a box provisioned before the record existed would otherwise never get one.
+    su - "$AGENT_USER" -c "${SYNC_DEST} record '${SIDEBUTTON_DEFAULT_REGISTRY}'" \
+      || log "WARN: could not record the account registry — switch detection falls back to the portal-host sweep"
+
     # Oneshot service — runs the helper in update mode as the agent user with the
     # agent env. It re-sources ~/.agent-env itself, so the EnvironmentFile is just
     # belt-and-suspenders (HOME, plus any vars the helper might read directly).
