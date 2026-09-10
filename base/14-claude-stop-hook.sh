@@ -36,18 +36,47 @@ step "Step 14/16: Claude stop hook"
 # runs. With no job-context session id (no active job / old runtime) behavior is
 # unchanged. It stays a PostToolUse-only signal: a tool that is about to run has
 # not produced activity yet.
+#
+# It ALSO carries two per-session side-writes that need both halves of a tool call:
+# the SCRUM-1973 commit-attribution bracket, and the KAN-203 in-flight stash that
+# tells sb-post-request.sh which call a permission Notification is gating.
 cat > "$AGENT_HOME/.local/bin/sb-mark-tool-use.sh" <<'TUEOF'
 #!/usr/bin/env bash
 # stdin: Claude Code hook JSON (carries the firing session's session_id + hook_event_name).
 IN=$(cat 2>/dev/null || true)
-# Both fields in ONE jq: this now runs twice per tool call, so a second fork here is a second fork on
+# Every field in ONE jq: this now runs twice per tool call, so a second fork here is a second fork on
 # every tool call the agent makes.
-SID=""; EVT=""
-# One value per LINE, read with two plain `read`s. A @tsv pair read with IFS=$'\t' is WRONG here: tab
+SID=""; EVT=""; TUID=""; INFLIGHT=""
+# One value per LINE, read with plain `read`s. A @tsv tuple read with IFS=$'\t' is WRONG here: tab
 # is an IFS *whitespace* character, so a payload with an empty session_id ("\tPreToolUse") has its
 # leading empty field collapsed and lands as SID=PreToolUse, EVT="" — which then fails the PreToolUse
 # guard below and stamps last-tool-use from the *opening* half of a tool call.
-{ read -r SID; read -r EVT; } < <(echo "$IN" | jq -r '.session_id // "", .hook_event_name // ""' 2>/dev/null)
+# `-c` keeps the LAST value (the in-flight object, KAN-203) on ONE line: default jq pretty-prints an
+# object across several lines, which would desynchronise the line protocol. Raw strings are
+# unaffected by -c, and the object's own newlines stay escaped inside its JSON strings.
+#
+# The `?` on both tool_input lookups is load-bearing. `.tool_input.command` THROWS when tool_input
+# is not an object (`Cannot index string with "command"`), and jq streams: the first three values
+# are already printed, so the error would leave INFLIGHT empty while SID/EVT/TUID look healthy —
+# a fail-OPEN in which the previous call's record stays on disk as this gate's identity. `?` yields
+# no output instead of throwing, and `//` then falls through to "".
+#
+# `ts` is the write time, so the reader can bound staleness: a call that is denied, interrupted or
+# errors fires NO PostToolUse on this CLI (`PostToolUseFailure`/`PermissionDenied` are separate,
+# unwired events, and a prompt-deny fires neither), so its record is only removed by the weekly
+# janitor. EPOCHSECONDS is a bash-5 builtin — no fork on a path that runs twice per tool call.
+#
+# Newlines are folded to `; ` HERE, at the write, and only newlines: a bash newline IS a statement
+# separator, so `; ` is faithful, while collapsing all whitespace rewrote the command an operator
+# is asked to approve (a double space inside a quoted grep pattern is not noise). One line is what
+# lets the reader use a plain `read`.
+{ read -r SID; read -r EVT; read -r TUID; read -r INFLIGHT; } < <(echo "$IN" | jq -rc \
+    --arg ts "${EPOCHSECONDS:-0}" '
+    .session_id // "", .hook_event_name // "", .tool_use_id // "",
+    { tool_use_id: (.tool_use_id // ""), tool_name: (.tool_name // ""), ts: $ts,
+      command: ((.tool_input.command? // .tool_input.file_path? // "") | tostring
+                | gsub("[\r\n]+"; "; ") | sub("(; )+$"; "") | .[0:2000]) }
+  ' 2>/dev/null)
 # Belt for a broken/absent jq, which leaves EVT empty and used to let the PRE half fall through to the
 # liveness stamp below. Only consulted when jq gave us nothing, so a payload that merely mentions the
 # string cannot suppress a real PostToolUse stamp.
@@ -108,6 +137,43 @@ if [ -n "$SID" ] && [ -n "$_kind" ]; then
           2>/dev/null >> "${HOME}/.sidebutton/session-branches-${SID}.log" || true ;;
     esac
   done
+  # --- KAN-203: stash the call that is IN FLIGHT ------------------------------------------------
+  # Claude Code's permission_prompt Notification says only which TOOL it is gating ("Claude needs
+  # your permission to use Bash"): no tool_use_id, and never the command line. So the needs-input
+  # row that notification opens (sb-post-request.sh) could neither be keyed per gate — every gate in
+  # a session collapsed onto the constant `notif-permission` key, inheriting the previous gate's
+  # answer — nor tell the operator what they were being asked to allow. This file is that missing
+  # context: the PRE half records the call about to run, the POST half clears it, and the capture
+  # forwarder reads it when a Notification fires between the two.
+  #
+  # ONE FILE PER CALL, named by the firing session AND the tool_use_id. A single per-session slot
+  # was last-writer-wins, and Claude runs up to CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY (default 10)
+  # calls at once: the slot then held a SIBLING's call, so the row named the wrong command and two
+  # concurrent gates collapsed onto one key — the very defect this ticket exists to close, one
+  # level down. A per-call name also means the clear is an `rm -f`: no read, no parse, and no
+  # dependence on how jq happened to serialise the object (the old guard matched a JSON document
+  # with a shell glob, so a space after a colon would have silently stopped clearing anything).
+  #
+  # Both components reach a PATH here and both come from stdin JSON, so both get the charset guard
+  # this file already applies to `session_id` in sb-clear-session-stopped.sh and the Stop hook.
+  # Without it `session_id="../x"` writes outside ~/.sidebutton, where the -maxdepth 1 janitor
+  # never reaps it — and a command line can carry an inline token.
+  #
+  # `umask 177` costs one subshell on the PRE half only. Worth it: this is the first file in
+  # ~/.sidebutton to hold raw command text rather than branch/sha metadata, and every other
+  # credential-bearing writer in this repo creates 0600 (base/19-secrets.sh:66 does exactly this).
+  # Same shape as the guard on `session_id` further down this file: reject, never sanitise.
+  _safe=1
+  case "$SID"  in ''|.|..|*[!A-Za-z0-9._-]*) _safe=0 ;; esac
+  case "$TUID" in ''|.|..|*[!A-Za-z0-9._-]*) _safe=0 ;; esac
+  if [ "$_safe" = 1 ]; then
+    _inf="${HOME}/.sidebutton/inflight-tool-${SID}-${TUID}.json"
+    if [ "$_kind" = pre ]; then
+      [ -n "$INFLIGHT" ] && { ( umask 177; printf '%s\n' "$INFLIGHT" > "$_inf" ) 2>/dev/null || true; }
+    else
+      rm -f "$_inf" 2>/dev/null || true
+    fi
+  fi
 fi
 [ "$EVT" = "PreToolUse" ] && exit 0
 JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
@@ -178,9 +244,34 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 # liveness marker / tool-event forwarder so a lingering or operator session can't
 # pollute job-attributed signals (with no job-context session id the signal still
 # posts — an idle operator box is exactly when "needs you" matters). Only a REDUCED,
-# clipped payload leaves the box (question text + option labels / plan / message —
-# never raw tool_input). curl is backgrounded + fully silent: Claude Code must never
-# see this hook fail, and it must never add latency to a blocking prompt.
+# clipped payload leaves the box (question text + option labels / plan / message, and
+# for a permission gate the tool name + command line — never raw tool_input, which
+# runs to 100s of KB for MCP tools). curl is backgrounded + fully silent: Claude Code
+# must never see this hook fail, and it must never add latency to a blocking prompt.
+#
+# KAN-203 — the permission gate. A `permission_prompt` Notification is the only capture
+# with no tool_use_id of its own, and it used to be keyed by the CONSTANT
+# `notif-permission`: every gate a session ever raised upserted one row, so a second
+# gate replaced the first one's payload and inherited its `answer`.
+#
+# The one fact that comes from the gate itself is the tool NAME, which the CLI puts in the
+# notification message ("Claude needs your permission to use <Tool>", one emit site). That
+# name decides both questions:
+#   * shadow — a gate on AskUserQuestion/ExitPlanMode posts NOTHING, because that
+#     notification is Claude re-asking a prompt the operator already has a row for (the
+#     CLI's 6s notify timer firing after sb-await-decision.sh's 100s budget lapses);
+#   * identity — it selects among the in-flight records sb-mark-tool-use.sh keeps, one per
+#     live call, to recover the gate's tool_use_id (the row key) and its command line (so
+#     Allow is not a click on an invisible command).
+# Only an UNAMBIGUOUS match is used — exactly one live, fresh record for that tool. Several
+# concurrent calls on it, a stale record from a denied call, a torn write: all degrade to
+# `notif-permission-<tool>`, a key that is stable per gate and distinct across tools, with
+# the command omitted. Naming the wrong command would be worse than naming none.
+#
+# Reading either fact off the records alone was wrong in both directions: with up to
+# CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY (10) calls in flight the "current" call was often a
+# sibling, which mislabelled the row, and a prompt tool left behind by the designed
+# deny-answer path (which fires no PostToolUse, so nothing clears it) silenced real gates.
 cat > "$AGENT_HOME/.local/bin/sb-post-request.sh" <<'PREOF'
 #!/usr/bin/env bash
 # stdin: Claude Code hook JSON (PreToolUse | PostToolUse | Notification | Stop).
@@ -199,7 +290,8 @@ if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
 TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
 # Map the firing hook event -> (ACTION, KIND, TUID). Exit for anything we don't capture.
-ACTION=""; KIND=""; TUID=""
+# GATE_TOOL/GATE_CMD stay empty for every kind but `permission` (KAN-203).
+ACTION=""; KIND=""; TUID=""; GATE_TOOL=""; GATE_CMD=""
 case "$EVENT" in
   PreToolUse|PostToolUse)
     case "$TOOL" in
@@ -213,7 +305,66 @@ case "$EVENT" in
     ;;
   Notification)
     case "$(echo "$IN" | jq -r '.notification_type // empty' 2>/dev/null || true)" in
-      permission_prompt) ACTION=open; KIND=permission; TUID="notif-permission" ;;
+      permission_prompt)
+        ACTION=open; KIND=permission
+        # KAN-203 — the notification carries no tool_use_id and never the command line. What it DOES
+        # carry is the gated tool's NAME, in its message: the CLI has one emit site for this and it
+        # builds "Claude needs your permission to use <Tool>" (2.1.258). That name is the only fact
+        # about the gate that comes from the gate itself, so it — not a side channel — decides both
+        # questions below.
+        MSG=$(echo "$IN" | jq -r '.message // ""' 2>/dev/null || true)
+        case "$MSG" in
+          *"permission to use "*)
+            GATE_TOOL="${MSG##*permission to use }"
+            GATE_TOOL="${GATE_TOOL%%[!A-Za-z0-9_-]*}" ;;   # first token; also makes it key-safe
+        esac
+        # The +106s shadow row, decided from the NOTIFICATION. When the gated tool IS the prompt
+        # (AskUserQuestion / ExitPlanMode) this notification is Claude re-asking after
+        # sb-await-decision.sh's own 100s budget lapsed: the operator already has a row for that
+        # block and this one's Allow/Deny cannot reach the tool, so post nothing. Reading that fact
+        # off the in-flight record instead got it wrong in BOTH directions — a prompt tool left
+        # stashed by the designed deny-answer path (which fires no PostToolUse, so nothing clears
+        # it) silenced a genuine gate, and a sibling's record hid a real one. The portal keeps the
+        # same rule as a belt (POST /api/agents/requests), and needsYouRequests as a third line.
+        case "$GATE_TOOL" in AskUserQuestion|ExitPlanMode) exit 0 ;; esac
+        # Now correlate with the in-flight records sb-mark-tool-use.sh writes, one per live call,
+        # to recover the tool_use_id (the gate's identity) and the command line (what Allow allows).
+        # ONE jq over the whole glob, and it only accepts an UNAMBIGUOUS answer: exactly one live
+        # record for the tool this notification names. Several concurrent calls on that tool, a
+        # stale record from a denied call, a torn write — all yield nothing, and nothing is the
+        # honest answer. Naming the wrong command is strictly worse than naming none: the operator
+        # would be shown `ls` while the dialog holds `rm -rf /data`.
+        GATE_TUID=""; GATE_CMD=""; NL=$'\n'
+        if [ -n "$GATE_TOOL" ]; then
+          _sel=$(jq -rs --arg tool "$GATE_TOOL" --arg now "$(date +%s 2>/dev/null || echo 0)" '
+              [ .[] | select(type == "object" and .tool_name == $tool)
+                    | select((($now | tonumber) - ((.ts // "0") | tonumber)) <= 900)
+                    | select((.tool_use_id // "") != "") ]
+              | if length == 1 then "\(.[0].tool_use_id)\n\(.[0].command // "")" else empty end
+            ' "${HOME}/.sidebutton/inflight-tool-${SID}"-*.json 2>/dev/null || true)
+          # Split on the single newline jq emitted. Command substitution strips TRAILING newlines,
+          # so an empty command leaves no separator at all — hence the case rather than a bare
+          # `${_sel#*...}`, which would otherwise copy the id into the command.
+          case "$_sel" in
+            *"$NL"*) GATE_TUID="${_sel%%"$NL"*}"; GATE_CMD="${_sel#*"$NL"}" ;;
+            *)       GATE_TUID="$_sel" ;;
+          esac
+        fi
+        # The key must be STABLE across a re-fire of one gate (AC1: one block, one row) and
+        # DISTINCT across gates (AC3). The in-flight tool_use_id is both. A bare epoch is neither —
+        # two gates in the same second collapse, and one unanswered gate mints a fresh row on every
+        # re-notification — so it is now the last resort only: with a tool name but no usable
+        # record, key by the TOOL, which is stable per gate and distinct across tools. Two
+        # same-tool gates then share a row, which is a visibility trade rather than the safety
+        # hazard the old constant key was, because the portal clears `answer` on every re-open.
+        if [ -n "$GATE_TUID" ]; then
+          TUID="notif-permission-${GATE_TUID}"
+        elif [ -n "$GATE_TOOL" ]; then
+          TUID="notif-permission-${GATE_TOOL}"
+        else
+          TUID="notif-permission-$(date +%s 2>/dev/null || echo 0)"
+        fi
+        ;;
       # idle_prompt ("Claude is waiting for your input") is a self-resolving machine state — the
       # portal surfaces idle via the IDLE counter, not the Needs-you band. Capturing it here
       # spammed Needs-you from idle/post-job/between-job sessions, so it falls through to exit 0.
@@ -233,7 +384,8 @@ PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
 if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
 
 if [ "$ACTION" = "open" ]; then
-  PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" '
+  PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" \
+      --arg gtool "$GATE_TOOL" --arg gcmd "$GATE_CMD" '
     def clip($s): ($s // "") | tostring | .[0:2000];
     {
       action: "open", session_id: $sid, tool_use_id: $tuid, kind: $kind,
@@ -246,7 +398,12 @@ if [ "$ACTION" = "open" ]; then
         elif $kind == "plan" then
           { plan: clip(.tool_input.plan // .tool_input.allowedPrompts // "") }
         else
+          # permission — the notification message, plus WHAT is being gated (KAN-203). The portal
+          # already parses payload.command for this kind (parseAgentRequest); both keys are omitted
+          # when there is no stash to read, so the row degrades to exactly the shape it has today.
           { message: clip(.message), title: clip(.title) }
+          + (if $gtool == "" then {} else { tool: clip($gtool) } end)
+          + (if $gcmd  == "" then {} else { command: clip($gcmd) } end)
         end
       )
     }' 2>/dev/null || true)
@@ -486,7 +643,7 @@ mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
 # Janitor: these are per-session files on a persistent VM that runs 12-23 sessions a day, and nothing
 # else deletes them. A week is far longer than any session (the tidy timer closes a TUI after 60min).
 find "${HOME}/.sidebutton" -maxdepth 1 -type f \
-  \( -name 'session-heads-*.json' -o -name 'session-branches-*.log' \) \
+  \( -name 'session-heads-*.json' -o -name 'session-branches-*.log' -o -name 'inflight-tool-*.json' \) \
   -mtime +7 -delete 2>/dev/null || true
 OUT="${HOME}/.sidebutton/session-heads-${SID}.json"
 # First SessionStart of a session wins. SessionStart re-fires with the SAME session_id on resume and on
