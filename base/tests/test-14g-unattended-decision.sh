@@ -192,6 +192,23 @@ echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext | test("SQLite \\(Rec
   && ok "options given as bare strings are picked correctly (.label on a string THROWS in jq)" \
   || bad "bare-string options were not handled: $OUT"
 
+# The marker is a CONVENTION, not a guarantee — AskUserQuestion asks for it only "if you recommend
+# a specific option", so most real prompts carry none. The hook must still decide (AC1), but it must
+# not tell the model, or the audit row, that it took a marked option when it took the first one.
+Q_UNMARKED='{"hook_event_name":"PreToolUse","session_id":"S","tool_name":"AskUserQuestion",
+  "tool_use_id":"toolu_q4","tool_input":{"questions":[{"question":"Merge now?",
+  "options":[{"label":"Merge now"},{"label":"Abort"}]}]}}'
+fire "$Q_UNMARKED" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=3
+echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext | test("Merge now")' >/dev/null 2>&1 \
+  && ok "an unmarked prompt is still decided — on the first option (AC1 holds for most real prompts)" \
+  || bad "an unmarked prompt was left to hang: $OUT"
+echo "$OUT" | jq -e '.hookSpecificOutput.additionalContext | test("FIRST option")' >/dev/null 2>&1 \
+  && ok "…and the steer says it was the FIRST option, not a marked one (no invented recommendation)" \
+  || bad "the steer claims a (Recommended) marker the prompt never carried: $OUT"
+echo "$(tail -1 "$POST_LOG")" | jq -e '.answer | test("first option")' >/dev/null 2>&1 \
+  && ok "…and the row records the same, so the audit trail is not a fiction" \
+  || bad "the row claims a marked option: $(tail -1 "$POST_LOG")"
+
 fire "$Q_NONE" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=3
 [ -z "$OUT" ] && ok "a question with NO options falls through silently — never decide on uncertainty" \
   || bad "invented a decision for an optionless question: $OUT"
@@ -282,6 +299,13 @@ if [ "$(gets)" -le 6 ]; then
 else
   bad "poll storm: $(gets) polls in a 3s budget — the back-off is still empty-response-only"
 fi
+
+# A zero budget runs no poll at all, so the portal is never asked. Before KAN-204 that meant "do not
+# block this prompt"; turning it into "auto-answer it" would be deciding on uncertainty by definition.
+fire "$Q_MARKED" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=0
+{ [ -z "$OUT" ] && [ "$(gets)" = 0 ] && [ "$(posts)" = 0 ]; } \
+  && ok "a 0 budget falls through silently and decides nothing (it asked nobody)" \
+  || bad "a 0 budget auto-decided off zero polls: out='$OUT' polls=$(gets) posts=$(posts)"
 
 # stdin the hook must ignore outright.
 for junk in '' 'not json' '{"hook_event_name":"PostToolUse","session_id":"S","tool_name":"AskUserQuestion"}' \

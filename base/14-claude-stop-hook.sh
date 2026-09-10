@@ -259,7 +259,8 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 # name decides both questions:
 #   * shadow — a gate on AskUserQuestion/ExitPlanMode posts NOTHING, because that
 #     notification is Claude re-asking a prompt the operator already has a row for (the
-#     CLI's 6s notify timer firing after sb-await-decision.sh's 100s budget lapses);
+#     CLI's 6s notify timer firing after sb-await-decision.sh's wait budget lapses — 900s on an
+#     unattended job since KAN-204, 100s on an attended one, not the flat 100s it was);
 #   * identity — it selects among the in-flight records sb-mark-tool-use.sh keeps, one per
 #     live call, to recover the gate's tool_use_id (the row key) and its command line (so
 #     Allow is not a click on an invisible command).
@@ -320,7 +321,8 @@ case "$EVENT" in
         esac
         # The +106s shadow row, decided from the NOTIFICATION. When the gated tool IS the prompt
         # (AskUserQuestion / ExitPlanMode) this notification is Claude re-asking after
-        # sb-await-decision.sh's own 100s budget lapsed: the operator already has a row for that
+        # sb-await-decision.sh's own wait budget lapsed (900s unattended / 100s attended since
+        # KAN-204, not the flat 100s this used to say): the operator already has a row for that
         # block and this one's Allow/Deny cannot reach the tool, so post nothing. Reading that fact
         # off the in-flight record instead got it wrong in BOTH directions — a prompt tool left
         # stashed by the designed deny-answer path (which fires no PostToolUse, so nothing clears
@@ -569,6 +571,11 @@ fi
 # is how an attended box would silently inherit the 900s wait this split exists to keep off it.
 case "$TOTAL" in ''|*[!0-9]*) TOTAL="$DEF" ;; esac
 [ "$TOTAL" -gt "$CEIL" ] && TOTAL="$CEIL"
+# An explicit 0 keeps the meaning it had before KAN-204 — "do not block this prompt" — and must NOT
+# become "decide without ever asking". A zero budget runs no poll at all, so the portal never gets
+# the one chance this whole return half exists to give it; auto-deciding off the back of zero polls
+# would be deciding on uncertainty by definition. Fall through silently instead.
+[ "$TOTAL" -lt 1 ] && exit 0
 
 START=$SECONDS
 
@@ -583,10 +590,13 @@ emit() {
   exit 0
 }
 
-# Close the portal row ourselves when we auto-decide. Not belt-and-braces: a DENIED tool call fires
-# no PostToolUse hook, so sb-post-request.sh's resolve never runs on this path and the Needs-you row
-# would sit `open` for the rest of the session. `answer` records WHAT was auto-chosen; the portal
-# ignores the field on an older deployment, which degrades to today's answer-less resolve.
+# Close the portal row ourselves when we auto-decide. On the question path that is not
+# belt-and-braces: a DENIED tool call fires no PostToolUse hook, so sb-post-request.sh's resolve
+# never runs there and the Needs-you row would sit `open` for the rest of the session. The plan path
+# ALLOWS, so its PostToolUse resolve does still run — but answer-less, and the portal's resolve never
+# clears an answer already recorded (COALESCE), so calling this first is what puts the auto-approval
+# on the row at all. `answer` records WHAT was auto-chosen; an older portal ignores the field, which
+# degrades to today's answer-less resolve.
 resolve_row() {
   local body
   body=$(jq -nc --arg sid "$SID" --arg tuid "$TUID" --arg kind "$KIND" --arg ans "$1" \
@@ -654,22 +664,35 @@ fi
 # `.label` on a string THROWS in jq, which is the shape that silently kills the sibling capture
 # helper today. Unmarked options fall back to the first. No options at all yields [] and the hook
 # stays silent — never decide on uncertainty.
+# `how` is not bookkeeping: the marker is only a CONVENTION, not a guarantee. AskUserQuestion asks
+# for it conditionally ("if you recommend a specific option"), so plenty of real prompts carry none
+# and the pick then falls back to the FIRST option — which is the same slot that convention puts a
+# recommendation in, so it is the right default, but it is NOT a marked one. Saying "the option
+# marked (Recommended)" either way would tell the model, and the portal row, something untrue about
+# a decision nobody reviewed. Both strings below therefore state which of the two actually happened.
 PICKS=$(printf '%s' "$IN" | jq -c '
   def lab: if type == "string" then . else (.label // empty) end;
   [ .tool_input.questions[]?
-    | { q: (.question // .header // "question"),
-        pick: ( [ .options[]? | lab ] as $L
-                | ( [ $L[] | select(test("\\(Recommended\\)"; "i")) ] | first ) // ( $L | first ) ) } ]
+    | { q: (.question // .header // "question") }
+      + ( [ .options[]? | lab ] as $L
+          | ( [ $L[] | select(test("\\(Recommended\\)"; "i")) ] | first ) as $m
+          | if $m != null then { pick: $m,            how: "marked" }
+                          else { pick: ( $L | first ), how: "first"  } end ) ]
   | map(select(.pick != null))' 2>/dev/null || true)
 case "$PICKS" in ''|'[]') exit 0 ;; esac
 
-CHOICE=$(printf '%s' "$PICKS" | jq -r 'map("\(.q) -> \(.pick)") | join(" | ")' 2>/dev/null || true)
-LINES=$(printf '%s' "$PICKS" | jq -r 'map("- \(.q): \(.pick)") | join("\n")' 2>/dev/null || true)
+CHOICE=$(printf '%s' "$PICKS" | jq -r 'map("\(.q) -> \(.pick)"
+  + (if .how == "marked" then " (marked (Recommended))" else " (first option — the prompt marked none)" end))
+  | join(" | ")' 2>/dev/null || true)
+LINES=$(printf '%s' "$PICKS" | jq -r 'map("- \(.q): \(.pick)"
+  + (if .how == "marked" then "  [the option this prompt marks (Recommended)]"
+                         else "  [the FIRST option — this prompt marked no recommendation]" end))
+  | join("\n")' 2>/dev/null || true)
 [ -z "$CHOICE" ] && exit 0
 
 resolve_row "auto-selected by the agent: no operator answer within ${TOTAL}s — ${CHOICE}"
-emit deny "No operator answered within ${TOTAL}s and this run is unattended, so the recommended option was auto-selected." \
-  "$(printf 'Nobody answered your question within %ss and this run is unattended, so the SideButton operator hook selected the option already marked (Recommended) rather than leave the run blocked on a dialog no one will see:\n%s\nTreat that as the user answer, continue the task with it, and do not ask this question again.' "$TOTAL" "$LINES")"
+emit deny "No operator answered within ${TOTAL}s and this run is unattended, so the prompt's own default option was auto-selected." \
+  "$(printf 'Nobody answered your question within %ss and this run is unattended, so the SideButton operator hook answered it for you from the prompt itself rather than leave the run blocked on a dialog no one will see — taking the option marked (Recommended) where the prompt marks one, and otherwise the first option, which is the slot that marker conventionally occupies:\n%s\nTreat that as the user answer, continue the task with it, and do not ask this question again.' "$TOTAL" "$LINES")"
 AWAITEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-await-decision.sh"
 
@@ -686,8 +709,14 @@ chmod +x "$AGENT_HOME/.local/bin/sb-await-decision.sh"
 # rewrites ~/.sidebutton/. `sudo sb-self-update` re-runs this step, so the marker heals itself.
 #
 # Opting out on an operator-driven / BYO box, both durable across a self-update:
-#   touch ~/.sidebutton/attended       — this block then never re-creates the marker
-#   SB_UNATTENDED=0 in ~/.agent-env    — explicit env beats the file in either direction
+#   touch ~/.sidebutton/attended       — this block then never re-creates the marker. PREFER THIS:
+#                                        it is agent-owned state that no portal lane rewrites.
+#   SB_UNATTENDED=0 in ~/.agent-env    — explicit env beats the file in either direction. Durable in
+#                                        practice but not by construction: config-apply rewrites that
+#                                        file wholesale from the portal's column, and the line only
+#                                        survives because the VM reports its env up and mergeAgentEnv
+#                                        re-attaches every key the portal does not own. An apply that
+#                                        lands before the first health report after the edit drops it.
 SB_MARK_DIR="$AGENT_HOME/.sidebutton"
 mkdir -p "$SB_MARK_DIR" 2>/dev/null || true
 if [ -d "$SB_MARK_DIR" ] && [ ! -e "$SB_MARK_DIR/attended" ]; then
