@@ -259,7 +259,8 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 # name decides both questions:
 #   * shadow — a gate on AskUserQuestion/ExitPlanMode posts NOTHING, because that
 #     notification is Claude re-asking a prompt the operator already has a row for (the
-#     CLI's 6s notify timer firing after sb-await-decision.sh's 100s budget lapses);
+#     CLI's 6s notify timer firing after sb-await-decision.sh's wait budget lapses — 900s on an
+#     unattended job since KAN-204, 100s on an attended one, not the flat 100s it was);
 #   * identity — it selects among the in-flight records sb-mark-tool-use.sh keeps, one per
 #     live call, to recover the gate's tool_use_id (the row key) and its command line (so
 #     Allow is not a click on an invisible command).
@@ -320,7 +321,8 @@ case "$EVENT" in
         esac
         # The +106s shadow row, decided from the NOTIFICATION. When the gated tool IS the prompt
         # (AskUserQuestion / ExitPlanMode) this notification is Claude re-asking after
-        # sb-await-decision.sh's own 100s budget lapsed: the operator already has a row for that
+        # sb-await-decision.sh's own wait budget lapsed (900s unattended / 100s attended since
+        # KAN-204, not the flat 100s this used to say): the operator already has a row for that
         # block and this one's Allow/Deny cannot reach the tool, so post nothing. Reading that fact
         # off the in-flight record instead got it wrong in BOTH directions — a prompt tool left
         # stashed by the designed deny-answer path (which fires no PostToolUse, so nothing clears
@@ -424,7 +426,7 @@ exit 0
 PREOF
 chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
 
-# --- Needs-input answer return (SCRUM-1375) -----------------------------------
+# --- Needs-input answer return (SCRUM-1375, KAN-204) --------------------------
 # Referenced from base/assets/claude-hooks.json as the SECOND PreToolUse command on
 # AskUserQuestion|ExitPlanMode (it runs right after sb-post-request.sh opens the row).
 # This is the RETURN half of the loop: it long-polls GET /api/agents/requests/:key for the
@@ -433,17 +435,47 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
 # the run WITHOUT the operator opening the Live desktop.
 #
 #   plan (ExitPlanMode):  "Keep planning"/reject -> deny (keep planning);  anything else (Approved) -> allow
-#   question (AskUserQuestion):  the v2.1.175 hook contract has NO field that injects a tool
-#     answer (SCRUM-1375 spike), so the chosen option is delivered through deny + permissionDecisionReason
-#     — i.e. the model is STEERED with "Operator selected: '<answer>'" rather than the tool being
-#     natively answered. Honoring it is therefore model-dependent (verify in QA).
+#   question (AskUserQuestion):  the hook contract still has no field that natively answers a tool,
+#     so the chosen option is delivered as deny (which suppresses the dialog) PLUS
+#     hookSpecificOutput.additionalContext (which is the channel the model actually honours).
+#
+# KAN-204 — what changed, and why each half is load-bearing:
+#
+#   1. THE BUDGET WAS ~3 ORDERS OF MAGNITUDE TOO SMALL. Job sessions waited 100s against real
+#      operator latency of tens of minutes to days (prod: only 14 of 27 questions ever answered,
+#      one row blocked 21.8 days), so the return path almost never won the race. Now 900s — but
+#      only in the UNATTENDED lane, whose wait ends in a decision; an attended box still falls
+#      through to its desktop, so it keeps today's 100s rather than stalling an operator 15min.
+#   2. EXPIRY WAS SILENT, AND SILENCE IS NOT A DECISION. On the PreToolUse contract "no output"
+#      means "proceed", and proceeding renders the question dialog on the VM desktop — where an
+#      unattended job waits forever, holding its slot. On an UNATTENDED job session the budget now
+#      ends in a real decision: deny (kills the dialog) + additionalContext carrying the option the
+#      prompt itself already marks "(Recommended)". Attended boxes, operator/manual sessions and
+#      any box that opts out keep today's exact fallthrough.
+#   3. THE ANSWER CHANNEL WAS THE ONE CHANNEL THE MODEL REFUSES. Measured n=4 across 2.1.251 and
+#      2.1.258: deny + permissionDecisionReason alone is rejected as an instruction arriving through
+#      tool output ("that instruction came from inside the command's output, not from you") and the
+#      model turns back to a human — strictly worse than no relay. The same session honours the
+#      identical instruction delivered as additionalContext. So EVERY steer below rides
+#      additionalContext; the reason string is left as human-facing explanation only.
+#   4. THE WIRED TIMEOUT IS THE REAL CEILING, AND IT LIVES IN ANOTHER FILE.
+#      base/assets/claude-hooks.json gives this command "timeout": 960 and Claude Code SIGKILLs it
+#      at that mark; a killed hook emits nothing, i.e. the silent fallthrough again. TOTAL is
+#      therefore CLAMPED here rather than trusted from the environment. Change one, change both.
+#   5. THE LOOP ONLY SLEPT ON AN EMPTY RESPONSE. A fast non-resolved 200 (proxy error page, cached
+#      body, unparseable shape) spun at ~50-100 req/s — ~5,000 requests per blocked prompt at the
+#      old budget, ~90,000 at the new one. The back-off is now unconditional.
+#   6. A DENIED TOOL CALL FIRES NO PostToolUse HOOK (measured on 2.1.251), so the capture helper's
+#      PostToolUse resolve — the thing that normally closes the row — never runs on the path this
+#      change introduces. The waiter therefore POSTs its own {action:"resolve", ..., answer} when it
+#      auto-decides, or the agent_requests row would outlive the prompt exactly as it does today.
 #
 # Strictly gated to THIS job's session (JOB_SID == SID): a manual/operator Claude on the box,
 # or any non-job session, exits 0 immediately so its prompts render normally and are never
-# blocked. On any miss — no answer within the budget, network error, missing token, the row
-# resolved on the desktop instead — it exits 0 with NO output, so the tool proceeds exactly as
-# today (AC: free-form / idle / timeout still route to the Live desktop). It NEVER denies on
-# uncertainty; a deny is emitted only when a real operator answer says so.
+# blocked. On any miss — network error, missing token, an unparseable prompt, the row resolved on
+# the desktop, or an expiry on an attended box — it exits 0 with NO output, so the tool proceeds
+# exactly as before. It NEVER decides on uncertainty: a question that carries no options at all
+# yields no pick and falls through silently.
 cat > "$AGENT_HOME/.local/bin/sb-await-decision.sh" <<'AWAITEOF'
 #!/usr/bin/env bash
 # stdin: Claude Code PreToolUse hook JSON (AskUserQuestion | ExitPlanMode).
@@ -469,6 +501,8 @@ SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
 # before the prompt falls through to the terminal.
 JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
 if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+IS_JOB=0
+if [ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ]; then IS_JOB=1; fi
 
 TUID=$(echo "$IN" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
 [ -z "$TUID" ] && TUID="$TOOL"          # same stable fallback the capture forwarder uses
@@ -485,54 +519,221 @@ if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
 # the path param, so %-encoding the colon (the previous '$s|@uri' → "%3A") never matched the stored
 # key: the agent saw status:pending forever and fell through to the terminal ("declined"). Raw matches.
 KEY_ENC="$KEY"
+
 # A portal answer is delivered within ~1s either way (the server returns the moment the row leaves
-# 'open'); WAIT_PER/TOTAL only bound the *fallthrough* when nobody answers. Job sessions (operator
-# away) poll in long cycles up to a long budget; operator/manual sessions use short cycles + a small
+# 'open'); WAIT_PER/TOTAL only bound what happens when NOBODY answers. Job sessions (operator away)
+# poll in long cycles up to a long budget; operator/manual sessions use short cycles + a small
 # budget so an interactive desktop isn't frozen — the prompt falls through to the terminal quickly.
-if [ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ]; then
-  WAIT_PER=25; TOTAL="${SB_REQUEST_WAIT_TOTAL:-100}"          # job: long-poll <= endpoint cap 30
-else
-  WAIT_PER=8;  TOTAL="${SB_REQUEST_WAIT_TOTAL_OPERATOR:-30}"  # operator: responsive fallthrough
+#
+# CEIL is not decoration. base/assets/claude-hooks.json wires this command with "timeout": 960 and
+# Claude Code SIGKILLs it there; a killed hook writes nothing, which is precisely the silent
+# fallthrough KAN-204 exists to remove. So an over-large SB_REQUEST_WAIT_TOTAL is clamped, not
+# obeyed, and CEIL must stay under that wired timeout by at least one poll cycle (WAIT_PER + the
+# curl --max-time slack) plus the auto-decide + resolve POST. Raise one, raise the other.
+# Unattended discriminator (KAN-204 step 3), resolved BEFORE the budget because it SETS the budget
+# (see below). Job sessions only — an operator/manual session is already excluded above. Explicit
+# env wins in BOTH directions so a box can opt out without deleting anything; otherwise the marker
+# file decides. It is a FILE and not an ~/.agent-env line by default because that file has two
+# writers and the portal's config-apply rewrites it wholesale (serializeEnvLines), so an appended
+# marker is erased on the next apply — whereas ~/.sidebutton/ is agent-owned state that nothing
+# rewrites. base/14 creates ~/.sidebutton/unattended at install and refresh, and never re-creates
+# it once ~/.sidebutton/attended exists.
+UNATTENDED=0
+if [ "$IS_JOB" = 1 ]; then
+  case "$(printf '%s' "${SB_UNATTENDED:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on)  UNATTENDED=1 ;;
+    0|false|no|off) UNATTENDED=0 ;;
+    *) if [ -f "${HOME}/.sidebutton/unattended" ] && [ ! -f "${HOME}/.sidebutton/attended" ]; then
+         UNATTENDED=1
+       fi ;;
+  esac
 fi
+
+# THE LONG BUDGET BELONGS TO THE UNATTENDED LANE ONLY. 900s is worth waiting when the wait ENDS IN A
+# DECISION — nobody is watching, so the only cost of waiting is the chance an operator answers in the
+# portal. On a box that opted out the wait still ends in SILENCE and the prompt falls through to the
+# Live desktop, so a raised budget there buys nothing and costs the one thing that lane cares about:
+# the operator sitting at that desktop would stare at a run doing nothing for 15 minutes before the
+# dialog they are waiting for appeared (100s today). So an attended job session keeps today's 100s
+# exactly — "unchanged" in AC3 means the latency too, not just the fallthrough. An explicit
+# SB_REQUEST_WAIT_TOTAL still wins in either lane, up to CEIL.
+if [ "$IS_JOB" = 1 ]; then
+  WAIT_PER=25; CEIL=900                                        # job: long-poll <= endpoint cap 30
+  if [ "$UNATTENDED" = 1 ]; then
+    DEF=900; TOTAL="${SB_REQUEST_WAIT_TOTAL:-900}"             # auto-decides at the end of it
+  else
+    DEF=100; TOTAL="${SB_REQUEST_WAIT_TOTAL:-100}"             # falls through to the desktop: stay quick
+  fi
+else
+  WAIT_PER=8;  CEIL=60; DEF=30; TOTAL="${SB_REQUEST_WAIT_TOTAL_OPERATOR:-30}"  # operator: responsive fallthrough
+fi
+# A malformed budget falls back to this lane's DEFAULT, not to CEIL: treating garbage as "the maximum"
+# is how an attended box would silently inherit the 900s wait this split exists to keep off it.
+case "$TOTAL" in ''|*[!0-9]*) TOTAL="$DEF" ;; esac
+[ "$TOTAL" -gt "$CEIL" ] && TOTAL="$CEIL"
+# An explicit 0 keeps the meaning it had before KAN-204 — "do not block this prompt" — and must NOT
+# become "decide without ever asking". A zero budget runs no poll at all, so the portal never gets
+# the one chance this whole return half exists to give it; auto-deciding off the back of zero polls
+# would be deciding on uncertainty by definition. Fall through silently instead.
+[ "$TOTAL" -lt 1 ] && exit 0
+
 START=$SECONDS
 
-emit() {  # $1=allow|deny  $2=reason
-  jq -nc --arg d "$1" --arg r "$2" \
-    '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:$d, permissionDecisionReason:$r}}' \
+# $1=allow|deny  $2=permissionDecisionReason (human-facing)  $3=additionalContext (the STEER).
+# Anything meant to change what the model does next belongs in $3: a bare deny reason is refused
+# as injected tool output (KAN-204 note 3), while additionalContext is honoured on PreToolUse.
+emit() {
+  jq -nc --arg d "$1" --arg r "$2" --arg c "${3:-}" \
+    '{hookSpecificOutput: ({hookEventName:"PreToolUse", permissionDecision:$d, permissionDecisionReason:$r}
+       + (if $c == "" then {} else {additionalContext:$c} end))}' \
     2>/dev/null || true
   exit 0
+}
+
+# Close the portal row ourselves when we auto-decide. On the question path that is not
+# belt-and-braces: a DENIED tool call fires no PostToolUse hook, so sb-post-request.sh's resolve
+# never runs there and the Needs-you row would sit `open` for the rest of the session. The plan path
+# ALLOWS, so its PostToolUse resolve does still run — but answer-less, and the portal's resolve never
+# clears an answer already recorded (COALESCE), so calling this first is what puts the auto-approval
+# on the row at all. `answer` records WHAT was auto-chosen; an older portal ignores the field, which
+# degrades to today's answer-less resolve.
+resolve_row() {
+  local body
+  body=$(jq -nc --arg sid "$SID" --arg tuid "$TUID" --arg kind "$KIND" --arg ans "$1" \
+    '{action:"resolve", session_id:$sid, tool_use_id:$tuid, kind:$kind, answer:$ans}' 2>/dev/null || true)
+  [ -z "$body" ] && return 0
+  curl -4 -sf -X POST "${PORTAL_URL}/api/agents/requests" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${AGENT_TOKEN}" \
+    -H "X-Agent-Name: ${AGENT_NAME}" \
+    -d "$body" --connect-timeout 2 --max-time 5 >/dev/null 2>&1 || true
 }
 
 while [ $((SECONDS - START)) -lt "$TOTAL" ]; do
   RESP=$(curl -4 -sf "${PORTAL_URL}/api/agents/requests/${KEY_ENC}?wait=${WAIT_PER}" \
     -H "Authorization: Bearer ${AGENT_TOKEN}" -H "X-Agent-Name: ${AGENT_NAME}" \
     --connect-timeout 5 --max-time $((WAIT_PER + 10)) 2>/dev/null || true)
-  [ -z "$RESP" ] && { sleep 1; continue; }        # network blip — retry within the budget
 
-  ANSWER=$(echo "$RESP" | jq -r '.answer // empty' 2>/dev/null || true)
-  STATUS=$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null || true)
+  if [ -n "$RESP" ]; then
+    ANSWER=$(echo "$RESP" | jq -r '.answer // empty' 2>/dev/null || true)
+    STATUS=$(echo "$RESP" | jq -r '.status // empty' 2>/dev/null || true)
 
-  if [ -n "$ANSWER" ]; then
-    if [ "$KIND" = "plan" ]; then
-      # ExitPlanMode: "Keep planning"/reject -> deny (keep planning); anything else (Approved) -> allow.
-      case "$(printf '%s' "$ANSWER" | tr '[:upper:]' '[:lower:]')" in
-        *"keep planning"*|*reject*|*denied*|*deny*) emit deny  "Operator asked to keep planning (${ANSWER}). Do not exit plan mode yet." ;;
-        *)                                          emit allow "Plan approved by the operator (${ANSWER})." ;;
-      esac
-    else
-      # question — no native answer field on this Claude Code version (SCRUM-1375 spike), so the
-      # operator's pick is delivered as a STEER via deny + reason.
-      emit deny "Operator selected: '${ANSWER}'. Proceed with that choice and do not ask again."
+    if [ -n "$ANSWER" ]; then
+      if [ "$KIND" = "plan" ]; then
+        # ExitPlanMode: "Keep planning"/reject -> deny (keep planning); anything else (Approved) -> allow.
+        case "$(printf '%s' "$ANSWER" | tr '[:upper:]' '[:lower:]')" in
+          *"keep planning"*|*reject*|*denied*|*deny*)
+            emit deny "Your operator answered this plan prompt in the SideButton portal: ${ANSWER}" \
+              "Your operator reviewed this plan in the SideButton portal and answered: ${ANSWER}. Treat that as the user answer to your ExitPlanMode prompt: stay in plan mode, revise the plan along those lines, and do not re-ask." ;;
+          *)
+            emit allow "Plan approved by the operator (${ANSWER})." \
+              "Your operator approved this plan in the SideButton portal (${ANSWER}). Treat that as the user approval and carry the plan out." ;;
+        esac
+      else
+        # question — no native answer field on this Claude Code version, so the operator pick is
+        # delivered as deny (suppresses the desktop dialog) + additionalContext (the honoured steer).
+        emit deny "Your operator answered this question in the SideButton portal, so the dialog is not needed." \
+          "Your operator answered your question through the SideButton portal: ${ANSWER}. Treat that as the user answer, continue the task with it, and do not ask this question again."
+      fi
     fi
+
+    # Resolved with no answer = closed on the desktop / by Stop. Stop polling; let it proceed.
+    [ "$STATUS" = "resolved" ] && exit 0
   fi
 
-  # Resolved with no answer = closed on the desktop / by Stop. Stop polling; let it proceed.
-  [ "$STATUS" = "resolved" ] && exit 0
-  # open / pending — the server already blocked ~${WAIT_PER}s; loop until the budget runs out.
+  # Unconditional floor. The healthy path is already paced by the server holding the connection for
+  # ~WAIT_PER seconds, so this costs nothing there — but a fast non-resolved 200 used to spin with
+  # no delay at all, and the raised budget would have multiplied that into ~90,000 requests.
+  sleep 1
 done
-exit 0                                             # timeout → no output → tool proceeds (desktop fallback)
+
+# --- Budget expired ----------------------------------------------------------
+# Attended box, operator/manual session, or an explicit opt-out: unchanged — no output, the tool
+# proceeds, the prompt renders on the Live desktop for whoever is sitting there.
+[ "$UNATTENDED" = 1 ] || exit 0
+
+if [ "$KIND" = "plan" ]; then
+  resolve_row "auto-approved by the agent: no operator answer within ${TOTAL}s (unattended run)"
+  emit allow "No operator answered within ${TOTAL}s and this run is unattended." \
+    "Nobody answered this plan prompt within ${TOTAL}s and this run is unattended, so the SideButton operator hook approved the plan for you rather than leave the run blocked on a dialog no one will see. Carry out the plan you presented and do not ask for approval again."
+fi
+
+# question — pick the option the prompt itself already marks "(Recommended)", agent-side. That
+# marker travels in this hook's own stdin (tool_input.questions[].options[].label), so no portal
+# round-trip is needed. `lab` handles options given as BARE STRINGS as well as {label} objects:
+# `.label` on a string THROWS in jq, which is the shape that silently kills the sibling capture
+# helper today. Unmarked options fall back to the first. No options at all yields [] and the hook
+# stays silent — never decide on uncertainty.
+# `how` is not bookkeeping: the marker is only a CONVENTION, not a guarantee. AskUserQuestion asks
+# for it conditionally ("if you recommend a specific option"), so plenty of real prompts carry none
+# and the pick then falls back to the FIRST option — which is the same slot that convention puts a
+# recommendation in, so it is the right default, but it is NOT a marked one. Saying "the option
+# marked (Recommended)" either way would tell the model, and the portal row, something untrue about
+# a decision nobody reviewed. Both strings below therefore state which of the two actually happened.
+PICKS=$(printf '%s' "$IN" | jq -c '
+  def lab: if type == "string" then . else (.label // empty) end;
+  [ .tool_input.questions[]?
+    | { q: (.question // .header // "question") }
+      + ( [ .options[]? | lab ] as $L
+          | ( [ $L[] | select(test("\\(Recommended\\)"; "i")) ] | first ) as $m
+          | if $m != null then { pick: $m,            how: "marked" }
+                          else { pick: ( $L | first ), how: "first"  } end ) ]
+  | map(select(.pick != null))' 2>/dev/null || true)
+case "$PICKS" in ''|'[]') exit 0 ;; esac
+
+CHOICE=$(printf '%s' "$PICKS" | jq -r 'map("\(.q) -> \(.pick)"
+  + (if .how == "marked" then " (marked (Recommended))" else " (first option — the prompt marked none)" end))
+  | join(" | ")' 2>/dev/null || true)
+LINES=$(printf '%s' "$PICKS" | jq -r 'map("- \(.q): \(.pick)"
+  + (if .how == "marked" then "  [the option this prompt marks (Recommended)]"
+                         else "  [the FIRST option — this prompt marked no recommendation]" end))
+  | join("\n")' 2>/dev/null || true)
+[ -z "$CHOICE" ] && exit 0
+
+resolve_row "auto-selected by the agent: no operator answer within ${TOTAL}s — ${CHOICE}"
+emit deny "No operator answered within ${TOTAL}s and this run is unattended, so the prompt's own default option was auto-selected." \
+  "$(printf 'Nobody answered your question within %ss and this run is unattended, so the SideButton operator hook answered it for you from the prompt itself rather than leave the run blocked on a dialog no one will see — taking the option marked (Recommended) where the prompt marks one, and otherwise the first option, which is the slot that marker conventionally occupies:\n%s\nTreat that as the user answer, continue the task with it, and do not ask this question again.' "$TOTAL" "$LINES")"
 AWAITEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-await-decision.sh"
+
+# --- Unattended marker (KAN-204) ---------------------------------------------
+# The discriminator sb-await-decision.sh reads to tell a hosted, unattended job session from an
+# operator-driven box where somebody is watching the Live desktop. The two are otherwise
+# INDISTINGUISHABLE to the hook — both are "the job session" — and getting it wrong in either
+# direction is bad: auto-deciding under an operator steals their choice, never auto-deciding leaves
+# every hosted job one unanswered prompt away from an indefinite hang.
+#
+# Presence = unattended. It is written here, beside job-context.json, rather than as an
+# ~/.agent-env line because that file has two writers and the portal's config-apply rewrites it
+# WHOLESALE (serializeEnvLines) — an appended marker is erased on the next apply, whereas nothing
+# rewrites ~/.sidebutton/. `sudo sb-self-update` re-runs this step, so the marker heals itself.
+#
+# Opting out on an operator-driven / BYO box, both durable across a self-update:
+#   touch ~/.sidebutton/attended       — this block then never re-creates the marker. PREFER THIS:
+#                                        it is agent-owned state that no portal lane rewrites.
+#   SB_UNATTENDED=0 in ~/.agent-env    — explicit env beats the file in either direction. Durable in
+#                                        practice but not by construction: config-apply rewrites that
+#                                        file wholesale from the portal's column, and the line only
+#                                        survives because the VM reports its env up and mergeAgentEnv
+#                                        re-attaches every key the portal does not own. An apply that
+#                                        lands before the first health report after the edit drops it.
+SB_MARK_DIR="$AGENT_HOME/.sidebutton"
+mkdir -p "$SB_MARK_DIR" 2>/dev/null || true
+if [ -d "$SB_MARK_DIR" ] && [ ! -e "$SB_MARK_DIR/attended" ]; then
+  cat > "$SB_MARK_DIR/unattended" <<'UNATTEOF'
+# KAN-204 — this box runs portal-dispatched jobs with nobody at the desktop.
+# sb-await-decision.sh reads the PRESENCE of this file (job sessions only): when a needs-input
+# prompt goes unanswered for the whole wait budget it auto-decides — taking the option the prompt
+# marks (Recommended) — instead of falling through to a dialog no one will ever click.
+# To opt out (either one survives `sudo sb-self-update`):
+#   touch ~/.sidebutton/attended
+#   SB_UNATTENDED=0 in ~/.agent-env
+UNATTEOF
+  chown "$AGENT_USER:$AGENT_USER" "$SB_MARK_DIR/unattended" 2>/dev/null || true
+  log "unattended marker: ~/.sidebutton/unattended (KAN-204 auto-decide armed for job sessions)"
+else
+  log "unattended marker: skipped — ~/.sidebutton/attended present (operator-driven box)"
+fi
 
 # --- Operator steer drain (SCRUM-1378) ----------------------------------------
 # Referenced from base/assets/claude-hooks.json as a PostToolUse `.*` command. THE agent-side
