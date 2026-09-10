@@ -441,7 +441,9 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
 #
 #   1. THE BUDGET WAS ~3 ORDERS OF MAGNITUDE TOO SMALL. Job sessions waited 100s against real
 #      operator latency of tens of minutes to days (prod: only 14 of 27 questions ever answered,
-#      one row blocked 21.8 days), so the return path almost never won the race. Now 900s.
+#      one row blocked 21.8 days), so the return path almost never won the race. Now 900s — but
+#      only in the UNATTENDED lane, whose wait ends in a decision; an attended box still falls
+#      through to its desktop, so it keeps today's 100s rather than stalling an operator 15min.
 #   2. EXPIRY WAS SILENT, AND SILENCE IS NOT A DECISION. On the PreToolUse contract "no output"
 #      means "proceed", and proceeding renders the question dialog on the VM desktop — where an
 #      unattended job waits forever, holding its slot. On an UNATTENDED job session the budget now
@@ -526,21 +528,14 @@ KEY_ENC="$KEY"
 # fallthrough KAN-204 exists to remove. So an over-large SB_REQUEST_WAIT_TOTAL is clamped, not
 # obeyed, and CEIL must stay under that wired timeout by at least one poll cycle (WAIT_PER + the
 # curl --max-time slack) plus the auto-decide + resolve POST. Raise one, raise the other.
-if [ "$IS_JOB" = 1 ]; then
-  WAIT_PER=25; TOTAL="${SB_REQUEST_WAIT_TOTAL:-900}";           CEIL=900   # job: long-poll <= endpoint cap 30
-else
-  WAIT_PER=8;  TOTAL="${SB_REQUEST_WAIT_TOTAL_OPERATOR:-30}";   CEIL=60    # operator: responsive fallthrough
-fi
-case "$TOTAL" in ''|*[!0-9]*) TOTAL="$CEIL" ;; esac
-[ "$TOTAL" -gt "$CEIL" ] && TOTAL="$CEIL"
-
-# Unattended discriminator (KAN-204 step 3). Job sessions only — an operator/manual session is
-# already excluded above. Explicit env wins in BOTH directions so a box can opt out without
-# deleting anything; otherwise the marker file decides. It is a FILE and not an ~/.agent-env line
-# by default because that file has two writers and the portal's config-apply rewrites it wholesale
-# (serializeEnvLines), so an appended marker is erased on the next apply — whereas ~/.sidebutton/
-# is agent-owned state that nothing rewrites. base/14 creates ~/.sidebutton/unattended at install
-# and refresh, and never re-creates it once ~/.sidebutton/attended exists.
+# Unattended discriminator (KAN-204 step 3), resolved BEFORE the budget because it SETS the budget
+# (see below). Job sessions only — an operator/manual session is already excluded above. Explicit
+# env wins in BOTH directions so a box can opt out without deleting anything; otherwise the marker
+# file decides. It is a FILE and not an ~/.agent-env line by default because that file has two
+# writers and the portal's config-apply rewrites it wholesale (serializeEnvLines), so an appended
+# marker is erased on the next apply — whereas ~/.sidebutton/ is agent-owned state that nothing
+# rewrites. base/14 creates ~/.sidebutton/unattended at install and refresh, and never re-creates
+# it once ~/.sidebutton/attended exists.
 UNATTENDED=0
 if [ "$IS_JOB" = 1 ]; then
   case "$(printf '%s' "${SB_UNATTENDED:-}" | tr '[:upper:]' '[:lower:]')" in
@@ -551,6 +546,29 @@ if [ "$IS_JOB" = 1 ]; then
        fi ;;
   esac
 fi
+
+# THE LONG BUDGET BELONGS TO THE UNATTENDED LANE ONLY. 900s is worth waiting when the wait ENDS IN A
+# DECISION — nobody is watching, so the only cost of waiting is the chance an operator answers in the
+# portal. On a box that opted out the wait still ends in SILENCE and the prompt falls through to the
+# Live desktop, so a raised budget there buys nothing and costs the one thing that lane cares about:
+# the operator sitting at that desktop would stare at a run doing nothing for 15 minutes before the
+# dialog they are waiting for appeared (100s today). So an attended job session keeps today's 100s
+# exactly — "unchanged" in AC3 means the latency too, not just the fallthrough. An explicit
+# SB_REQUEST_WAIT_TOTAL still wins in either lane, up to CEIL.
+if [ "$IS_JOB" = 1 ]; then
+  WAIT_PER=25; CEIL=900                                        # job: long-poll <= endpoint cap 30
+  if [ "$UNATTENDED" = 1 ]; then
+    DEF=900; TOTAL="${SB_REQUEST_WAIT_TOTAL:-900}"             # auto-decides at the end of it
+  else
+    DEF=100; TOTAL="${SB_REQUEST_WAIT_TOTAL:-100}"             # falls through to the desktop: stay quick
+  fi
+else
+  WAIT_PER=8;  CEIL=60; DEF=30; TOTAL="${SB_REQUEST_WAIT_TOTAL_OPERATOR:-30}"  # operator: responsive fallthrough
+fi
+# A malformed budget falls back to this lane's DEFAULT, not to CEIL: treating garbage as "the maximum"
+# is how an attended box would silently inherit the 900s wait this split exists to keep off it.
+case "$TOTAL" in ''|*[!0-9]*) TOTAL="$DEF" ;; esac
+[ "$TOTAL" -gt "$CEIL" ] && TOTAL="$CEIL"
 
 START=$SECONDS
 

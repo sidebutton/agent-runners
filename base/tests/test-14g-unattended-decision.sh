@@ -78,6 +78,18 @@ fi
 grep -q 'SB_REQUEST_WAIT_TOTAL:-900' "$WAITER" \
   && ok "the job budget is 900s, not the 100s that expired on essentially every real prompt" \
   || bad "the job budget is not 900s — real operator latency is tens of minutes to days"
+# …and the long budget is scoped to the lane that AUTO-DECIDES at the end of it. An attended /
+# opted-out job session still falls through to the Live desktop, so raising ITS budget buys nothing
+# and costs the only thing that lane has: an operator sitting at that desktop would wait 15 minutes
+# for the dialog instead of 100s. "Unchanged" in AC3 is about the latency too, not just the silence.
+grep -q 'SB_REQUEST_WAIT_TOTAL:-100' "$WAITER" \
+  && ok "an attended job session keeps today's 100s default (AC3 — unchanged means the latency too)" \
+  || bad "the 900s budget applies to attended boxes too — an operator waits 15min for their dialog"
+# Garbage in the env must fall back to the lane DEFAULT, not to the ceiling: "max on garbage" is how
+# an attended box would silently inherit the long wait this split exists to keep off it.
+grep -q 'TOTAL="\$DEF"' "$WAITER" \
+  && ok "a malformed SB_REQUEST_WAIT_TOTAL falls back to the lane default, not to the ceiling" \
+  || bad "a malformed budget falls back to CEIL — an attended box inherits the 900s wait"
 
 # ── 2. sandbox: fake HOME, a job context, and a curl that answers polls + records POSTs ──────────
 export HOME="$TMP/home"
@@ -197,6 +209,13 @@ fire "$Q_MARKED" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=3
 fire "$Q_MARKED" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=3 SB_UNATTENDED=1
 [ -n "$OUT" ] && ok "SB_UNATTENDED=1 arms it again even with the attended marker present" \
   || bad "SB_UNATTENDED=1 was ignored"
+# The lane split changed the DEFAULT only — an explicit budget still wins on an attended box, and
+# that box still polls for the operator's portal answer for exactly as long as it is told to.
+START_T=$SECONDS
+fire "$Q_MARKED" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=3 SB_UNATTENDED=0
+{ [ -z "$OUT" ] && [ $((SECONDS - START_T)) -lt 30 ] && [ "$(gets)" -ge 1 ]; } \
+  && ok "an attended box still honours an explicit budget, then falls through silently" \
+  || bad "an explicit budget was ignored on an attended box: out='$OUT' polls=$(gets)"
 rm -f "$HOME/.sidebutton/attended"
 
 # base/14 must actually WRITE the marker, or the whole lane is dead code on every real box.
