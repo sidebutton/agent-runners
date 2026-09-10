@@ -36,18 +36,29 @@ step "Step 14/16: Claude stop hook"
 # runs. With no job-context session id (no active job / old runtime) behavior is
 # unchanged. It stays a PostToolUse-only signal: a tool that is about to run has
 # not produced activity yet.
+#
+# It ALSO carries two per-session side-writes that need both halves of a tool call:
+# the SCRUM-1973 commit-attribution bracket, and the KAN-203 in-flight stash that
+# tells sb-post-request.sh which call a permission Notification is gating.
 cat > "$AGENT_HOME/.local/bin/sb-mark-tool-use.sh" <<'TUEOF'
 #!/usr/bin/env bash
 # stdin: Claude Code hook JSON (carries the firing session's session_id + hook_event_name).
 IN=$(cat 2>/dev/null || true)
-# Both fields in ONE jq: this now runs twice per tool call, so a second fork here is a second fork on
+# Every field in ONE jq: this now runs twice per tool call, so a second fork here is a second fork on
 # every tool call the agent makes.
-SID=""; EVT=""
-# One value per LINE, read with two plain `read`s. A @tsv pair read with IFS=$'\t' is WRONG here: tab
+SID=""; EVT=""; TUID=""; INFLIGHT=""
+# One value per LINE, read with plain `read`s. A @tsv tuple read with IFS=$'\t' is WRONG here: tab
 # is an IFS *whitespace* character, so a payload with an empty session_id ("\tPreToolUse") has its
 # leading empty field collapsed and lands as SID=PreToolUse, EVT="" — which then fails the PreToolUse
 # guard below and stamps last-tool-use from the *opening* half of a tool call.
-{ read -r SID; read -r EVT; } < <(echo "$IN" | jq -r '.session_id // "", .hook_event_name // ""' 2>/dev/null)
+# `-c` keeps the LAST value (the in-flight object, KAN-203) on ONE line: default jq pretty-prints an
+# object across several lines, which would desynchronise the line protocol. Raw strings are
+# unaffected by -c, and the object's own newlines stay escaped inside its JSON strings.
+{ read -r SID; read -r EVT; read -r TUID; read -r INFLIGHT; } < <(echo "$IN" | jq -rc '
+    .session_id // "", .hook_event_name // "", .tool_use_id // "",
+    { tool_use_id: (.tool_use_id // ""), tool_name: (.tool_name // ""),
+      command: ((.tool_input.command // .tool_input.file_path // "") | tostring | .[0:2000]) }
+  ' 2>/dev/null)
 # Belt for a broken/absent jq, which leaves EVT empty and used to let the PRE half fall through to the
 # liveness stamp below. Only consulted when jq gave us nothing, so a payload that merely mentions the
 # string cannot suppress a real PostToolUse stamp.
@@ -108,6 +119,29 @@ if [ -n "$SID" ] && [ -n "$_kind" ]; then
           2>/dev/null >> "${HOME}/.sidebutton/session-branches-${SID}.log" || true ;;
     esac
   done
+  # --- KAN-203: stash the call that is IN FLIGHT ------------------------------------------------
+  # Claude Code's permission_prompt Notification says only which TOOL it is gating ("Claude needs
+  # your permission to use Bash"): no tool_use_id, and never the command line. So the needs-input
+  # row that notification opens (sb-post-request.sh) could neither be keyed per gate — every gate in
+  # a session collapsed onto the constant `notif-permission` key, inheriting the previous gate's
+  # answer — nor tell the operator what they were being asked to allow. This file is that missing
+  # context: the PRE half records the call about to run, the POST half clears it, and the capture
+  # forwarder reads it when a Notification fires between the two.
+  #
+  # Keyed by the FIRING session's own id, exactly like the bracket above, so interleaved jobs cannot
+  # overwrite each other. One small file, no fork: the object came from the single jq at the top.
+  _inf="${HOME}/.sidebutton/inflight-tool-${SID}.json"
+  if [ "$_kind" = pre ]; then
+    [ -n "$INFLIGHT" ] && { printf '%s\n' "$INFLIGHT" 2>/dev/null > "$_inf" || true; }
+  elif [ -n "$TUID" ] && [ -f "$_inf" ]; then
+    # Clear only OUR OWN tool_use_id. Claude issues tool calls in parallel, so a sibling's
+    # completion must not erase the call that is actually holding the gate. Fork-free: `read` is a
+    # builtin and the compact object always has this substring for the id it carries.
+    _cur=""; read -r _cur < "$_inf" 2>/dev/null || _cur=""
+    case "$_cur" in
+      *"\"tool_use_id\":\"${TUID}\""*) printf '' 2>/dev/null > "$_inf" || true ;;
+    esac
+  fi
 fi
 [ "$EVT" = "PreToolUse" ] && exit 0
 JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
@@ -178,9 +212,20 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 # liveness marker / tool-event forwarder so a lingering or operator session can't
 # pollute job-attributed signals (with no job-context session id the signal still
 # posts — an idle operator box is exactly when "needs you" matters). Only a REDUCED,
-# clipped payload leaves the box (question text + option labels / plan / message —
-# never raw tool_input). curl is backgrounded + fully silent: Claude Code must never
-# see this hook fail, and it must never add latency to a blocking prompt.
+# clipped payload leaves the box (question text + option labels / plan / message, and
+# for a permission gate the tool name + command line — never raw tool_input, which
+# runs to 100s of KB for MCP tools). curl is backgrounded + fully silent: Claude Code
+# must never see this hook fail, and it must never add latency to a blocking prompt.
+#
+# KAN-203 — the permission gate. A `permission_prompt` Notification is the only capture
+# with no tool_use_id of its own, and it used to be keyed by the CONSTANT
+# `notif-permission`: every gate a session ever raised upserted one row, so a second
+# gate replaced the first one's payload and inherited its `answer`. It is now keyed by
+# the in-flight call (base/14 sb-mark-tool-use.sh's stash), whose command line it also
+# carries so Allow is not a click on an invisible command — and when the call in flight
+# is AskUserQuestion/ExitPlanMode it posts NOTHING, because that notification is Claude
+# re-asking a prompt the operator already has a row for (the CLI's 6s notify timer
+# firing after sb-await-decision.sh's 100s budget lapses).
 cat > "$AGENT_HOME/.local/bin/sb-post-request.sh" <<'PREOF'
 #!/usr/bin/env bash
 # stdin: Claude Code hook JSON (PreToolUse | PostToolUse | Notification | Stop).
@@ -199,7 +244,8 @@ if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
 TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
 # Map the firing hook event -> (ACTION, KIND, TUID). Exit for anything we don't capture.
-ACTION=""; KIND=""; TUID=""
+# GATE_TOOL/GATE_CMD stay empty for every kind but `permission` (KAN-203).
+ACTION=""; KIND=""; TUID=""; GATE_TOOL=""; GATE_CMD=""
 case "$EVENT" in
   PreToolUse|PostToolUse)
     case "$TOOL" in
@@ -213,7 +259,38 @@ case "$EVENT" in
     ;;
   Notification)
     case "$(echo "$IN" | jq -r '.notification_type // empty' 2>/dev/null || true)" in
-      permission_prompt) ACTION=open; KIND=permission; TUID="notif-permission" ;;
+      permission_prompt)
+        ACTION=open; KIND=permission
+        # KAN-203 — the notification carries the tool NAME in its message and nothing else, so read
+        # the call sb-mark-tool-use.sh stashed on the still-open PreToolUse. `-s` skips both the
+        # missing file and the emptied one a PostToolUse leaves behind. The command comes LAST and
+        # has its whitespace collapsed: jq -r un-escapes the JSON string's newlines, and a real
+        # newline in it would desynchronise this line protocol.
+        INF="${HOME}/.sidebutton/inflight-tool-${SID}.json"
+        GATE_TUID=""
+        if [ -s "$INF" ]; then
+          { read -r GATE_TUID; read -r GATE_TOOL; read -r GATE_CMD; } < <(
+            jq -r '.tool_use_id // "", .tool_name // "", ((.command // "") | gsub("\\s+"; " "))' \
+              "$INF" 2>/dev/null)
+        fi
+        # The +106s shadow row: when the in-flight call IS the prompt (AskUserQuestion /
+        # ExitPlanMode), this notification is Claude re-asking after sb-await-decision.sh's own
+        # 100s budget lapsed. The operator already has a row for that block, and this one's
+        # Allow/Deny cannot reach the tool — so post nothing. The portal keeps the same rule as a
+        # belt (POST /api/agents/requests), and needsYouRequests as a render-time third line.
+        case "$GATE_TOOL" in AskUserQuestion|ExitPlanMode) exit 0 ;; esac
+        # Key per GATE, not per session. `notif-permission` was a constant, so
+        # request_key = session:notif-permission was unique per session and a second gate upserted
+        # the first one's row — carrying over its `answer`, which any future waiter would replay
+        # onto a destructive command no human ever saw. The in-flight tool_use_id is the gate's own
+        # identity and keeps a re-fired notification for ONE gate idempotent; the epoch fallback
+        # only has to be unique, since with no stash there is nothing to correlate with anyway.
+        if [ -n "$GATE_TUID" ]; then
+          TUID="notif-permission-${GATE_TUID}"
+        else
+          TUID="notif-permission-$(date +%s 2>/dev/null || echo 0)"
+        fi
+        ;;
       # idle_prompt ("Claude is waiting for your input") is a self-resolving machine state — the
       # portal surfaces idle via the IDLE counter, not the Needs-you band. Capturing it here
       # spammed Needs-you from idle/post-job/between-job sessions, so it falls through to exit 0.
@@ -233,7 +310,8 @@ PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
 if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
 
 if [ "$ACTION" = "open" ]; then
-  PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" '
+  PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" \
+      --arg gtool "$GATE_TOOL" --arg gcmd "$GATE_CMD" '
     def clip($s): ($s // "") | tostring | .[0:2000];
     {
       action: "open", session_id: $sid, tool_use_id: $tuid, kind: $kind,
@@ -246,7 +324,12 @@ if [ "$ACTION" = "open" ]; then
         elif $kind == "plan" then
           { plan: clip(.tool_input.plan // .tool_input.allowedPrompts // "") }
         else
+          # permission — the notification message, plus WHAT is being gated (KAN-203). The portal
+          # already parses payload.command for this kind (parseAgentRequest); both keys are omitted
+          # when there is no stash to read, so the row degrades to exactly the shape it has today.
           { message: clip(.message), title: clip(.title) }
+          + (if $gtool == "" then {} else { tool: $gtool } end)
+          + (if $gcmd  == "" then {} else { command: clip($gcmd) } end)
         end
       )
     }' 2>/dev/null || true)
@@ -486,7 +569,7 @@ mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
 # Janitor: these are per-session files on a persistent VM that runs 12-23 sessions a day, and nothing
 # else deletes them. A week is far longer than any session (the tidy timer closes a TUI after 60min).
 find "${HOME}/.sidebutton" -maxdepth 1 -type f \
-  \( -name 'session-heads-*.json' -o -name 'session-branches-*.log' \) \
+  \( -name 'session-heads-*.json' -o -name 'session-branches-*.log' -o -name 'inflight-tool-*.json' \) \
   -mtime +7 -delete 2>/dev/null || true
 OUT="${HOME}/.sidebutton/session-heads-${SID}.json"
 # First SessionStart of a session wins. SessionStart re-fires with the SAME session_id on resume and on
