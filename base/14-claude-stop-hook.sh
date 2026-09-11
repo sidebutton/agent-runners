@@ -291,8 +291,10 @@ if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
 TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
 # Map the firing hook event -> (ACTION, KIND, TUID). Exit for anything we don't capture.
-# GATE_TOOL/GATE_CMD stay empty for every kind but `permission` (KAN-203).
-ACTION=""; KIND=""; TUID=""; GATE_TOOL=""; GATE_CMD=""
+# GATE_TOOL/GATE_CMD stay empty for every kind but `permission` (KAN-203); BLOCK_TYPE is set
+# only by the elicitation/needs-input notifications (KAN-205) and is what tells the payload
+# builder that a `question` row came from a Notification and has no tool_input to read.
+ACTION=""; KIND=""; TUID=""; GATE_TOOL=""; GATE_CMD=""; BLOCK_TYPE=""
 case "$EVENT" in
   PreToolUse|PostToolUse)
     case "$TOOL" in
@@ -305,7 +307,10 @@ case "$EVENT" in
     [ -z "$TUID" ] && TUID="$TOOL"   # stable fallback so the open/resolve pair still correlates
     ;;
   Notification)
-    case "$(echo "$IN" | jq -r '.notification_type // empty' 2>/dev/null || true)" in
+    # Read once: KAN-205 keys the elicitation rows by this and its payload names it, so the old
+    # inline read inside the `case` head would now have had to run three times.
+    NTYPE=$(echo "$IN" | jq -r '.notification_type // empty' 2>/dev/null || true)
+    case "$NTYPE" in
       permission_prompt)
         ACTION=open; KIND=permission
         # KAN-203 — the notification carries no tool_use_id and never the command line. What it DOES
@@ -367,10 +372,37 @@ case "$EVENT" in
           TUID="notif-permission-$(date +%s 2>/dev/null || echo 0)"
         fi
         ;;
+      elicitation_dialog|elicitation_url_dialog|agent_needs_input)
+        # KAN-205 (c) — these three ARE needs-you states and used to hit the fall-through below, so a
+        # session blocked on an MCP elicitation dialog showed as busy with no signal at all: not on
+        # the Needs-you band, not in the chat rail, nowhere. All three names are real (they ship as
+        # string literals in the CLI, 2.1.251+), and unlike idle_prompt none of them self-resolves —
+        # each one is the session waiting on a human.
+        #
+        # kind=question, deliberately, and that is the whole reason this arm is a few lines rather
+        # than a four-site portal change. `AgentRequestKind` is question|permission|plan|idle and the
+        # portal validates it at POST /api/agents/requests, so a FOURTH kind is a 400 at capture —
+        # the row would not render wrong, it would never exist. `question` is already in both
+        # NEEDS_YOU_REQUEST_KINDS and BLOCKING_REQUEST_KINDS, so the row renders and draws its
+        # controls with no portal change at all. The distinction is not lost either: the payload
+        # carries notification_type, so which of the three raised it survives into the row.
+        ACTION=open; KIND=question; BLOCK_TYPE="$NTYPE"
+        # The key must be STABLE across a re-notification of one block and DISTINCT across blocks —
+        # the same contract the permission arm above reasons through. These notifications carry no
+        # tool_use_id and name no tool, so there is nothing to correlate against: the TYPE is the
+        # strongest identity available, stable per block and distinct across the three. Two
+        # successive elicitations of the SAME type in one session share a row — the same visibility
+        # trade the permission arm accepts for its own last resort, and safe for the same reason:
+        # the portal clears `answer` on every re-open, so a stale Allow cannot be replayed onto a
+        # later block. An epoch key would be neither stable nor safe (every re-notification would
+        # mint a fresh row for one unanswered block).
+        TUID="notif-${NTYPE}"
+        ;;
       # idle_prompt ("Claude is waiting for your input") is a self-resolving machine state — the
       # portal surfaces idle via the IDLE counter, not the Needs-you band. Capturing it here
       # spammed Needs-you from idle/post-job/between-job sessions, so it falls through to exit 0.
-      *) exit 0 ;;   # idle_prompt / auth_success / elicitation_* — not a needs-you state
+      # KAN-205 extends the `case` ABOVE and deliberately leaves this fall-through in place.
+      *) exit 0 ;;   # idle_prompt / auth_success — not a needs-you state
     esac
     ;;
   Stop)
@@ -387,12 +419,24 @@ if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
 
 if [ "$ACTION" = "open" ]; then
   PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" \
-      --arg gtool "$GATE_TOOL" --arg gcmd "$GATE_CMD" '
+      --arg gtool "$GATE_TOOL" --arg gcmd "$GATE_CMD" --arg btype "$BLOCK_TYPE" '
     def clip($s): ($s // "") | tostring | .[0:2000];
     {
       action: "open", session_id: $sid, tool_use_id: $tuid, kind: $kind,
       payload: (
-        if $kind == "question" then
+        if $btype != "" then
+          # KAN-205 — a `question` row raised by a NOTIFICATION, not by AskUserQuestion. There is no
+          # .tool_input on this event, so the branch below would build `questions: []` and hand the
+          # operator a needs-you row with no text in it at all. The notification carries its own
+          # prompt in .message, so that becomes the single question; options are genuinely empty (the
+          # dialog itself lives on the VM desktop), which the portal already renders — it is the
+          # open-ended AskUserQuestion shape. `message` rides along because parseAgentRequest falls
+          # back to it, and notification_type preserves which block this was, which reusing the
+          # `question` kind would otherwise have erased.
+          { questions: [ { question: clip(.message // .title // $btype), options: [] } ],
+            notification_type: $btype, message: clip(.message) }
+          + (if (.title // "") == "" then {} else { title: clip(.title) } end)
+        elif $kind == "question" then
           { questions: [ (.tool_input.questions // [])[] | {
               question: clip(.question),
               options: [ (.options // [])[] | (.label // .) ]
