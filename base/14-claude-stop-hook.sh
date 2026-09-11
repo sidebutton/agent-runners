@@ -681,8 +681,23 @@ while [ $((SECONDS - START)) -lt "$TOTAL" ]; do
       fi
     fi
 
-    # Resolved with no answer = closed on the desktop / by Stop. Stop polling; let it proceed.
-    [ "$STATUS" = "resolved" ] && exit 0
+    # A row that has LEFT 'open' is TERMINAL: stop polling and let the tool proceed. `resolved` with
+    # no answer is a close on the desktop / by Stop. `expired` is the portal's KAN-205 TTL sweep
+    # closing a row nothing alive could own any more — the route documents it as the same
+    # fallthrough as an answerless `resolved`, and it only becomes that if this loop actually stops
+    # here. Matching on "not open, not pending" rather than listing statuses is what makes that true
+    # for the reserved `dismissed` as well: the route returns `open` only when the wait budget
+    # elapsed and `pending` only when no row exists yet, so every OTHER status it can return is a
+    # row that is closed for good.
+    #
+    # Falling through the whole budget instead is not a harmless delay on an unattended box: the
+    # budget ends in the KAN-204 auto-decide, so a swept row would be answered by option ordering
+    # rather than fallen through — an unreviewed decision produced by the very sweep that exists to
+    # clear rows nobody can answer.
+    case "$STATUS" in
+      ''|open|pending) ;;   # still blocked, or the open POST has not landed yet — keep polling
+      *) exit 0 ;;          # resolved | expired | dismissed — closed for good, fall through
+    esac
   fi
 
   # Unconditional floor. The healthy path is already paced by the server holding the connection for

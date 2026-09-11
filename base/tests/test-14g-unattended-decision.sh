@@ -263,6 +263,43 @@ CLOSED='{"requestKey":"S:toolu_q1","kind":"question","status":"resolved","answer
 fire "$Q_MARKED" SB_GET_REPLY="$CLOSED" SB_REQUEST_WAIT_TOTAL=30
 [ -z "$OUT" ] && ok "a row closed on the desktop (resolved, no answer) still falls through silently" \
   || bad "invented a decision for a desktop-resolved row: $OUT"
+[ "$(gets)" = 1 ] && ok "…returning on the FIRST poll, not burning the budget" \
+  || bad "kept polling a row that was already closed: $(gets) polls"
+
+# KAN-205 — `expired` is a TERMINAL status too, and it is NEW: the portal's 24h TTL sweep writes it
+# on open rows nothing alive can own. The read route documents it as the same fallthrough as an
+# answerless `resolved`, and that is only true if this loop STOPS on it. A waiter that terminated on
+# the literal string "resolved" alone kept polling instead — and on an unattended box the budget
+# ends in the KAN-204 auto-decide, so a SWEPT row would come back as an unreviewed decision picked
+# from option ordering. That is the exact harm KAN-205 exists to remove, re-entered through its own
+# fix. Assert the fallthrough AND the promptness, because "eventually falls through" is what the
+# broken shape did on an attended box.
+EXPIRED='{"requestKey":"S:toolu_q1","kind":"question","status":"expired","answer":null}'
+fire "$Q_MARKED" SB_GET_REPLY="$EXPIRED" SB_REQUEST_WAIT_TOTAL=30
+[ -z "$OUT" ] && ok "an expired row (KAN-205 TTL sweep) falls through silently, it does not decide" \
+  || bad "the TTL sweep produced an auto-decision: $OUT"
+[ "$(gets)" = 1 ] && ok "…on the FIRST poll, so the sweep never reaches the KAN-204 auto-decide" \
+  || bad "expired did not stop the poll loop: $(gets) polls — the budget would end in an auto-decide"
+[ "$(posts)" = 0 ] && ok "…and posts no resolve over a row the portal already closed" \
+  || bad "re-resolved a row the TTL sweep had already expired"
+
+# The reserved fourth status must behave the same the day it ships — the guard is written as
+# "not open, not pending", so this passes without another edit here.
+DISMISSED='{"requestKey":"S:toolu_q1","kind":"question","status":"dismissed","answer":null}'
+fire "$Q_MARKED" SB_GET_REPLY="$DISMISSED" SB_REQUEST_WAIT_TOTAL=30
+{ [ -z "$OUT" ] && [ "$(gets)" = 1 ]; } \
+  && ok "the reserved 'dismissed' status is terminal too (the guard is not a status allowlist)" \
+  || bad "dismissed kept polling: out='$OUT' polls=$(gets)"
+
+# …while the two NON-terminal replies must still keep polling, or this guard would have "fixed" the
+# fallthrough by breaking the wait the whole feature is built on.
+fire "$Q_MARKED" SB_GET_REPLY='{"requestKey":"S:toolu_q1","kind":null,"status":"pending","answer":null}' \
+     SB_REQUEST_WAIT_TOTAL=3
+[ "$(gets)" -ge 2 ] && ok "'pending' (open POST not landed yet) still polls — it is not terminal" \
+  || bad "'pending' stopped the loop after $(gets) poll(s) — the portal loses its chance to answer"
+fire "$Q_MARKED" SB_GET_REPLY="$OPEN" SB_REQUEST_WAIT_TOTAL=3
+[ "$(gets)" -ge 2 ] && ok "'open' still polls for the whole budget — the operator's window is intact" \
+  || bad "'open' stopped the loop after $(gets) poll(s)"
 
 # ── 7. ExitPlanMode: the same hang, the same fix ─────────────────────────────────────────────────
 fire "$PLAN" SB_GET_REPLY='{"requestKey":"S:toolu_p1","kind":"plan","status":"open","answer":null}' \
