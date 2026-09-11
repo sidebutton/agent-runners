@@ -402,7 +402,12 @@ case "$EVENT" in
       # portal surfaces idle via the IDLE counter, not the Needs-you band. Capturing it here
       # spammed Needs-you from idle/post-job/between-job sessions, so it falls through to exit 0.
       # KAN-205 extends the `case` ABOVE and deliberately leaves this fall-through in place.
-      *) exit 0 ;;   # idle_prompt / auth_success — not a needs-you state
+      # Not everything still dropped here is harmless: the 2.1.251 enum has 14 members, and
+      # `worker_permission_prompt` (a worker/subagent permission gate) is a REAL blocking state
+      # that lands in this arm. It is outside KAN-205's stated scope — that ticket names three
+      # types — but it is the same blind spot, so name it rather than let the next reader infer
+      # from "idle_prompt / auth_success" that nothing blocking is left uncaptured.
+      *) exit 0 ;;   # idle_prompt / auth_success / agent_completed / worker_permission_prompt (known gap)
     esac
     ;;
   Stop)
@@ -421,6 +426,8 @@ if [ "$ACTION" = "open" ]; then
   PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" \
       --arg gtool "$GATE_TOOL" --arg gcmd "$GATE_CMD" --arg btype "$BLOCK_TYPE" '
     def clip($s): ($s // "") | tostring | .[0:2000];
+    # null / false / "" all mean "absent" here; `//` alone would let "" through as a real value.
+    def nz($s): if ($s // "") == "" then null else $s end;
     {
       action: "open", session_id: $sid, tool_use_id: $tuid, kind: $kind,
       payload: (
@@ -433,9 +440,21 @@ if [ "$ACTION" = "open" ]; then
           # open-ended AskUserQuestion shape. `message` rides along because parseAgentRequest falls
           # back to it, and notification_type preserves which block this was, which reusing the
           # `question` kind would otherwise have erased.
-          { questions: [ { question: clip(.message // .title // $btype), options: [] } ],
-            notification_type: $btype, message: clip(.message) }
-          + (if (.title // "") == "" then {} else { title: clip(.title) } end)
+          # `nz` not `//`: the `//` operator only catches null/false, so an empty-string .message would
+          # sail through it and leave the row with no text at all. Last resort is the type name —
+          # never an empty question.
+          #
+          # The prompt text says WHERE to answer, and that is not decoration. For two of the three
+          # types Claude Code .message is a compile-time constant ("Claude Code needs your input" /
+          # "An MCP server needs your input", 2.1.251) and the dialog itself lives on the VM
+          # desktop with no return path back through this row, so the portal answer box cannot
+          # clear it. Without the hint the operator gets an answer box indistinguishable from a
+          # working one, on a row that names neither the server nor the ask.
+          (nz(.message) // nz(.title) // $btype) as $msg |
+          { questions: [ { question: clip($msg + " — open on the Live desktop of this agent; answer it there (" + $btype + ")."),
+                           options: [] } ],
+            notification_type: $btype, message: clip($msg) }
+          + (if nz(.title) == null then {} else { title: clip(.title) } end)
         elif $kind == "question" then
           { questions: [ (.tool_input.questions // [])[] | {
               question: clip(.question),
@@ -685,18 +704,21 @@ while [ $((SECONDS - START)) -lt "$TOTAL" ]; do
     # no answer is a close on the desktop / by Stop. `expired` is the portal's KAN-205 TTL sweep
     # closing a row nothing alive could own any more — the route documents it as the same
     # fallthrough as an answerless `resolved`, and it only becomes that if this loop actually stops
-    # here. Matching on "not open, not pending" rather than listing statuses is what makes that true
-    # for the reserved `dismissed` as well: the route returns `open` only when the wait budget
-    # elapsed and `pending` only when no row exists yet, so every OTHER status it can return is a
-    # row that is closed for good.
+    # here. The three values are listed EXPLICITLY — every terminal status the column can hold, the
+    # reserved `dismissed` included, so it is right the day that ships. The tempting inverse, "treat
+    # anything that is not open/pending as terminal", is wrong in the dangerous direction: any 200
+    # that is not this route's JSON (a proxy's `{"status":"ok"}`, a cached error body) would then
+    # end the loop on the FIRST poll with no output — and silence on PreToolUse MEANS "proceed",
+    # reinstating the exact silent fallthrough KAN-204 removed, on an unattended box where the
+    # dialog then renders on a desktop nobody is watching. An unrecognised status must keep polling
+    # and end in the auto-decide, which is what an allowlist gives and a denylist does not.
     #
     # Falling through the whole budget instead is not a harmless delay on an unattended box: the
     # budget ends in the KAN-204 auto-decide, so a swept row would be answered by option ordering
     # rather than fallen through — an unreviewed decision produced by the very sweep that exists to
     # clear rows nobody can answer.
     case "$STATUS" in
-      ''|open|pending) ;;   # still blocked, or the open POST has not landed yet — keep polling
-      *) exit 0 ;;          # resolved | expired | dismissed — closed for good, fall through
+      resolved|expired|dismissed) exit 0 ;;   # closed for good — fall through, do not decide
     esac
   fi
 

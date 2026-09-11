@@ -73,6 +73,24 @@ posts()  { [ -f "$CURL_LOG" ] && wc -l < "$CURL_LOG" | tr -d ' ' || echo 0; }
 body()   { tail -1 "$CURL_LOG"; }
 notif()  { printf '{"hook_event_name":"Notification","session_id":"S","notification_type":"%s","message":"%s","title":"Claude Code"}' "$1" "$2"; }
 
+# An EMPTY message is not a hypothetical: `//` in jq only catches null and false, so `"message":""`
+# sails straight through a `.message // .title` chain and lands a row whose one text field is blank.
+# The fallback must treat "" as absent — title first, then the type name, so the row always says
+# something an operator can act on.
+empty_msg_case() {
+  local B
+  post sb-post-request.sh '{"hook_event_name":"Notification","session_id":"S","notification_type":"elicitation_dialog","message":"","title":"Claude Code"}'
+  B="$(body)"
+  echo "$B" | jq -e '.payload.questions[0].question | startswith("Claude Code")' >/dev/null 2>&1 \
+    && ok "an empty .message falls back to .title (jq's // would have passed \"\" through)" \
+    || bad "empty message produced: $(echo "$B" | jq -c '.payload.questions[0].question' 2>/dev/null)"
+  post sb-post-request.sh '{"hook_event_name":"Notification","session_id":"S","notification_type":"elicitation_dialog","message":"","title":""}'
+  B="$(body)"
+  echo "$B" | jq -e '.payload.questions[0].question | startswith("elicitation_dialog")' >/dev/null 2>&1 \
+    && ok "…and with no title either, to the block type — the question is never empty" \
+    || bad "empty message+title produced: $(echo "$B" | jq -c '.payload.questions[0].question' 2>/dev/null)"
+}
+
 # ── 1. each blocking notification type opens exactly one row that says something ────────────────
 check_type() {  # $1=notification_type  $2=message
   local t="$1" m="$2" B
@@ -91,9 +109,22 @@ check_type() {  # $1=notification_type  $2=message
     || bad "$t has kind $(echo "$B" | jq -c '.kind' 2>/dev/null) — not in AgentRequestKind, a 400 at capture"
   # Without this the operator gets a needs-you row with no text in it: Notification events carry
   # no .tool_input, so the AskUserQuestion payload branch would have built questions: [].
-  echo "$B" | jq -e --arg m "$m" '.payload.questions[0].question == $m' >/dev/null 2>&1 \
+  # CONTAINS, not equals: the question is the message PLUS where to answer it. For two of the three
+  # types Claude Code's own .message is a compile-time constant ("Claude Code needs your input" /
+  # "An MCP server needs your input", 2.1.251), so a row carrying only the message names neither
+  # the server nor the ask — and the dialog lives on the VM desktop with no return path through
+  # this row, so the portal's answer box cannot clear it. An equality assertion here would also
+  # only ever have proved that an INVENTED fixture message round-trips.
+  echo "$B" | jq -e --arg m "$m" '.payload.questions[0].question | startswith($m)' >/dev/null 2>&1 \
     && ok "$t carries its message as the question (not an empty questions[])" \
     || bad "$t payload has no question text: $(echo "$B" | jq -c '.payload' 2>/dev/null)"
+  echo "$B" | jq -e --arg t "$t" '.payload.questions[0].question | test("Live desktop") and test($t)' >/dev/null 2>&1 \
+    && ok "$t question also says WHERE to answer it, and names the block type" \
+    || bad "$t question does not point at the desktop: $(echo "$B" | jq -c '.payload.questions[0].question' 2>/dev/null)"
+  # The raw message stays available unmodified for anything that wants it without the hint.
+  echo "$B" | jq -e --arg m "$m" '.payload.message == $m' >/dev/null 2>&1 \
+    && ok "$t keeps the unannotated message in payload.message" \
+    || bad "$t lost its raw message: $(echo "$B" | jq -c '.payload.message' 2>/dev/null)"
   echo "$B" | jq -e '(.payload.questions[0].options | type) == "array"' >/dev/null 2>&1 \
     && ok "$t renders as an option-less question (the dialog itself lives on the VM desktop)" \
     || bad "$t options are not an array: $(echo "$B" | jq -c '.payload.questions[0]' 2>/dev/null)"
@@ -106,6 +137,7 @@ check_type() {  # $1=notification_type  $2=message
 check_type elicitation_dialog      "An MCP server is asking for confirmation"
 check_type elicitation_url_dialog  "Open this URL to authorize the connection"
 check_type agent_needs_input       "Claude needs your input to continue"
+empty_msg_case
 
 # ── 2. the three keys really are distinct ───────────────────────────────────────────────────────
 # One session can raise more than one type; if they collapsed onto a single key the second would
