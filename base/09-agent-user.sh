@@ -47,11 +47,33 @@ if [ ! -f "$AGENT_HOME/.claude.json" ]; then
 EOF
 fi
 
-if [ ! -f /swapfile ]; then
-  fallocate -l 4G /swapfile
-  chmod 600 /swapfile
-  mkswap /swapfile >/dev/null
-  swapon /swapfile
+# Swap — a 4 GB file on the host, and NOTHING inside a container.
+#
+# WHY THE GUARD IS LOAD-BEARING, not defensive style: run.sh is `set -euo pipefail`
+# and every step is SOURCED into that same shell, so an unguarded failure here kills
+# the whole install at step 9 of 16 — before the desktop, before the SB server,
+# before the heartbeat ever registers the agent. Two real ways that happened:
+#
+#   1. In a container. `swapon` is a kernel-GLOBAL operation a container must not
+#      perform (it would add the file to the host kernel's swap), and on overlayfs
+#      `fallocate` returns EOPNOTSUPP before we even reach it. A container already
+#      inherits its host's swap and is bounded by its own cgroup limits, so there
+#      is nothing here to create. Proven 2026-09-19 on a Docker/WSL2 agent: with
+#      this guard the step logs the inherited swap and the install completes.
+#   2. On a host filesystem that cannot fallocate (ZFS, some network mounts). Rarer,
+#      same fatal ending — so each command below tolerates its own failure and
+#      degrades to "no swap" rather than taking the install down with it.
+if systemd-detect-virt -c -q 2>/dev/null || [ -f /.dockerenv ]; then
+  log "swap: skipped (container: $(systemd-detect-virt -c 2>/dev/null || echo docker)) — inherited from the host"
+elif [ -f /swapfile ]; then
+  log "swap: /swapfile already present — leaving it alone"
+elif ! fallocate -l 4G /swapfile 2>/dev/null; then
+  rm -f /swapfile
+  log "WARN: cannot allocate /swapfile on this filesystem — continuing without swap"
+elif chmod 600 /swapfile && mkswap /swapfile >/dev/null 2>&1 && swapon /swapfile 2>/dev/null; then
   grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+else
+  rm -f /swapfile
+  log "WARN: could not enable /swapfile — continuing without swap"
 fi
 log "swap: $(free -h | awk '/Swap:/{print $2}')"
