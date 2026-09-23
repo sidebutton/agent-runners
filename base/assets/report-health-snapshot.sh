@@ -2,8 +2,8 @@
 # /opt/report-health-snapshot.sh
 #
 # Collects agent health metrics, X11 screenshot, a per-session terminal-window
-# crop, and the Claude Code session log. Reports to
-# sidebutton.com/api/agents/health-report.
+# crop, the Claude Code session log and the installed Claude Code version.
+# Reports to sidebutton.com/api/agents/health-report.
 #
 # Usage: report-health-snapshot.sh [--full|--light|--auto]
 #   --full   Metrics + desktop screenshot + terminal-window crop + session log
@@ -224,12 +224,28 @@ fi
 export PAYLOAD_FILE="$TMP/payload.json"
 
 python3 - << 'PYEOF'
-import json, base64, os, subprocess, datetime, pathlib
+import json, base64, os, re, subprocess, datetime, pathlib
 import urllib.parse
 
 def env(k, default="0"):
     v = os.environ.get(k, default)
     return v if v else default
+
+# ── Claude Code version (dependency_versions.claude_code) ────────────────────
+# Read FRESH from the binary on every report. The SideButton server's /health
+# reports the version it read once at startup, so after sb-self-update upgrades
+# Claude Code (lib-refresh.sh sb_refresh_claude_code, which deliberately never
+# restarts the service) the portal would keep showing the old one until the next
+# service restart. This report is the lane that keeps it current, within one
+# period. Returns None when claude is missing, fails or prints no version — the
+# key is then omitted: absent means "not reported" and the portal keeps its value.
+def collect_claude_code_version():
+    try:
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    m = re.search(r"\d+\.\d+\.\d+", out.stdout or "")
+    return m.group(0) if out.returncode == 0 and m else None
 
 # ── Auth-identity collector (SCRUM-1626, design §4.2/§4.3) ───────────────────
 # Extend the snapshot with a NON-SECRET view of which auth each agent is on:
@@ -640,6 +656,16 @@ try:
     ai = collect_auth_identity()
     if ai:
         payload["auth_identity"] = ai
+except Exception:
+    pass
+
+# dependency_versions — same key and shape as the SB server's /health and the
+# heartbeat, carrying only the value /health cannot keep fresh. Omitted when the
+# collector has nothing (see collect_claude_code_version).
+try:
+    ccv = collect_claude_code_version()
+    if ccv:
+        payload["dependency_versions"] = {"claude_code": ccv}
 except Exception:
     pass
 

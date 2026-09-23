@@ -286,7 +286,11 @@ unprivileged, partially-applied update.
 **Drift visibility:** the heartbeat (`base/18`, and the serverless `18b` timer)
 reports the *effective* `runners_ref` + a `base_artifacts_sha` from the markers
 (`/etc/sidebutton/updated`, else the provision-time `/etc/sidebutton/installed`),
-so the portal can show what each agent is actually running.
+so the portal can show what each agent is actually running. The **Claude Code
+version** comes from the 5-minute health report (`base/assets/report-health-snapshot.sh`
+→ `dependency_versions.claude_code`), which runs `claude --version` fresh each time:
+the SideButton server's `/health` reports the version it read at startup, which goes
+stale after `sb-self-update` upgrades Claude Code without restarting the service.
 
 ## Idempotency
 
