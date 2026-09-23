@@ -47,6 +47,10 @@
 # is read → temp → atomic mv, and a partial/locked read makes jq fail, which logs a
 # WARN and leaves the file untouched. Worst case a live claude's own later write wins
 # and the next refresh re-applies — never a corrupt file.
+# Listing it here re-runs it only when the fingerprint moves, so the Claude Code step
+# (lib-refresh.sh sb_refresh_claude_code) ALSO re-runs it, outside this manifest and
+# its gate, whenever the installed CLI differs from the stamp 15b wrote — an upgrade
+# alone does not move the fingerprint.
 # The Claude hooks block (assets/claude-hooks.json) is re-merged separately by
 # sb_refresh_base_artifacts — it is an asset, not a step, so it is not listed here.
 #

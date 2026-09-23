@@ -56,7 +56,7 @@ workspace repos (credential helpers are pre-wired), and run `claude` manually.
 | GitHub CLI | `03-gh-cli` |
 | GitLab CLI | `03b-glab-cli` — unconditional twin of `03`; install only, no auth (SCRUM-1958) |
 | Desktop + RDP/VNC (xfce4, xrdp, x11vnc, Xvfb) + units | `04-desktop`, desktop units in `16/17` |
-| Claude Code CLI + onboarding/trust/notice seed | `components/claude-code/install.sh` (default-on component), `15b-claude-onboarding` (also refreshed on live agents — see `refresh-manifest.txt`) |
+| Claude Code CLI + onboarding/trust/notice seed | `components/claude-code/install.sh` (default-on component), `15b-claude-onboarding` (also refreshed on live agents — see `refresh-manifest.txt`). Version: `components/claude-code/version` (`latest` by default); live agents converge on it at every `sb-self-update` (`lib-refresh.sh` `sb_refresh_claude_code`), which also re-runs 15b after an upgrade |
 | Agent user, RDP password, `~/.claude/settings.json`, dirs | `09-agent-user` |
 | Polkit (RDP auth popups) | `11-polkit` |
 | `~/.agent-env` template + `.bashrc` + **git credential helpers** + `~/workspace` | `12-workspace` |

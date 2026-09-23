@@ -7,7 +7,7 @@
 # anything else is rejected with rc 2, and a non-root run refuses with rc 1 — see
 # the gate block below (SCRUM-2029).
 #
-# All three of its idempotent, change-gated steps run from a SINGLE fresh download
+# All four of its idempotent, change-gated steps run from a SINGLE fresh download
 # of agent-runners@<ref>, so a fix to the wrapper OR the shared lib reaches the
 # fleet via this path itself:
 #   1. Upgrade the global SideButton CLI/server npm package — disk-preflighted,
@@ -19,6 +19,12 @@
 #      ~/.local/bin helpers) — change-gated by a fingerprint vs /etc/sidebutton/updated.
 #   3. Reconcile the universal "agents" CATALOG OPS PACK (rides step 2 via
 #      sb_refresh_base_artifacts -> sb_refresh_knowledge_packs).
+#   4. Bring the CLAUDE CODE CLI to the version in components/claude-code/version
+#      (`latest` by default) — also rides step 2 (sb_refresh_claude_code), ahead of
+#      its fingerprint gate so it runs on every call; download-first, verified with
+#      rollback, 15b onboarding re-run on a change, never restarts sidebutton.service.
+#      Living in the lib (not a call here) is what lets it reach agents whose
+#      installed wrapper predates it on their very next run.
 #
 # A root sudo wrapper inherits no agent env, so it resolves the repo/ref itself
 # from /etc/sidebutton/{updated,installed} and hands artifacts back to the agent.
@@ -47,7 +53,7 @@ usage() {
 usage: sudo sb-self-update
 
 The agent fleet's single self-service update path. Takes NO arguments; it runs
-three idempotent, change-gated steps from ONE fresh download of agent-runners@<ref>:
+four idempotent, change-gated steps from ONE fresh download of agent-runners@<ref>:
 
   1. Upgrade the global SideButton CLI/server npm package, restarting
      sidebutton.service ONLY on a healthy version change (a box with no
@@ -55,6 +61,9 @@ three idempotent, change-gated steps from ONE fresh download of agent-runners@<r
   2. Refresh the agent-runners base artifacts (Claude hooks, step-script timers,
      ~/.local/bin helpers), change-gated by a fingerprint vs /etc/sidebutton/updated.
   3. Reconcile the universal "agents" catalog ops pack (rides step 2).
+  4. Bring Claude Code to the version in components/claude-code/version (npm's
+     latest by default), re-running its onboarding seed on a change (rides step 2;
+     an agent without an npm-global Claude Code is left alone).
 
 The REF is resolved from /etc/sidebutton/updated, else /etc/sidebutton/installed,
 else "main". The REPO comes from /etc/sidebutton/installed, else

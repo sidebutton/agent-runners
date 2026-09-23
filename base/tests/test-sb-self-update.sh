@@ -34,6 +34,11 @@ mkdir -p "$AGENT_HOME/.claude" "$AGENT_HOME/.local/bin"  # base/09 makes these i
 # machine that happens to have the `sidebutton` CLI, it would hit the network and
 # write the real ~/.sidebutton. Section 4c re-enables it against a local stub.
 export SKIP_KNOWLEDGE_PACKS=1
+# Same for the Claude Code step (sb_refresh_claude_code, also called inside
+# sb_refresh_base_artifacts): on a machine with a real npm-global Claude Code it
+# would hit the registry and upgrade it for real. test-sb-self-update-claude.sh
+# covers it against a sandboxed prefix.
+export SKIP_CLAUDE_CODE_UPDATE=1
 
 # shellcheck source=../lib-refresh.sh
 . "$BASE/lib-refresh.sh"

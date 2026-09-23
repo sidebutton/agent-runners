@@ -70,7 +70,7 @@ grep -q '19d-account-registry.sh' "$RUNSH" \
 # whole refresh and the fleet keeps the old copy (SCRUM-1626, same trap as sb-reboot).
 (
   export SB_UPDATED_MARKER="$SANDBOX/updated" SB_SELF_UPDATE_BIN="$SANDBOX/sb-self-update.bin"
-  export AGENT_USER="$(id -un)" AGENT_HOME="$SANDBOX/fp-home" SKIP_KNOWLEDGE_PACKS=1
+  export AGENT_USER="$(id -un)" AGENT_HOME="$SANDBOX/fp-home" SKIP_KNOWLEDGE_PACKS=1 SKIP_CLAUDE_CODE_UPDATE=1
   mkdir -p "$AGENT_HOME"
   # shellcheck source=../lib-refresh.sh
   . "$BASE/lib-refresh.sh"
