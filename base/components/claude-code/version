@@ -1,0 +1,7 @@
+# The Claude Code version the fleet converges on. `latest` (the default) is npm's
+# latest dist-tag: every `sb-self-update` brings a live agent to it
+# (lib-refresh.sh sb_refresh_claude_code) and a new agent installs it (install.sh).
+# Put an exact version here (e.g. 2.1.278) to hold — or roll back — the whole fleet
+# on its next self-update when a Claude Code release goes bad; put `latest` back
+# once a fixed release is out. The first non-comment token is the value.
+latest

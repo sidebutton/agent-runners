@@ -238,13 +238,13 @@ been removed.
 ## Self-update (the fleet path)
 
 Existing agents keep themselves current via **`sb-self-update`** — a tiny
-root-owned wrapper installed by `base/08` and run fleet-wide by the
-`agent_pull_repos` ops job through a narrow NOPASSWD sudoers rule scoped to *only*
-that wrapper (the agent's single privileged action). It does two idempotent,
+root-owned wrapper installed by `base/08` and run fleet-wide by the Self Update ops
+job (`agent_self_update`) through a narrow NOPASSWD sudoers rule scoped to *only*
+that wrapper (the agent's single privileged action). It does four idempotent,
 **change-gated** things:
 
 1. Upgrade the global `sidebutton` CLI/server npm package, restarting the service
-   **only** when the version changed (self-gated on `command -v sidebutton`, so a
+   **only** when the version changed (gated on the `sidebutton.service` unit, so a
    no-op on serverless variants).
 2. **Refresh base artifacts** — re-download `agent-runners@<ref>` and re-run the
    refresh-safe base steps (`base/refresh-manifest.txt`) + re-merge the Claude
@@ -255,6 +255,21 @@ that wrapper (the agent's single privileged action). It does two idempotent,
    in `base/lib-refresh.sh`, which the operator break-glass `agent-redeploy.sh`
    (in the-assistant) also sources from the downloaded tree, so the two paths
    can't drift.
+3. **Reconcile the `agents` ops pack** from the public catalog, so default workflows
+   published after an agent was provisioned become dispatchable (refresh-only).
+4. **Bring Claude Code to its target version** — the one in
+   `base/components/claude-code/version`: `latest` by default, or an exact version
+   that holds or rolls back the whole fleet on its next run when a release goes bad.
+   Claude Code is installed once at provisioning with its autoupdater off, so without
+   this an agent stays on the release of its provisioning day, and a model that needs
+   a newer CLI fails every job. The step acts only on an existing npm-global install,
+   downloads before it swaps, verifies the new binary and rolls back if it does not
+   run, re-runs the 15b onboarding seed on a change, and never restarts
+   `sidebutton.service` (it runs inside a job) — so the running server keeps
+   reporting the version it started with until its next restart.
+
+Steps 3 and 4 run on every call, ahead of the step-2 fingerprint gate, which is
+also what lets them reach agents whose installed wrapper predates them.
 
 The manifest is the source of truth for which steps are safe to re-run on a live
 box — token-rotating / re-registering / OS-install steps are deliberately

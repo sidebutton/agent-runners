@@ -80,6 +80,7 @@ export SB_SELF_UPDATE_BIN="$TMP/sb-self-update.bin"
 export AGENT_USER="$(id -un)"
 export AGENT_HOME="$TMP/home"
 export SKIP_KNOWLEDGE_PACKS=1
+export SKIP_CLAUDE_CODE_UPDATE=1
 mkdir -p "$AGENT_HOME/.claude" "$AGENT_HOME/.local/bin"
 # shellcheck source=../lib-refresh.sh
 . "$BASE/lib-refresh.sh"

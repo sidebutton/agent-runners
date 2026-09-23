@@ -2,7 +2,9 @@
 # base/lib-refresh.sh — shared, change-gated refresh of a live agent's deployed
 # artifacts: the agent-runners BASE ARTIFACTS (SCRUM-1380) AND the universal
 # "agents" CATALOG OPS PACK (the default ops workflows — companion to SCRUM-1380,
-# closing the knowledge-pack half of the same fleet-drift story).
+# closing the knowledge-pack half of the same fleet-drift story) AND the CLAUDE
+# CODE CLI (kept at the version in components/claude-code/version, `latest` by
+# default — the runtime half of the same story).
 #
 # Single source of truth for "re-apply the idempotent base artifacts on a live
 # agent" so the fleet self-service path and the operator break-glass path can
@@ -133,6 +135,33 @@ _sb_run_as_agent() {
   fi
 }
 
+# _sb_run_base_step <base_dir> <step_file> [have_sb] — source ONE base step in an
+# isolated subshell with the env contract base/run.sh provides (lib.sh helpers,
+# AGENT_USER/AGENT_HOME, BASE_DIR for bundled assets, the component gates, a sourced
+# ~/.agent-env). Output goes to the step's own log only; returns the step's status.
+# Shared by the manifest loop and the Claude Code step's 15b re-run. have_sb (0/1)
+# defaults to whether the sidebutton.service unit exists.
+_sb_run_base_step() {
+  local base="$1" step_file="$2" have_sb="${3:-}"
+  if [ -z "$have_sb" ]; then
+    have_sb=0
+    [ -n "$(systemctl list-unit-files sidebutton.service --no-legend 2>/dev/null)" ] && have_sb=1
+  fi
+  (
+    set -euo pipefail
+    export AGENT_USER="${AGENT_USER:-agent}" AGENT_HOME="${AGENT_HOME:-/home/agent}"
+    export BASE_DIR="$base"
+    if [ "$have_sb" -ne 1 ]; then
+      export SKIP_SIDEBUTTON_SERVER=1 SKIP_KNOWLEDGE_PACKS=1
+    fi
+    set -a
+    [ -f "${AGENT_HOME:-/home/agent}/.agent-env" ] && . "${AGENT_HOME:-/home/agent}/.agent-env"
+    set +a
+    . "$base/lib.sh"
+    . "$base/$step_file"
+  ) >/dev/null 2>&1
+}
+
 # ── SideButton server CLI (npm global) — hardened, self-repairing upgrade ─────
 # Powers sidebutton.service (:9876). `npm install -g sidebutton@latest` mutates the
 # global prefix IN PLACE: npm "retires" the live package dir AND the
@@ -250,6 +279,218 @@ sb_refresh_server_cli() {
   return 0
 }
 
+# ── Claude Code CLI (npm global) — kept at the fleet's target version ─────────
+# Claude Code is installed ONCE at provisioning (components/claude-code/install.sh,
+# skipped whenever `claude` exists) with its autoupdater off (base/09
+# DISABLE_AUTOUPDATER=1), so without this step every agent stays on the release of
+# its provisioning day. That is not cosmetic: a model the portal binds that needs a
+# newer CLI fails every job at its first request (API 400 "Claude Code X does not
+# support this model; version Y or newer is required") and the job then sits at the
+# prompt. This converges the npm-global install on the version named in
+# components/claude-code/version: `latest` (the default — the fleet runs the latest
+# Claude Code) or an exact version, which holds or rolls back the whole fleet on its
+# next self-update when a release goes bad.
+#
+# Called from sb_refresh_base_artifacts BEFORE its fingerprint gate, for the reason
+# the ops-pack reconcile is: a live agent runs the wrapper installed at provisioning,
+# which only calls sb_refresh_server_cli + sb_refresh_base_artifacts from the freshly
+# downloaded lib — so this lands on the very next self-update, not one run later.
+#
+# Hardened like sb_refresh_server_cli, plus what is specific to this binary:
+#   - REFRESH-ONLY: acts on an existing npm-global install and never installs one
+#     (a component set without claude-code stays without it).
+#   - Disk preflight before the in-place npm -g (the ENOSPC brick, RCA 2026-06-28).
+#   - DOWNLOAD FIRST: `npm cache add` the package and its platform binary while the
+#     live install is untouched, then install --prefer-offline, which only extracts.
+#     The wrapper usually runs inside a Claude Bash tool call that has a timeout, so
+#     the window in which the install is half swapped must stay short.
+#   - VERIFY the PREFIX-LOCAL binary — never `command -v claude`, which finds whatever
+#     else is on PATH (the trap that keeps test-sb-self-update.sh in ci-exclude.txt).
+#     Broken => one clean reinstall => roll back to the previous version: an agent is
+#     never left without a working claude.
+#   - NO sidebutton.service restart: this runs inside a job, and the unit has no
+#     KillMode (base/16-services-prep.sh), so a restart can take down job terminals.
+#     A running claude keeps its binary; new sessions start on the new one.
+# 15b-claude-onboarding re-runs whenever the installed version differs from the
+# release-notes stamp it wrote (lastReleaseNotesSeen) — after this step's upgrade or
+# anyone else's — so the "What's new" panel never comes back over a job terminal.
+#
+# Best-effort: returns 0 on upgrade / no-op / skip / successful rollback, 1 only when
+# claude is left broken. Detail -> log(); ONE status line -> stdout, which the Self
+# Update report quotes. Kill-switch: SKIP_CLAUDE_CODE_UPDATE=1 (also the test guard).
+SB_CLAUDE_PKG="${SB_CLAUDE_PKG:-@anthropic-ai/claude-code}"
+SB_CLAUDE_VERSION_FILE="${SB_CLAUDE_VERSION_FILE:-components/claude-code/version}"
+
+# First x.y.z token on stdin ("" when there is none).
+_sb_semver() { grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1; }
+
+# _sb_claude_want <base_dir> — the configured target: `latest` or an exact version.
+_sb_claude_want() {
+  local f="$1/$SB_CLAUDE_VERSION_FILE" want=""
+  [ -r "$f" ] && want="$(sed -e 's/#.*$//' "$f" | awk 'NF {print $1; exit}')"
+  printf '%s\n' "${want:-latest}"
+}
+
+# _sb_claude_target <want> — an exact version passes through; a dist-tag is resolved
+# against the registry. Echoes x.y.z, or nothing when the registry is unreachable.
+_sb_claude_target() {
+  local want="$1"
+  if printf '%s' "$want" | grep -qxE '[0-9]+\.[0-9]+\.[0-9]+'; then
+    printf '%s\n' "$want"
+    return 0
+  fi
+  timeout "${SB_NPM_VIEW_TIMEOUT:-60}" npm view "${SB_CLAUDE_PKG}@${want}" version 2>/dev/null | _sb_semver
+}
+
+# _sb_claude_pkg_version <pkg_dir> — version from the installed package.json. Read,
+# not exec'd, so it answers even when the binary is broken. "" when absent.
+_sb_claude_pkg_version() {
+  local pj="$1/package.json"
+  [ -f "$pj" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.version // empty' "$pj" 2>/dev/null
+  else
+    sed -n 's/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$pj" | head -1
+  fi
+}
+
+# _sb_claude_runs <bin_dir> <version> — the prefix-local claude executes and reports
+# exactly <version>.
+_sb_claude_runs() {
+  local got
+  got="$("$1/claude" --version 2>/dev/null | _sb_semver)"
+  [ -n "$got" ] && [ "$got" = "$2" ]
+}
+
+# _sb_claude_platform_pkg — the optional dependency that carries this box's native
+# binary (the heavy part of the download). "" when unknown: the install then fetches
+# it itself.
+_sb_claude_platform_pkg() {
+  case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64)  printf '%s\n' "${SB_CLAUDE_PKG}-linux-x64" ;;
+    aarch64|arm64) printf '%s\n' "${SB_CLAUDE_PKG}-linux-arm64" ;;
+  esac
+}
+
+# _sb_claude_install <version> — the in-place global install, served from the npm
+# cache when the download-first step filled it.
+_sb_claude_install() {
+  timeout "${SB_NPM_INSTALL_TIMEOUT:-600}" npm install -g "${SB_CLAUDE_PKG}@$1" --prefer-offline >/dev/null 2>&1 \
+    || log "WARN: claude code: npm install -g ${SB_CLAUDE_PKG}@$1 returned non-zero"
+  hash -r 2>/dev/null || true
+}
+
+# _sb_claude_onboarding_sync <base_dir> <version> — re-run 15b when the release-notes
+# stamp in ~/.claude.json is not <version>.
+_sb_claude_onboarding_sync() {
+  local base="$1" ver="$2" seen=""
+  local claude_json="${AGENT_HOME:-/home/agent}/.claude.json"
+  [ -n "$ver" ] || return 0
+  if [ ! -f "$base/15b-claude-onboarding.sh" ]; then
+    log "WARN: claude code: 15b-claude-onboarding.sh missing in tree — onboarding stamp not refreshed"
+    return 0
+  fi
+  if [ -f "$claude_json" ] && command -v jq >/dev/null 2>&1; then
+    seen="$(jq -r '.lastReleaseNotesSeen // empty' "$claude_json" 2>/dev/null)"
+  fi
+  [ "$seen" = "$ver" ] && return 0
+  if _sb_run_base_step "$base" 15b-claude-onboarding.sh; then
+    log "claude code: 15b re-run (release notes ${seen:-unset} -> ${ver})"
+  else
+    log "WARN: claude code: 15b re-run failed (see ${LOG_FILE:-log})"
+  fi
+}
+
+# sb_refresh_claude_code <base_dir> — see the section comment above.
+sb_refresh_claude_code() {
+  local base="$1"
+  if [ "${SKIP_CLAUDE_CODE_UPDATE:-}" = "1" ]; then
+    log "claude code: skipped (SKIP_CLAUDE_CODE_UPDATE=1)"
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    log "claude code: npm absent — skipped"
+    return 0
+  fi
+
+  local prefix pkgroot bindir pkgdir
+  prefix="$(npm prefix -g 2>/dev/null)"; [ -n "$prefix" ] || prefix="/usr"
+  pkgroot="$prefix/lib/node_modules"
+  bindir="$prefix/bin"
+  pkgdir="$pkgroot/$SB_CLAUDE_PKG"
+  if [ ! -f "$pkgdir/package.json" ]; then
+    log "claude code: no npm-global install at ${pkgdir} — skipped (refresh-only, never installs)"
+    echo "claude code: not installed via npm — skipped"
+    return 0
+  fi
+
+  local want before target
+  want="$(_sb_claude_want "$base")"
+  before="$(_sb_claude_pkg_version "$pkgdir")"
+  target="$(_sb_claude_target "$want")"
+  if [ -z "$target" ]; then
+    log "WARN: claude code: could not resolve '${want}' from the npm registry — upgrade skipped, retried next self-update"
+    _sb_claude_onboarding_sync "$base" "$before"
+    echo "claude code: ${before:-unknown} (could not resolve ${want} — upgrade skipped)"
+    return 0
+  fi
+
+  if [ "$before" = "$target" ] && _sb_claude_runs "$bindir" "$target"; then
+    log "claude code: already at ${target} (no change)"
+    _sb_claude_onboarding_sync "$base" "$target"
+    echo "claude code: ${target} current"
+    return 0
+  fi
+
+  # (1) disk preflight — a full disk is what corrupts an in-place npm -g.
+  local free_mb
+  free_mb="$(df -Pm "$pkgroot" 2>/dev/null | awk 'NR==2 {print $4+0}')"
+  if [ -n "$free_mb" ] && [ "$free_mb" -lt "$SB_MIN_FREE_MB" ]; then
+    log "WARN: claude code: only ${free_mb}MB free at ${pkgroot} (<${SB_MIN_FREE_MB}MB) — upgrade to ${target} skipped to avoid a partial install"
+    echo "claude code: ${before:-unknown} (upgrade to ${target} skipped: low disk ${free_mb}MB)"
+    return 0
+  fi
+
+  # (2) download first — the live install is untouched while the network works.
+  local plat; plat="$(_sb_claude_platform_pkg)"
+  if timeout "${SB_NPM_FETCH_TIMEOUT:-600}" npm cache add "${SB_CLAUDE_PKG}@${target}" ${plat:+"${plat}@${target}"} >/dev/null 2>&1; then
+    log "claude code: ${target} fetched into the npm cache${plat:+ (with ${plat})}"
+  else
+    log "WARN: claude code: prefetch of ${target} failed — the install downloads it itself"
+  fi
+
+  # (3) swap, verify the prefix-local binary, one clean reinstall, then roll back.
+  _sb_claude_install "$target"
+  if ! _sb_claude_runs "$bindir" "$target"; then
+    log "claude code: ${target} does not run after the install — one clean reinstall"
+    _sb_claude_install "$target"
+  fi
+  if ! _sb_claude_runs "$bindir" "$target"; then
+    if [ -n "$before" ] && [ "$before" != "$target" ]; then
+      log "WARN: claude code: ${target} still does not run — rolling back to ${before}"
+      _sb_claude_install "$before"
+      if _sb_claude_runs "$bindir" "$before"; then
+        _sb_claude_onboarding_sync "$base" "$before"
+        echo "claude code: upgrade to ${target} FAILED — rolled back to ${before}"
+        return 0
+      fi
+    fi
+    log "WARN: claude code: BROKEN after the install of ${target} — manual fix / reprovision needed"
+    echo "claude code: BROKEN after upgrade to ${target} — manual fix needed"
+    return 1
+  fi
+
+  _sb_claude_onboarding_sync "$base" "$target"
+  if [ "$before" = "$target" ]; then
+    log "claude code: ${target} did not run — repaired by reinstall"
+    echo "claude code: ${target} repaired"
+  else
+    log "claude code: ${before:-unknown} -> ${target}"
+    echo "claude code: ${before:-unknown} -> ${target}"
+  fi
+  return 0
+}
+
 # sb_refresh_knowledge_packs [pack] — reconcile the universal "agents" catalog ops
 # pack (the default ops workflows: agent_pull_repos, agent_se_*, agent_qa_*, …) so
 # workflows added or changed after this agent was provisioned actually reach it.
@@ -343,6 +584,11 @@ sb_refresh_base_artifacts() {
   # when the pack is already current.
   sb_refresh_knowledge_packs
 
+  # Claude Code CLI — also before the change-gate, for the same reason: the wrapper
+  # on a live agent predates this step and only ever calls THIS function. It
+  # self-gates on installed vs target version, so it is a no-op when current.
+  sb_refresh_claude_code "$base" || true
+
   local fp; fp=$(sb_base_artifacts_fingerprint "$base")
   if sb_artifacts_current "$fp" "$ref"; then
     log "base artifacts already current (ref=${ref} sha=${fp:0:12}) — no refresh"
@@ -364,19 +610,7 @@ sb_refresh_base_artifacts() {
   local status="synced" step_file
   while IFS= read -r step_file; do
     [ -f "$base/$step_file" ] || { log "WARN: manifest step ${step_file} missing in tree — skipped"; status="partial"; continue; }
-    if (
-      set -euo pipefail
-      export AGENT_USER="${AGENT_USER:-agent}" AGENT_HOME="${AGENT_HOME:-/home/agent}"
-      export BASE_DIR="$base"
-      if [ "$have_sb" -ne 1 ]; then
-        export SKIP_SIDEBUTTON_SERVER=1 SKIP_KNOWLEDGE_PACKS=1
-      fi
-      set -a
-      [ -f "${AGENT_HOME:-/home/agent}/.agent-env" ] && . "${AGENT_HOME:-/home/agent}/.agent-env"
-      set +a
-      . "$base/lib.sh"
-      . "$base/$step_file"
-    ) >/dev/null 2>&1; then
+    if _sb_run_base_step "$base" "$step_file" "$have_sb"; then
       log "ok:   ${step_file}"
     else
       log "WARN: ${step_file} failed (see ${LOG_FILE:-log})"
