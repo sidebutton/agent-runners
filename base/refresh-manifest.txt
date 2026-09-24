@@ -25,7 +25,14 @@
 #   18-heartbeat.sh    re-registers the agent + swaps in a fresh sb_token
 #   18b-heartbeat-timer / 20-mark-installed  install-lifecycle, not artifacts
 #   01..13, 15..17     OS/toolchain/desktop install + one-time user/workspace setup
-#                      — EXCEPT 12b and 15b (listed below), see their carve-out notes.
+#                      — EXCEPT 09b, 12b and 15b (listed below), see their carve-out notes.
+#
+# CARVE-OUT — 09b-clock.sh is listed despite sitting in the 01..13 range. It installs
+# nothing and sets up no user/workspace: it points /etc/localtime + /etc/timezone at
+# the agent zone and jq-merges one key (timeFormat) into ~/.claude/settings.json, all
+# idempotent. It runs right after 09 at provision only so the desktop, Chrome and the
+# SB server START on the new zone; it MUST re-run on live agents or the fleet keeps
+# the image's Etc/UTC and Claude Code's 12h footer (DEV-110).
 #
 # CARVE-OUT — 12b-git-credential-helpers.sh is listed despite sitting in the 01..13
 # range. It installs nothing and sets up no user/workspace: it is a set of idempotent
@@ -59,6 +66,7 @@
 # the CATALOG version), NOT as a manifest step (which would wrongly gate the pack on
 # the agent-runners fingerprint and re-run the heavy provisioning chown/install).
 
+09b-clock.sh
 12b-git-credential-helpers.sh
 14-claude-stop-hook.sh
 15b-claude-onboarding.sh
