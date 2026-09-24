@@ -15,7 +15,8 @@
 #         (timedatectl on systemd 255 leaves that file stale)
 #   AC3 — no systemd (container): the fallback repoints /etc/localtime itself
 #   AC4 — AGENT_TIMEZONE overrides the default; an unknown or unsafe name
-#         (Mars/Olympus, ../secret, zone.tab) leaves the zone untouched
+#         (Mars/Olympus, ../secret, zone.tab, the non-TZif leapseconds, localtime —
+#         Debian's link back to /etc/localtime) leaves the zone untouched
 #   AC5 — settings.json gains "timeFormat": "24-hour" and keeps every other key;
 #         a different timeFormat converges to 24-hour
 #   AC6 — re-running is a no-op: no timedatectl call, settings.json byte-identical
@@ -71,6 +72,7 @@ ZI="$WORK/zoneinfo"
 mkdir -p "$ZI/Etc" "$ZI/Europe" "$ZI/America"
 for z in Etc/UTC Europe/Berlin America/New_York zone.tab; do printf 'TZif %s\n' "$z" > "$ZI/$z"; done
 printf 'not a zone\n' > "$WORK/secret"   # what "../secret" would resolve to
+printf '#\tAllowed leap seconds (a dotless data file, not TZif)\n' > "$ZI/leapseconds"
 
 # System dirs only, never the caller's PATH (same reason as test-15b).
 SANDBOX_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -183,8 +185,10 @@ else
   bad "AC4 override: rc=$rc localtime=$(zone_of) timezone=$(cat "$BOX/etc/timezone")"
 fi
 
-for name in Mars/Olympus ../secret zone.tab; do
+for name in Mars/Olympus ../secret zone.tab leapseconds localtime; do
   new_box "reject-${name//[^A-Za-z]/_}"
+  # As on Ubuntu: zoneinfo/localtime -> /etc/localtime. Accepting it would loop.
+  [ "$name" = localtime ] && ln -sfn "$BOX/etc/localtime" "$ZI/localtime"
   rc="$(run_step "AGENT_TIMEZONE=$name")"
   if [ "$rc" = 0 ] && [ "$(calls)" = 0 ] && [ "$(zone_of)" = "$ZI/Etc/UTC" ] \
      && [ "$(cat "$BOX/etc/timezone")" = "Etc/UTC" ] && grep -q "WARN: unknown time zone" "$BOX/step.log"; then

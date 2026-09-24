@@ -12,7 +12,9 @@
 #   * system zone = AGENT_TIMEZONE, default Europe/Berlin (CET/CEST). An IANA
 #     name, never "CET": ICU resolves CET to Europe/Brussels and Claude Code
 #     prints that label. Only the system zone moves every clock at once; Claude
-#     Code's own `timeZone` setting would move just its footer.
+#     Code's own `timeZone` setting would move just its footer. A refresh sees
+#     AGENT_TIMEZONE only through ~/.agent-env, so a value given at install alone
+#     falls back to the default on the first sb-self-update.
 #   * "timeFormat": "24-hour" merged into ~/.claude/settings.json, every other
 #     key kept. 09 writes that file at provision only and the refresh re-merges
 #     only .hooks, so this step is what reaches the fleet.
@@ -34,15 +36,21 @@ SB_TZ="${AGENT_TIMEZONE:-Europe/Berlin}"
 SB_ZONEINFO="${SB_ZONEINFO:-/usr/share/zoneinfo}"
 SB_LOCALTIME="${SB_LOCALTIME:-/etc/localtime}"
 SB_TIMEZONE_FILE="${SB_TIMEZONE_FILE:-/etc/timezone}"
-# IANA names (Area/City, Etc/GMT+1) carry no dot, so neither "../" nor a data
-# file under zoneinfo (zone.tab, tzdata.zi) can end up as /etc/localtime.
+# A zone is a TZif file under zoneinfo with an IANA-shaped name (Area/City,
+# Etc/GMT+1) — the test timedated itself applies, so the fallback below can never
+# install a name timedatectl would refuse. No dot keeps out "../" and the data
+# files (zone.tab, tzdata.zi); the TZif magic keeps out the dotless leapseconds;
+# and "localtime" is Debian's link back to /etc/localtime, which would make
+# /etc/localtime a symlink loop.
 SB_TZ_RE='^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$'
 
 # timedatectl needs systemd as PID 1; a container agent has none, so the fallback
 # writes the symlink timedatectl would. timedatectl leaves /etc/timezone alone
 # (systemd 255), and anything that still reads that Debian file would go on
 # reporting Etc/UTC, so it is rewritten on both paths.
-if ! [[ "$SB_TZ" =~ $SB_TZ_RE ]] || [ ! -f "${SB_ZONEINFO}/${SB_TZ}" ]; then
+if ! [[ "$SB_TZ" =~ $SB_TZ_RE ]] || [ "$SB_TZ" = localtime ] \
+   || [ ! -f "${SB_ZONEINFO}/${SB_TZ}" ] \
+   || [ "$(head -c 4 "${SB_ZONEINFO}/${SB_TZ}" 2>/dev/null)" != TZif ]; then
   log "WARN: unknown time zone '${SB_TZ}' (AGENT_TIMEZONE) — system zone left unchanged"
 elif [ "$(readlink -f "$SB_LOCALTIME")" = "$(readlink -f "${SB_ZONEINFO}/${SB_TZ}")" ] \
      && [ "$(cat "$SB_TIMEZONE_FILE" 2>/dev/null)" = "$SB_TZ" ]; then
