@@ -29,11 +29,10 @@
 #
 # CARVE-OUT — 09b-clock.sh is listed despite sitting in the 01..13 range. It installs
 # nothing and sets up no user/workspace: it points /etc/localtime + /etc/timezone at
-# the agent zone (an explicit AGENT_TIMEZONE is recorded in /etc/sidebutton/timezone)
-# and jq-merges one key (timeFormat) into ~/.claude/settings.json, all idempotent.
-# It runs right after 09 at provision only so the desktop, Chrome and the SB server
-# START on the new zone; it MUST re-run on live agents or the fleet keeps the image's
-# Etc/UTC and Claude Code's 12h footer (DEV-110).
+# the agent zone and jq-merges one key (timeFormat) into ~/.claude/settings.json, all
+# idempotent. It runs right after 09 at provision only so the desktop, Chrome and the
+# SB server START on the new zone; it MUST re-run on live agents or the fleet keeps
+# the image's Etc/UTC and Claude Code's 12h footer (DEV-110).
 #
 # CARVE-OUT — 12b-git-credential-helpers.sh is listed despite sitting in the 01..13
 # range. It installs nothing and sets up no user/workspace: it is a set of idempotent

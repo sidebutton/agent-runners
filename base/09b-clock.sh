@@ -9,14 +9,15 @@
 # ("done 2:17 PM") beside the 24h bar and panel.
 #
 # WHAT:
-#   * system zone = AGENT_TIMEZONE, default Europe/Berlin (CET/CEST). An IANA
-#     name, never "CET": ICU resolves CET to Europe/Brussels and Claude Code
-#     prints that label. Only the system zone moves every clock at once; Claude
-#     Code's own `timeZone` setting would move just its footer.
-#     AGENT_TIMEZONE comes from the install env at provision but only from
-#     ~/.agent-env on a refresh (lib-refresh.sh sources nothing else), so an
-#     explicit zone is recorded in /etc/sidebutton/timezone and a refresh without
-#     AGENT_TIMEZONE keeps it instead of falling back to the default.
+#   * system zone = AGENT_TIMEZONE, default Europe/Berlin (CET/CEST) — an
+#     Area/City name, not "CET": ICU resolves CET to Europe/Brussels and Claude
+#     Code prints that label. Only the system zone moves every clock at once;
+#     Claude Code's own `timeZone` setting would move just its footer.
+#     Without AGENT_TIMEZONE the default replaces only the image's UTC (or an
+#     /etc/localtime that is no zone file at all, which glibc reads as UTC).
+#     A refresh sees AGENT_TIMEZONE only through ~/.agent-env (lib-refresh.sh
+#     sources nothing else), so a zone chosen at install, or by hand with
+#     timedatectl, must not be taken for "unset" and overwritten.
 #   * "timeFormat": "24-hour" merged into ~/.claude/settings.json, every other
 #     key kept. 09 writes that file at provision only and the refresh re-merges
 #     only .hooks, so this step is what reaches the fleet.
@@ -33,19 +34,11 @@
 
 step "Step 9b/16: time zone + Claude Code time format"
 
+SB_TZ="${AGENT_TIMEZONE:-Europe/Berlin}"
 # Overridable only so base/tests/test-09b-clock.sh can sandbox the writes.
 SB_ZONEINFO="${SB_ZONEINFO:-/usr/share/zoneinfo}"
 SB_LOCALTIME="${SB_LOCALTIME:-/etc/localtime}"
 SB_TIMEZONE_FILE="${SB_TIMEZONE_FILE:-/etc/timezone}"
-SB_TZ_MARKER="${SB_TZ_MARKER:-/etc/sidebutton/timezone}"
-
-if [ -n "${AGENT_TIMEZONE:-}" ]; then
-  SB_TZ="$AGENT_TIMEZONE"
-elif [ -s "$SB_TZ_MARKER" ]; then
-  SB_TZ="$(head -n 1 "$SB_TZ_MARKER" 2>/dev/null || true)"
-else
-  SB_TZ="Europe/Berlin"
-fi
 SB_TZ_PATH="${SB_ZONEINFO}/${SB_TZ}"
 # A zone is a TZif file under zoneinfo with an IANA-shaped name (Area/City,
 # Etc/GMT+1) — the test timedated itself applies, so the fallback below can never
@@ -56,8 +49,13 @@ SB_TZ_PATH="${SB_ZONEINFO}/${SB_TZ}"
 # chrony) count leap seconds, so the clock would run ~27 s slow.
 SB_TZ_RE='^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$'
 
+# The zone /etc/localtime names is its link target below zoneinfo/, as
+# timedatectl reads it. Resolving the link instead would call a box on
+# Europe/Zurich current for Europe/Busingen, a tzdata link to it.
 _clock_zone_is_current() {
-  [ "$(readlink -f "$SB_LOCALTIME")" = "$(readlink -f "$SB_TZ_PATH")" ]
+  local target
+  target="$(readlink "$SB_LOCALTIME" 2>/dev/null)" || return 1
+  [ "${target##*zoneinfo/}" = "$SB_TZ" ] && [ -e "$SB_LOCALTIME" ]
 }
 
 # timedatectl needs systemd as PID 1; a container agent has none, so the fallback
@@ -71,6 +69,9 @@ if ! [[ "$SB_TZ" =~ $SB_TZ_RE ]] || [ "$SB_TZ" = localtime ] || [[ "$SB_TZ" == r
 else
   if _clock_zone_is_current; then
     log "time zone already ${SB_TZ}"
+  elif [ -z "${AGENT_TIMEZONE:-}" ] && [ -f "$SB_LOCALTIME" ] \
+       && ! cmp -s "$SB_LOCALTIME" "${SB_ZONEINFO}/Etc/UTC"; then
+    log "time zone left as is: not UTC and no AGENT_TIMEZONE (the default ${SB_TZ} only replaces UTC)"
   elif { timedatectl set-timezone "$SB_TZ" 2>/dev/null \
            || ln -sfnT "$SB_TZ_PATH" "$SB_LOCALTIME" 2>/dev/null; } \
        && _clock_zone_is_current; then
@@ -78,17 +79,9 @@ else
   else
     log "WARN: could not set the time zone to ${SB_TZ} — system zone left unchanged"
   fi
-  if _clock_zone_is_current; then
-    if [ "$(cat "$SB_TIMEZONE_FILE" 2>/dev/null)" != "$SB_TZ" ] \
-       && ! printf '%s\n' "$SB_TZ" 2>/dev/null > "$SB_TIMEZONE_FILE"; then
-      log "WARN: could not write ${SB_TZ} to ${SB_TIMEZONE_FILE}"
-    fi
-    # Only an explicit zone is recorded, so boxes on the default follow the
-    # default. To drop an override, set AGENT_TIMEZONE=Europe/Berlin.
-    if [ -n "${AGENT_TIMEZONE:-}" ] && [ "$(cat "$SB_TZ_MARKER" 2>/dev/null)" != "$SB_TZ" ] \
-       && ! { mkdir -p "$(dirname "$SB_TZ_MARKER")" && printf '%s\n' "$SB_TZ" > "$SB_TZ_MARKER"; } 2>/dev/null; then
-      log "WARN: could not record ${SB_TZ} in ${SB_TZ_MARKER} — a refresh would fall back to the default"
-    fi
+  if _clock_zone_is_current && [ "$(cat "$SB_TIMEZONE_FILE" 2>/dev/null)" != "$SB_TZ" ] \
+     && ! printf '%s\n' "$SB_TZ" 2>/dev/null > "$SB_TIMEZONE_FILE"; then
+    log "WARN: could not write ${SB_TZ} to ${SB_TIMEZONE_FILE}"
   fi
 fi
 
