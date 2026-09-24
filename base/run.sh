@@ -43,6 +43,7 @@ if [ "${INSTALL_CLAUDE_CODE:-0}" = "1" ] && [ -f "$BASE_DIR/components/claude-co
 fi
 . "$BASE_DIR/08-sidebutton.sh"       # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/09-agent-user.sh"
+. "$BASE_DIR/09b-clock.sh"           # time zone + Claude Code 24h clock (DEV-110) — before 16/17 start the desktop
 
 # Toolchain components (root; run after the agent user exists so docker can add
 # it to the docker group). Each is idempotent and self-gated by selection here.
