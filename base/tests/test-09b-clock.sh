@@ -12,19 +12,26 @@
 #         (units written + desktop started, so they start on the new zone), and
 #         refresh-manifest.txt lists it as an entry, not only in a comment
 #   AC2 — a UTC box moves to Europe/Berlin via timedatectl, and /etc/timezone agrees
-#         (timedatectl on systemd 255 leaves that file stale)
+#         (timedatectl on systemd 255 leaves that file stale); a stale /etc/timezone
+#         alone is rewritten without a timedatectl call
 #   AC3 — no systemd (container): the fallback repoints /etc/localtime itself
-#   AC4 — AGENT_TIMEZONE overrides the default; an unknown or unsafe name
+#   AC4 — AGENT_TIMEZONE overrides the default and is recorded in
+#         /etc/sidebutton/timezone, so a refresh without it (it only sees ~/.agent-env)
+#         keeps the zone; the default is never recorded. An unknown or unsafe name
 #         (Mars/Olympus, ../secret, zone.tab, the non-TZif leapseconds, localtime —
-#         Debian's link back to /etc/localtime) leaves the zone untouched
+#         Debian's link back to /etc/localtime — and leap-second right/ zones) leaves
+#         the zone untouched
 #   AC5 — settings.json gains "timeFormat": "24-hour" and keeps every other key;
 #         a different timeFormat converges to 24-hour
 #   AC6 — re-running is a no-op: no timedatectl call, settings.json byte-identical
-#   AC7 — never aborts `set -euo pipefail` (run.sh sources it ungated): broken JSON,
-#         no settings.json, a failing timedatectl + ln all exit 0 and write nothing
+#   AC7 — never aborts `set -euo pipefail` (run.sh sources it ungated): broken or
+#         empty JSON, no settings.json, a failing timedatectl + ln, a directory at
+#         /etc/localtime all exit 0 and write nothing; an unwritable /etc/timezone
+#         WARNs about that file only
 #
 # Pure bash + jq. The zone paths go through the step's SB_ZONEINFO / SB_LOCALTIME /
-# SB_TIMEZONE_FILE seams; timedatectl is a shell-function stub, never the real one.
+# SB_TIMEZONE_FILE / SB_TZ_MARKER seams; timedatectl is a shell-function stub, never
+# the real one.
 # Run: bash base/tests/test-09b-clock.sh
 set -uo pipefail
 
@@ -69,8 +76,8 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 ZI="$WORK/zoneinfo"
-mkdir -p "$ZI/Etc" "$ZI/Europe" "$ZI/America"
-for z in Etc/UTC Europe/Berlin America/New_York zone.tab; do printf 'TZif %s\n' "$z" > "$ZI/$z"; done
+mkdir -p "$ZI/Etc" "$ZI/Europe" "$ZI/America" "$ZI/right/Europe"
+for z in Etc/UTC Europe/Berlin America/New_York zone.tab right/Europe/Berlin; do printf 'TZif %s\n' "$z" > "$ZI/$z"; done
 printf 'not a zone\n' > "$WORK/secret"   # what "../secret" would resolve to
 printf '#\tAllowed leap seconds (a dotless data file, not TZif)\n' > "$ZI/leapseconds"
 
@@ -102,20 +109,22 @@ new_box() {
 # `set -euo pipefail` and echo its exit status. Call it as a plain assignment,
 # never inside a condition: bash would make errexit inert in the subshell.
 # TD_MODE=ok: timedatectl acts like timedated (repoints the symlink only);
-# TD_MODE=fail: no systemd, so it fails and the fallback has to act.
+# TD_MODE=fail: no systemd, so it fails and the fallback has to act;
+# TD_MODE=noop: it reports success but /etc/localtime does not change.
 run_step() {
   (
     set -euo pipefail
     unset AGENT_TIMEZONE
     export AGENT_HOME="$BOX/home" AGENT_USER="$(id -un)" PATH="$SANDBOX_PATH" \
            SB_ZONEINFO="$ZI" SB_LOCALTIME="$BOX/etc/localtime" \
-           SB_TIMEZONE_FILE="$BOX/etc/timezone" TD_MODE=ok
+           SB_TIMEZONE_FILE="$BOX/etc/timezone" SB_TZ_MARKER="$BOX/etc/sidebutton/timezone" TD_MODE=ok
     for kv in "$@"; do export "$kv"; done
     step()  { :; }
     log()   { printf '%s\n' "$*" >> "$BOX/step.log"; }
     chown() { :; }
     timedatectl() {
       printf '%s\n' "$*" >> "$BOX/timedatectl.calls"
+      [ "$TD_MODE" = noop ] && return 0
       [ "$TD_MODE" = ok ] || return 1
       ln -sfn "$SB_ZONEINFO/$2" "$SB_LOCALTIME"
     }
@@ -128,6 +137,7 @@ run_step() {
 zone_of()  { readlink -f "$BOX/etc/localtime"; }
 calls()    { grep -c . "$BOX/timedatectl.calls"; }
 settings() { printf '%s' "$BOX/home/.claude/settings.json"; }
+marker()   { cat "$BOX/etc/sidebutton/timezone" 2>/dev/null; }
 
 # ── AC2 + AC5: a fresh UTC box ───────────────────────────────────────────────
 new_box fresh
@@ -149,6 +159,9 @@ else
   bad "AC5 the merge changed keys other than timeFormat"
 fi
 [ ! -e "$(settings).tmp" ] && ok "AC5 no settings.json.tmp left behind" || bad "AC5 settings.json.tmp left behind"
+[ ! -e "$BOX/etc/sidebutton/timezone" ] \
+  && ok "AC4 the default is not recorded (boxes on the default follow the default)" \
+  || bad "AC4 the default was recorded: '$(marker)'"
 
 # ── AC6: re-run on the same box ──────────────────────────────────────────────
 cp "$(settings)" "$WORK/fresh.after.json"
@@ -172,9 +185,9 @@ fi
 new_box stale
 ln -sfn "$ZI/Europe/Berlin" "$BOX/etc/localtime"
 rc="$(run_step)"
-[ "$rc" = 0 ] && [ "$(cat "$BOX/etc/timezone")" = "Europe/Berlin" ] \
-  && ok "AC2 stale /etc/timezone is brought in line with /etc/localtime" \
-  || bad "AC2 stale /etc/timezone left as '$(cat "$BOX/etc/timezone")' (rc=$rc)"
+[ "$rc" = 0 ] && [ "$(cat "$BOX/etc/timezone")" = "Europe/Berlin" ] && [ "$(calls)" = 0 ] \
+  && ok "AC2 stale /etc/timezone is brought in line with /etc/localtime, no timedatectl call" \
+  || bad "AC2 stale /etc/timezone: '$(cat "$BOX/etc/timezone")' rc=$rc timedatectl calls=$(calls)"
 
 # ── AC4: override + rejected names ───────────────────────────────────────────
 new_box override
@@ -184,17 +197,33 @@ if [ "$rc" = 0 ] && [ "$(zone_of)" = "$ZI/America/New_York" ] && [ "$(cat "$BOX/
 else
   bad "AC4 override: rc=$rc localtime=$(zone_of) timezone=$(cat "$BOX/etc/timezone")"
 fi
+[ "$(marker)" = "America/New_York" ] \
+  && ok "AC4 the explicit zone is recorded in /etc/sidebutton/timezone" || bad "AC4 recorded zone: '$(marker)'"
+# A refresh sources only ~/.agent-env, so the install-time AGENT_TIMEZONE is gone.
+: > "$BOX/timedatectl.calls"
+rc="$(run_step)"
+if [ "$rc" = 0 ] && [ "$(zone_of)" = "$ZI/America/New_York" ] && [ "$(calls)" = 0 ] \
+   && [ "$(cat "$BOX/etc/timezone")" = "America/New_York" ]; then
+  ok "AC4 a refresh without AGENT_TIMEZONE keeps America/New_York, not the default"
+else
+  bad "AC4 refresh without AGENT_TIMEZONE: rc=$rc localtime=$(zone_of) timedatectl calls=$(calls)"
+fi
+rc="$(run_step AGENT_TIMEZONE=Europe/Berlin)"
+[ "$rc" = 0 ] && [ "$(zone_of)" = "$ZI/Europe/Berlin" ] && [ "$(marker)" = "Europe/Berlin" ] \
+  && ok "AC4 AGENT_TIMEZONE=Europe/Berlin takes the override back (the record follows)" \
+  || bad "AC4 taking the override back: rc=$rc localtime=$(zone_of) recorded=$(marker)"
 
-for name in Mars/Olympus ../secret zone.tab leapseconds localtime; do
+for name in Mars/Olympus ../secret zone.tab leapseconds localtime right/Europe/Berlin; do
   new_box "reject-${name//[^A-Za-z]/_}"
   # As on Ubuntu: zoneinfo/localtime -> /etc/localtime. Accepting it would loop.
   [ "$name" = localtime ] && ln -sfn "$BOX/etc/localtime" "$ZI/localtime"
   rc="$(run_step "AGENT_TIMEZONE=$name")"
   if [ "$rc" = 0 ] && [ "$(calls)" = 0 ] && [ "$(zone_of)" = "$ZI/Etc/UTC" ] \
-     && [ "$(cat "$BOX/etc/timezone")" = "Etc/UTC" ] && grep -q "WARN: unknown time zone" "$BOX/step.log"; then
-    ok "AC4 AGENT_TIMEZONE='$name' rejected: WARN, zone untouched, exit 0"
+     && [ "$(cat "$BOX/etc/timezone")" = "Etc/UTC" ] && [ ! -e "$BOX/etc/sidebutton/timezone" ] \
+     && grep -q "WARN: unknown time zone" "$BOX/step.log"; then
+    ok "AC4 AGENT_TIMEZONE='$name' rejected: WARN, zone untouched, nothing recorded, exit 0"
   else
-    bad "AC4 AGENT_TIMEZONE='$name': rc=$rc calls=$(calls) localtime=$(zone_of)"
+    bad "AC4 AGENT_TIMEZONE='$name': rc=$rc calls=$(calls) localtime=$(zone_of) recorded=$(marker)"
   fi
 done
 [ "$(jq -r '.timeFormat' "$(settings)")" = "24-hour" ] \
@@ -230,6 +259,46 @@ if [ "$rc" = 0 ] && [ "$(cat "$BOX/etc/timezone")" = "Etc/UTC" ] && grep -q "WAR
   ok "AC7 timedatectl and the fallback both fail: WARN, /etc/timezone untouched, exit 0"
 else
   bad "AC7 zone write failure: rc=$rc timezone=$(cat "$BOX/etc/timezone")"
+fi
+
+new_box noop
+rc="$(run_step TD_MODE=noop)"
+if [ "$rc" = 0 ] && [ "$(zone_of)" = "$ZI/Etc/UTC" ] && [ "$(cat "$BOX/etc/timezone")" = "Etc/UTC" ] \
+   && grep -q "WARN: could not set the time zone" "$BOX/step.log" && ! grep -q "time zone set to" "$BOX/step.log"; then
+  ok "AC7 timedatectl reports success but /etc/localtime is unchanged: WARN, not 'set', /etc/timezone untouched"
+else
+  bad "AC7 no-op timedatectl: rc=$rc localtime=$(zone_of) timezone=$(cat "$BOX/etc/timezone")"
+fi
+
+new_box tzfile
+rc="$(run_step "SB_TIMEZONE_FILE=$BOX/missing/timezone")"
+if [ "$rc" = 0 ] && [ "$(zone_of)" = "$ZI/Europe/Berlin" ] \
+   && grep -q "WARN: could not write Europe/Berlin to" "$BOX/step.log" \
+   && ! grep -q "WARN: could not set the time zone" "$BOX/step.log"; then
+  ok "AC7 unwritable /etc/timezone: the zone still moves and only that file is WARNed, exit 0"
+else
+  bad "AC7 unwritable /etc/timezone: rc=$rc localtime=$(zone_of) log=$(tr '\n' '|' < "$BOX/step.log")"
+fi
+
+# A container bind mount of a missing host file leaves a directory at /etc/localtime.
+new_box dirlocaltime
+rm -f "$BOX/etc/localtime" && mkdir "$BOX/etc/localtime"
+rc="$(run_step TD_MODE=fail)"
+if [ "$rc" = 0 ] && [ -z "$(ls -A "$BOX/etc/localtime")" ] && [ "$(cat "$BOX/etc/timezone")" = "Etc/UTC" ] \
+   && grep -q "WARN: could not set the time zone" "$BOX/step.log"; then
+  ok "AC7 a directory at /etc/localtime: WARN, no link made inside it, /etc/timezone untouched, exit 0"
+else
+  bad "AC7 directory at /etc/localtime: rc=$rc inside=$(ls -A "$BOX/etc/localtime") timezone=$(cat "$BOX/etc/timezone")"
+fi
+
+new_box empty
+: > "$(settings)"
+rc="$(run_step)"
+if [ "$rc" = 0 ] && [ ! -s "$(settings)" ] && [ ! -e "$(settings).tmp" ] \
+   && grep -q "WARN: could not set timeFormat" "$BOX/step.log" && ! grep -q "timeFormat set to" "$BOX/step.log"; then
+  ok "AC7 empty settings.json: WARN (no false 'set'), file untouched, no .tmp, exit 0"
+else
+  bad "AC7 empty settings.json: rc=$rc (false success, file changed, .tmp left or no WARN)"
 fi
 
 echo

@@ -222,7 +222,7 @@ variant ships no hooks — component behaviour is driven from `run.sh`.
 | `RUNNERS_REF` | no | `main` | Git ref the bootstrapper downloads this repo at |
 | `PORTAL_URL` | no | `https://sidebutton.com` | Portal base URL |
 | `AGENT_PASSWORD` | no | random | Initial RDP password (overwritten by portal secret) |
-| `AGENT_TIMEZONE` | no | `Europe/Berlin` | IANA zone for every clock on the VM (panel, tmux, Claude Code). Set by `base/09b-clock.sh`, which also pins Claude Code's `timeFormat` to `24-hour`; an unknown name leaves the zone unchanged. On a live agent the refresh reads it from `~/.agent-env` only, so a value passed at install alone falls back to the default on the first `sb-self-update` — keep an override in the agent's env |
+| `AGENT_TIMEZONE` | no | `Europe/Berlin` | IANA zone for every clock on the VM (`base/09b-clock.sh`, which also pins Claude Code's `timeFormat` to `24-hour`). Kept across refreshes in `/etc/sidebutton/timezone`; a refresh takes a new value from `~/.agent-env` |
 | `SIDEBUTTON_DEFAULT_REGISTRY` | no | — | Per-account knowledge-pack registry (git URL); additive on top of the `agents` pack |
 | `SIDEBUTTON_DEFAULT_REGISTRY_TOKEN` | no | — | Auth token for a private registry; delivered via the secrets fetch |
 | `SIDEBUTTON_PLUGINS` | no | — | Comma plugin slugs (`plugins.json`); selected by the portal per role. Requires `sidebutton-server` |
