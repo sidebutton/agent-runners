@@ -250,7 +250,9 @@ that wrapper (the agent's single privileged action). It does four idempotent,
 2. **Refresh base artifacts** — re-download `agent-runners@<ref>` and re-run the
    refresh-safe base steps (`base/refresh-manifest.txt`) + re-merge the Claude
    hooks block over `~/.claude/settings.json`, so step-script / hook changes reach
-   the fleet without an operator SSH. A fingerprint over the deployed artifacts is
+   the fleet without an operator SSH. The merge also carries the asset's `settings`
+   keys (today `autoContinueAtUsageLimit: true`), the one way a Claude Code setting
+   reaches a box provisioned before it. A fingerprint over the deployed artifacts is
    compared against `/etc/sidebutton/updated`; a routine tick with nothing new
    upstream is a true no-op (no rewrite, no restart). The shared apply logic lives
    in `base/lib-refresh.sh`, which the operator break-glass `agent-redeploy.sh`
@@ -325,6 +327,8 @@ Component-model coverage (the catalog ↔ schema ↔ on-disk ↔ `run.sh` wiring
 | `test-elixir-component.sh` | the `elixir` component's catalog shape + `run.sh` wiring, and its install contract: versions pinned (no floating `latest`) with the Elixir `-otp-NN` suffix matching the pinned OTP major; mise, mix **and the shims** always `runuser`-wrapped as `$AGENT_USER` (a root-run shim resolves `/root`'s mise data dir); `~/.config`/`~/.local`/`~/.cache` made agent-owned **before** the first `runuser` (they are root-owned until 13/15, which run after the toolchain loop); shims symlinked onto `/usr/local/bin` **under their own basename** (dispatched-job PATH; mise dispatches on `argv[0]`) with no dangling `rebar3`/`mix.ps1`; Hex + rebar bootstrapped with `--force` on the invocation; the 5 apt packages; agent-owned Dialyzer PLT dir; no `exit`/`die` (sourced into `run.sh`); the description's docker-pairing + disk guidance. Assertions run against a comment-stripped copy of `install.sh`, so prose cannot satisfy a guard |
 | `test-component-config.sh` | `config_files[]` schema + the 3 declarations; `19f` refresh-safety (helper-signal detection, `run.sh`/manifest/fingerprint wiring); `sb-config-place` traversal/confinement rejection; `sb-config-reconcile` apply/sha-gate/teardown + service dispatch |
 | `test-19e-session-tidy.sh` | session-tidy (SCRUM-1769): the Stop-only sentinel writer lands **before** the job-session gate and can never abort the step-complete POST; the sweep spares the active job / fresh marks / unverified pids (comm + starttime) and honours `SB_SESSION_CLOSE_TTL_SEC=0`; `run.sh`/manifest wiring; the retired reaper names stay unused |
+| `test-14-checkpoint.sh` | transcript checkpoints (DEV-51), against a stub portal (`fixtures/stub-portal.py`, a local HTTP server): one upload per window however many tool calls (ten parallel ones included), each carrying that moment's transcript, `bytes=` and `checkpoint=1`; nothing from another session, a sub-agent, a stopped session, a box without job context or with the switch off; a portal answering 500 or hanging adds no latency and costs one log line; the final Stop upload unchanged |
+| `test-14i-blocked-session.sh` | blocked sessions (DEV-51), against the stub portal and a stub `tmux`: `StopFailure` opens one `kind=blocked` row (`cause`, `message`, `auto_continue` only for a subscription limit that names its reset); the usage-limit menu gets "Wait here, then continue automatically" picked by its text (Enter only on that row, only Down/Up/Enter, one driver per session), a pane without the menu no keys, a menu without the row a re-open with `auto_continue:false`; the `quota_auto_resume_*` arms and the Stop resolve; a non-job session posts nothing; `autoContinueAtUsageLimit: true` from `base/09` and the refresh merge |
 
 CI (`.github/workflows/tests.yml`) runs `run-all.sh` on every push to `main` + PR
 (`ubuntu-latest` + `jq`).

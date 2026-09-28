@@ -84,7 +84,10 @@ sb_artifacts_current() {
 
 # _sb_merge_claude_hooks <hooks_asset> — re-merge the canonical hooks block over
 # the live ~/.claude/settings.json, preserving every other key (mcpServers,
-# onboarding, env). Echoes a status word; chowns the result back to the agent.
+# onboarding, env). The asset's `settings` object is merged too, key by key
+# (autoContinueAtUsageLimit, DEV-51): base/09 writes it at provision only, so this
+# merge is what carries a settings key to a live box, and it re-pins the fleet's
+# value on every refresh. Echoes a status word; chowns the result back to the agent.
 _sb_merge_claude_hooks() {
   local hooks_asset="$1"
   local settings="${AGENT_HOME:-/home/agent}/.claude/settings.json"
@@ -93,7 +96,7 @@ _sb_merge_claude_hooks() {
   if [ ! -f "$settings" ]; then echo "no settings.json"; return 0; fi
   local before after
   before=$(sha256sum "$settings" | awk '{print $1}')
-  if jq --slurpfile h "$hooks_asset" '.hooks = $h[0].hooks' "$settings" > "${settings}.tmp" 2>/dev/null \
+  if jq --slurpfile h "$hooks_asset" '.hooks = $h[0].hooks | . + ($h[0].settings // {})' "$settings" > "${settings}.tmp" 2>/dev/null \
       && [ -s "${settings}.tmp" ] && jq -e '.hooks' "${settings}.tmp" >/dev/null 2>&1; then
     mv "${settings}.tmp" "$settings"
     chown "${AGENT_USER:-agent}:${AGENT_USER:-agent}" "$settings" 2>/dev/null || true

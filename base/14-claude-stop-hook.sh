@@ -234,6 +234,117 @@ exit 0
 PTEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 
+# --- Transcript checkpoint (DEV-51 · SH-1, PLAN-job-continue-on-another-agent §4.9) -----------------
+# Referenced from base/assets/claude-hooks.json as the fourth PostToolUse `.*` command. The Stop hook
+# below uploads the main transcript only on the FINAL Stop, so a session that never reaches it — the
+# operator closing its window, a container restart, the process dying, a quota stall the tidy sweep
+# ends — left the portal nothing to resume: of the 109 mid-session deaths in the 30 days before this,
+# not one step had a transcript_path. This helper uploads the RUNNING transcript to the same
+# POST /api/jobs/transcript, flagged checkpoint=1, at most once per SB_CHECKPOINT_INTERVAL_SEC
+# (default 300), so a stopped step can be resumed elsewhere from a copy at most five minutes stale.
+#
+# Gated STRICTLY to the job session, unlike its PostToolUse siblings: with no job context there is no
+# step for a checkpoint to belong to, so an operator window posts nothing. A sub-agent's tool call is
+# skipped too (agent_id in the input, or a transcript_path other than <session_id>.jsonl), and so is
+# every call once this session's Stop sentinel exists — from there the final upload owns the file, and
+# a late checkpoint must not land on top of it (the SH-3 route also refuses a smaller or post-final
+# copy; the sentinel re-check before the POST narrows the window on a portal that predates it).
+#
+# The throttle is the sb-drain-steer.sh pattern with two differences: the stamp is taken under
+# `flock -n`, because up to CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY (10) calls finish at once and all ten
+# would otherwise read an expired stamp; and it is written BEFORE the upload starts, so a failing
+# portal costs one attempt per window, never one per tool call. The gzip + POST run detached with all
+# three standard streams closed, so they add no latency to the tool call (a hook's pipes held open by
+# a child keep Claude Code waiting), and every attempt logs exactly one line to usage-hook.log. The
+# upload is a `gzip -c` of exactly the bytes `wc -c` counted, so `bytes=` matches the body and the
+# stream is the single-member gzip whose trailer the portal reads. Always exits 0 with no stdout.
+#
+# Switch, per box, in ~/.agent-env: SB_CHECKPOINT_INTERVAL_SEC=0 turns it off; a value that is not a
+# number turns it off too (a switch never degrades into the default — the 19e TTL rule), and anything
+# under 60 is raised to 60. SB_CHECKPOINT_MAX_TIME_SEC bounds one attempt (default 120).
+cat > "$AGENT_HOME/.local/bin/sb-checkpoint-transcript.sh" <<'CKPTEOF'
+#!/usr/bin/env bash
+# stdin: Claude Code PostToolUse hook JSON (session_id, transcript_path; agent_id on a sub-agent's call).
+IN=$(cat 2>/dev/null || true)
+[ -z "$IN" ] && exit 0
+# One jq, one value per line (why not @tsv: see sb-mark-tool-use.sh).
+SID=""; TP=""; AID=""
+{ read -r SID; read -r TP; read -r AID; } < <(printf '%s' "$IN" | jq -r \
+    '.session_id // "", .transcript_path // "", .agent_id // ""' 2>/dev/null)
+# The session id reaches a path (the sentinel) and the upload URL: reject, never sanitise.
+case "$SID" in ''|.|..|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+JC="${HOME}/.sidebutton/job-context.json"
+JOB_SID=$(jq -r '.session_id // empty' "$JC" 2>/dev/null || true)
+[ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ] || exit 0
+[ -z "$AID" ] || exit 0
+[ "${TP##*/}" = "${SID}.jsonl" ] && [ -f "$TP" ] || exit 0
+SENTINEL="${HOME}/.sidebutton/session-stopped/${SID}.json"
+[ -e "$SENTINEL" ] && exit 0
+
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
+INTERVAL="${SB_CHECKPOINT_INTERVAL_SEC:-300}"
+case "$INTERVAL" in *[!0-9]*) exit 0 ;; esac
+[ "$INTERVAL" -gt 0 ] 2>/dev/null || exit 0
+[ "$INTERVAL" -lt 60 ] && INTERVAL=60
+AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+[ -n "$AGENT_TOKEN" ] && [ -n "$AGENT_NAME" ] || exit 0
+MAXT="${SB_CHECKPOINT_MAX_TIME_SEC:-120}"
+case "$MAXT" in ''|0|*[!0-9]*) MAXT=120 ;; esac
+
+# Throttle: claim this window, or leave. The first check is unlocked and builtin-only (EPOCHSECONDS,
+# `read`), so the tool calls inside a window — nearly all of them — exit here without a fork; only a
+# call that finds the window open takes the lock and checks again before it stamps.
+mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+STAMP="${HOME}/.sidebutton/last-checkpoint"
+NOW="${EPOCHSECONDS:-$(date +%s 2>/dev/null || echo 0)}"
+_due() {
+  local last=0
+  [ -f "$STAMP" ] && { read -r last < "$STAMP"; } 2>/dev/null
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ "$last" -gt "$NOW" ] && last=0          # a clock that went back must not park the lane
+  [ $((NOW - last)) -ge "$INTERVAL" ]
+}
+_due || exit 0
+if command -v flock >/dev/null 2>&1; then
+  ( flock -n 9 || exit 1; _due && printf '%s\n' "$NOW" > "$STAMP" ) 9>>"${STAMP}.lock" 2>/dev/null || exit 0
+else
+  printf '%s\n' "$NOW" > "$STAMP" 2>/dev/null || exit 0
+fi
+
+JOB_ID=$(jq -r '.job_id // empty' "$JC" 2>/dev/null || true)
+STEP_INDEX=$(jq -r '.step_index // empty' "$JC" 2>/dev/null || true)
+USAGE_LOG="${HOME}/.sidebutton/usage-hook.log"
+(
+  set -o pipefail
+  log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$USAGE_LOG" 2>/dev/null || true; }
+  RAW=$(wc -c < "$TP" 2>/dev/null | tr -d ' ')
+  case "$RAW" in ''|0|*[!0-9]*) exit 0 ;; esac
+  GZ=$(mktemp 2>/dev/null) || { log "checkpoint (${RAW}B raw): no temp file — skipped"; exit 0; }
+  trap 'rm -f "$GZ"' EXIT
+  if ! head -c "$RAW" "$TP" 2>/dev/null | gzip -c > "$GZ" 2>/dev/null; then
+    log "checkpoint (${RAW}B raw): could not gzip the transcript — skipped"; exit 0
+  fi
+  GZB=$(wc -c < "$GZ" 2>/dev/null | tr -d ' ')
+  if [ "${GZB:-0}" -gt 67108864 ]; then
+    log "checkpoint (${RAW}B raw): ${GZB}B of gzip is over the portal's 64 MB ceiling — skipped"; exit 0
+  fi
+  # The Stop hook may have fired while gzip ran; from its sentinel on, the final upload owns the file.
+  [ -e "$SENTINEL" ] && exit 0
+  CODE=$(curl -4 -s -o /dev/null -w '%{http_code}' -X POST \
+    "${PORTAL_URL}/api/jobs/transcript?job_id=${JOB_ID}&step_index=${STEP_INDEX}&session_id=${SID}&bytes=${RAW}&checkpoint=1" \
+    -H "Content-Type: application/gzip" \
+    -H "Authorization: Bearer ${AGENT_TOKEN}" \
+    -H "X-Agent-Name: ${AGENT_NAME}" \
+    --data-binary "@${GZ}" \
+    --connect-timeout 5 --max-time "$MAXT") || true
+  log "checkpoint POST (${RAW}B raw): ${CODE:-000}"
+) </dev/null >/dev/null 2>&1 &
+exit 0
+CKPTEOF
+chmod +x "$AGENT_HOME/.local/bin/sb-checkpoint-transcript.sh"
+
 # --- Needs-input request forwarder (SCRUM-1373) -------------------------------
 # Referenced from base/assets/claude-hooks.json (PreToolUse + PostToolUse
 # AskUserQuestion|ExitPlanMode, the catch-all Notification, and the Stop entry).
@@ -273,11 +384,32 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 # CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY (10) calls in flight the "current" call was often a
 # sibling, which mislabelled the row, and a prompt tool left behind by the designed
 # deny-answer path (which fires no PostToolUse, so nothing clears it) silenced real gates.
+#
+# DEV-51 — the BLOCKED session (plan §4.12, the agent half of SH-6). A turn that ends on an API
+# error fires StopFailure, never Stop, so a session held by a usage limit or a provider error used to
+# look like a running job to the portal while it sat on a dialog for hours. The StopFailure arm opens
+# a kind=blocked row (cause / message / auto_continue — see the arm), the quota_auto_resume_*
+# notifications resolve, nudge or re-open it, and the Stop entry's bulk resolve closes it once the
+# session finishes a turn normally. The one keystroke lane is sb-usage-limit-menu.sh, below.
 cat > "$AGENT_HOME/.local/bin/sb-post-request.sh" <<'PREOF'
 #!/usr/bin/env bash
-# stdin: Claude Code hook JSON (PreToolUse | PostToolUse | Notification | Stop).
+# stdin: Claude Code hook JSON (PreToolUse | PostToolUse | Notification | Stop | StopFailure).
 IN=$(cat 2>/dev/null || true)
 [ -z "$IN" ] && exit 0
+# Only the blocked-session arms (DEV-51) log; every other arm stays silent, as it always was.
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "${HOME}/.sidebutton/usage-hook.log" 2>/dev/null || true; }
+# The usage-limit menu driver (DEV-51) outlives this hook by up to a minute: detached into its own
+# session with every standard stream closed, because a child holding the hook's pipes open would keep
+# Claude Code waiting on the hook for exactly that long.
+start_menu() {
+  local m="${HOME}/.local/bin/sb-usage-limit-menu.sh"
+  [ -x "$m" ] || return 0
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$m" "$@" </dev/null >/dev/null 2>&1 &
+  else
+    "$m" "$@" </dev/null >/dev/null 2>&1 &
+  fi
+}
 EVENT=$(echo "$IN" | jq -r '.hook_event_name // empty' 2>/dev/null || true)
 [ -z "$EVENT" ] && exit 0
 SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
@@ -295,6 +427,8 @@ TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
 # only by the elicitation/needs-input notifications (KAN-205) and is what tells the payload
 # builder that a `question` row came from a Notification and has no tool_input to read.
 ACTION=""; KIND=""; TUID=""; GATE_TOOL=""; GATE_CMD=""; BLOCK_TYPE=""
+# The blocked-session report (DEV-51): kind=blocked carries these three instead of a payload object.
+CAUSE=""; BMSG=""; AUTO=false
 case "$EVENT" in
   PreToolUse|PostToolUse)
     case "$TOOL" in
@@ -398,6 +532,29 @@ case "$EVENT" in
         # mint a fresh row for one unanswered block).
         TUID="notif-${NTYPE}"
         ;;
+      # DEV-51 — the three notifications of Claude Code's usage-limit wait (2.1.234+), the other half of
+      # the StopFailure arm below. `fired`: the reset came and Claude Code is continuing the task by
+      # itself, so the blocked row closes (a keyed resolve — it must not also close a question the
+      # session left open). `stale`: the reset passed while the box slept for more than 30 minutes and
+      # the session waits for Enter; the driver presses it only when the pane really says "press enter
+      # to continue", and the row stays open until the session's next Stop. `disabled`: the automatic
+      # continue was switched off (repeated hits, a blocked continuation, the setting), so the session
+      # will NOT resume on its own — the row is re-opened saying so, with the line Claude Code printed.
+      quota_auto_resume_fired)
+        ACTION=resolve; KIND=blocked
+        log "blocked: session ${SID} is continuing by itself (quota_auto_resume_fired) — row resolved"
+        ;;
+      quota_auto_resume_stale)
+        start_menu enter "$SID"
+        log "blocked: session ${SID} waits for Enter after the reset (quota_auto_resume_stale) — driver started"
+        exit 0
+        ;;
+      quota_auto_resume_disabled)
+        ACTION=open; KIND=blocked; CAUSE=rate_limit; AUTO=false
+        BMSG=$(printf '%s' "$IN" | jq -r '(.message // "") | tostring | gsub("[\r\n\t]+"; " ")' 2>/dev/null || true)
+        [ -n "$BMSG" ] || BMSG="Automatic continue was turned off"
+        log "blocked: session ${SID} will not continue by itself (quota_auto_resume_disabled) — row re-opened"
+        ;;
       # idle_prompt ("Claude is waiting for your input") is a self-resolving machine state — the
       # portal surfaces idle via the IDLE counter, not the Needs-you band. Capturing it here
       # spammed Needs-you from idle/post-job/between-job sessions, so it falls through to exit 0.
@@ -413,6 +570,66 @@ case "$EVENT" in
   Stop)
     ACTION=resolve   # bulk-resolve every open request for this session (no tool_use_id)
     ;;
+  StopFailure)
+    # DEV-51 · SH-1 (plan §4.12) — a turn that ends on an API error fires StopFailure INSTEAD of Stop
+    # (fire-and-forget: Claude Code ignores this hook's output and exit code). Nothing else fires: no
+    # step-complete, no sentinel, no tidy countdown — the session stays alive and HELD, waiting for a
+    # claude.ai usage limit to reset, parked on the usage-limit options menu when that reset is more
+    # than 24 h away, or idle at the prompt after an API-key app's provider error. Before this arm none
+    # of it reached the portal: on 2026-09-26 three Pull repos jobs sat on the weekly-limit menu for
+    # hours while the portal planned new work onto their agents. It opens ONE kind=blocked row per
+    # session (the portal keys it <session_id>:blocked, so a re-fire refreshes it).
+    ACTION=open; KIND=blocked
+    # Is the RUN on a claude.ai subscription? Read off this hook's own environment — the run's, since
+    # hooks inherit Claude Code's — BEFORE ~/.agent-env is sourced below: the ops preamble clears every
+    # provider var from the global env and sources only the app's ~/.agent-env.d/<slug>, so the global
+    # file is not the run's truth (a stray key there must not turn a subscription run into an API-key
+    # one). Any provider var in effect means an API key, a gateway or a cloud — none of which waits for
+    # a reset. A CCR box reads as a gateway (ANTHROPIC_BASE_URL): the safe direction.
+    SUBSCRIPTION=1
+    for _v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL \
+              CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY; do
+      [ -n "${!_v:-}" ] && SUBSCRIPTION=0
+    done
+    # cause = the error type, which is also the hook's matcher value ("unknown" when absent).
+    # message = the line as Claude Code printed it. The input carries it as last_assistant_message (the
+    # text of the synthetic API-error message, e.g. "You've hit your weekly limit · resets Sep 29, 4pm
+    # (UTC)" — the line the portal reads the reset time from); error_details is the raw provider text
+    # some errors add; the last API-error entry of the transcript is the fallback when a later CLI
+    # stops sending either. Claude Code documents none of these fields (read off the 2.1.283 bundle),
+    # so the first capture keeps its raw input for the record — a renamed field degrades to the
+    # transcript line or the bare cause, and a row still opens.
+    { read -r CAUSE; IFS= read -r BMSG; } < <(printf '%s' "$IN" | jq -r '
+        def line: (. // "") | tostring | gsub("[\r\n\t]+"; " ") | gsub("^ +| +$"; "");
+        ((.error | line) | if . == "" then "unknown" else . end),
+        ([(.last_assistant_message | line), (.error_details | line)] | map(select(. != "")) | first // "")
+      ' 2>/dev/null)
+    [ -n "$CAUSE" ] || CAUSE=unknown
+    if [ -z "$BMSG" ]; then
+      _tp=$(printf '%s' "$IN" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+      if [ -n "$_tp" ] && [ -f "$_tp" ]; then
+        BMSG=$(tail -n 200 "$_tp" 2>/dev/null | jq -Rrn '
+            [ inputs | fromjson? | select(type == "object" and .isApiErrorMessage == true) ] | last
+            | (.message.content // "")
+            | if type == "string" then . else ([ .[]? | select(.type == "text") | .text ] | join(" ")) end
+            | gsub("[\r\n\t]+"; " ")' 2>/dev/null || true)
+      fi
+    fi
+    [ -n "$BMSG" ] && [ "$BMSG" != "null" ] || BMSG="$CAUSE"
+    # auto_continue: only a claude.ai limit continues by itself, and only when Claude Code knows WHEN —
+    # it prints " · resets <time>" exactly then (the legacy "…|<epoch>" form likewise). A subscription
+    # rate_limit without one is either the transient "Server is temporarily limiting requests (not your
+    # usage limit)" refusal or a limit nobody resets on a clock ("contact your admin"): no wait follows.
+    if [ "$CAUSE" = rate_limit ] && [ "$SUBSCRIPTION" = 1 ]; then
+      case "${BMSG,,}" in *reset*|*"|"[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) AUTO=true ;; esac
+    fi
+    _first="${HOME}/.sidebutton/stopfailure-first-input.json"
+    if [ ! -e "$_first" ] && mkdir -p "${HOME}/.sidebutton" 2>/dev/null \
+       && ( umask 177; printf '%s\n' "$IN" > "$_first" ) 2>/dev/null; then
+      log "StopFailure: first capture's raw input kept at ~/.sidebutton/stopfailure-first-input.json (the error fields are undocumented)"
+    fi
+    log "blocked: session ${SID} cause=${CAUSE} auto_continue=${AUTO} subscription=${SUBSCRIPTION} — ${BMSG:0:160}"
+    ;;
   *) exit 0 ;;
 esac
 
@@ -422,7 +639,16 @@ AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
 PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
 if [ -z "${AGENT_TOKEN:-}" ] || [ -z "${AGENT_NAME:-}" ]; then exit 0; fi
 
-if [ "$ACTION" = "open" ]; then
+if [ "$KIND" = "blocked" ] && [ "$ACTION" = "open" ]; then
+  # DEV-51 — the shape SH-6's capture route reads (POST /api/agents/requests, kind:"blocked"): cause,
+  # message and auto_continue at the TOP level and no tool_use_id, since the portal keys the row
+  # <session_id>:blocked itself. Clipped to the portal's own caps (cause 64, message 500).
+  PAYLOAD=$(jq -nc --arg sid "$SID" --arg cause "$CAUSE" --arg msg "$BMSG" --argjson auto "$AUTO" \
+    '{action:"open", session_id:$sid, kind:"blocked", cause:($cause | .[0:64]),
+      message:($msg | .[0:500]), auto_continue:$auto}' 2>/dev/null || true)
+elif [ "$KIND" = "blocked" ]; then
+  PAYLOAD=$(jq -nc --arg sid "$SID" '{action:"resolve", session_id:$sid, kind:"blocked"}' 2>/dev/null || true)
+elif [ "$ACTION" = "open" ]; then
   PAYLOAD=$(echo "$IN" | jq -c --arg sid "$SID" --arg kind "$KIND" --arg tuid "$TUID" \
       --arg gtool "$GATE_TOOL" --arg gcmd "$GATE_CMD" --arg btype "$BLOCK_TYPE" '
     def clip($s): ($s // "") | tostring | .[0:2000];
@@ -485,9 +711,181 @@ curl -4 -sf -X POST "${PORTAL_URL}/api/agents/requests" \
   -H "Authorization: Bearer ${AGENT_TOKEN}" \
   -H "X-Agent-Name: ${AGENT_NAME}" \
   -d "$PAYLOAD" --connect-timeout 2 --max-time 5 >/dev/null 2>&1 &
+# DEV-51 — a claude.ai limit whose reset is more than 24 h away opens Claude Code's usage-limit options
+# menu instead of waiting, and the session then waits for a person. The driver picks "Wait here, then
+# continue automatically" when — and only when — that menu is on the job's pane; a reset within 24 h
+# shows no menu (Claude Code waits by itself) and gets no keys.
+if [ "$EVENT" = "StopFailure" ] && [ "$AUTO" = true ]; then
+  start_menu select "$SID" "$CAUSE" "$BMSG"
+fi
 exit 0
 PREOF
 chmod +x "$AGENT_HOME/.local/bin/sb-post-request.sh"
+
+# --- Usage-limit options menu driver (DEV-51 · SH-1, plan §4.12) ----------------------------------------
+# NOT a hook: sb-post-request.sh starts it detached — `select` after a StopFailure rate_limit on a
+# claude.ai-subscription session whose line names its reset, `enter` on quota_auto_resume_stale.
+#
+# Why keys at all: autoContinueAtUsageLimit (pinned on by claude-hooks.json `settings`) makes Claude
+# Code wait for a reset and continue by itself — but only when the reset is less than 24 h away. For a
+# weekly limit it opens the usage-limit options menu ("What do you want to do?") and waits for a PERSON,
+# which is how three Pull repos jobs sat blocked for hours on 2026-09-26. `select` watches the job's
+# tmux pane for up to SB_USAGE_MENU_WAIT_SEC (60 s) and, only when that menu is on screen, picks the row
+# that starts "Wait here, then continue automatically" (three variants: "… shortly", "… at <time>",
+# "… when the limit resets" — matched by that prefix, never by position): it moves the pointer with
+# Down/Up one step at a time, re-reads the pane after every step, and presses Enter only once the
+# pointer line itself carries that text. Picking it arms the wait and closes the menu (2.1.283's
+# handler; no second dialog). No menu within the budget means Claude Code is already waiting by itself:
+# no keys. A menu that offers only "Don't continue automatically" is a wait already armed: no keys. A
+# menu that offers no wait at all, or one the driver could not select within the budget, re-opens the
+# blocked row with auto_continue=false and the reason appended, so the portal stops promising a
+# continue. `enter` presses Enter only when the pane says "press enter to continue".
+#
+# Hard limits: only Down, Up and Enter are ever sent — never Esc (it cancels the wait), never text (a
+# pasted turn ends the wait, DEV-54); one driver per session (flock); it exits as soon as the tmux
+# session is gone (Cancel, a move); every action logs one line to usage-hook.log, and the first menu a
+# box ever sees is kept raw (0600) as the drill's evidence of the live wording and pointer glyph
+# (`figures.pointer`, ❯ — `>` on a terminal without Unicode).
+cat > "$AGENT_HOME/.local/bin/sb-usage-limit-menu.sh" <<'MENUEOF'
+#!/usr/bin/env bash
+# sb-usage-limit-menu.sh select <session_id> [<cause> <message>]   pick "Wait here, then continue automatically"
+# sb-usage-limit-menu.sh enter  <session_id>                        press Enter on "press enter to continue"
+# ~/.agent-env first: its KEY=value lines are not exported to this child, and it holds the credentials
+# a re-open needs plus the two budget knobs.
+[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env" 2>/dev/null
+MODE="${1:-}"; SID="${2:-}"; SB_CAUSE="${3:-rate_limit}"; SB_MSG="${4:-}"
+case "$SID" in ''|.|..|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+USAGE_LOG="${HOME}/.sidebutton/usage-hook.log"
+log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] usage-limit menu ${SID}: $*" >> "$USAGE_LOG" 2>/dev/null || true; }
+command -v tmux >/dev/null 2>&1 || exit 0
+# The job's pane: the daemon runs every dispatched claude in tmux session sbjob-<session_id>. `=` asks
+# tmux for the exact name (a prefix match could reach a neighbouring job), and the trailing colon makes
+# it a pane target — tmux 3.4 refuses capture-pane on a bare "=name".
+SESS="=sbjob-${SID}"; PANE="${SESS}:"
+tmux has-session -t "$SESS" 2>/dev/null || exit 0
+mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+LOCK="${HOME}/.sidebutton/usage-limit-menu-${SID}.lock"
+if command -v flock >/dev/null 2>&1; then
+  { exec 9>>"$LOCK"; } 2>/dev/null || exit 0
+  flock -n 9 || exit 0
+fi
+trap 'rm -f "$LOCK"' EXIT
+WAIT="${SB_USAGE_MENU_WAIT_SEC:-60}"; case "$WAIT" in ''|*[!0-9]*) WAIT=60 ;; esac
+POLL="${SB_USAGE_MENU_POLL_SEC:-2}";  case "$POLL" in ''|0|*[!0-9]*) POLL=2 ;; esac
+
+# What the visible pane shows, as one word (only what follows the LAST "What do you want to do?" counts,
+# so a transcript line that mentions the wording above the dialog cannot pass for the menu):
+#   none          no usage-limit options menu on screen
+#   select        the menu, the pointer ON the "Wait here, then continue automatically" row
+#   Down | Up     the menu, the pointer on another row — the way to the Wait-here row
+#   nofocus       the menu, but no pointer line found — never guess a key
+#   armed         the menu offers "Don't continue automatically": the wait is armed already
+#   unselectable  the menu offers no automatic wait at all
+menu_state() {
+  printf '%s\n' "$1" | awk '
+    { l[NR] = $0 }
+    /What do you want to do\?/ { t = NR }
+    END {
+      if (!t) { print "none"; exit }
+      w = 0; f = 0; a = 0; m = 0
+      for (i = t + 1; i <= NR; i++) {
+        if (index(l[i], "Wait here, then continue automatically")) { if (!w) w = i; m = 1 }
+        else if (index(l[i], "t continue automatically")) { a = 1; m = 1 }
+        else if (index(l[i], "limit to reset")) m = 1
+        if (!f && l[i] ~ /^[ \t]*(❯|>)[ \t]/) f = i
+      }
+      if (!m) print "none"
+      else if (!w) print (a ? "armed" : "unselectable")
+      else if (!f) print "nofocus"
+      else if (f == w) print "select"
+      else print (f < w ? "Down" : "Up")
+    }'
+}
+keep_pane() {
+  local f="${HOME}/.sidebutton/usage-limit-menu-first-pane.txt"
+  [ -e "$f" ] && return 0
+  ( umask 177; printf '%s\n' "$1" > "$f" ) 2>/dev/null \
+    && log "first options menu this box has seen — raw pane kept at ~/.sidebutton/usage-limit-menu-first-pane.txt"
+}
+# The blocked row goes back to auto_continue=false, the reason appended to the line Claude Code printed
+# (clipped so the reason survives the portal's 500-character cap).
+reopen() {
+  local why="$1" tok name url payload
+  log "${why} — blocked row re-opened with auto_continue=false"
+  tok="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"; name="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+  url="${PORTAL_URL:-https://sidebutton.com}"
+  [ -n "$tok" ] && [ -n "$name" ] || return 0
+  payload=$(jq -nc --arg sid "$SID" --arg cause "$SB_CAUSE" --arg msg "$SB_MSG" --arg why "$why" '
+      {action:"open", session_id:$sid, kind:"blocked", cause:($cause | .[0:64]),
+       message:((if $msg == "" then "" else ($msg | .[0:(497 - ($why | length))]) + " · " end) + $why),
+       auto_continue:false}' 2>/dev/null) || return 0
+  curl -4 -sf -X POST "${url}/api/agents/requests" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${tok}" \
+    -H "X-Agent-Name: ${name}" \
+    -d "$payload" --connect-timeout 2 --max-time 5 >/dev/null 2>&1 || true
+}
+
+case "$MODE" in
+  select)
+    deadline=$(( $(date +%s) + WAIT )); seen=0; moves=0; unsel=0
+    while :; do
+      tmux has-session -t "$SESS" 2>/dev/null || { log "tmux session gone (cancelled or moved) — stopped"; exit 0; }
+      P=$(tmux capture-pane -p -J -t "$PANE" 2>/dev/null || true)
+      st=$(menu_state "$P")
+      if [ "$st" != none ]; then seen=1; keep_pane "$P"; fi
+      if [ "$st" = unselectable ]; then unsel=$((unsel + 1)); else unsel=0; fi
+      case "$st" in
+        select)
+          tmux send-keys -t "$PANE" Enter 2>/dev/null || true
+          log "picked 'Wait here, then continue automatically' after ${moves} move(s) — Claude Code continues at the reset"
+          exit 0 ;;
+        Down|Up)
+          if [ "$moves" -lt 12 ]; then
+            tmux send-keys -t "$PANE" "$st" 2>/dev/null || true
+            moves=$((moves + 1))
+            sleep 0.3
+            continue
+          fi ;;
+        armed)
+          log "the options menu offers only to cancel an armed wait — no keys"
+          exit 0 ;;
+        unselectable)
+          # Twice in a row, so a frame caught half-drawn cannot turn the row to "won't continue".
+          if [ "$unsel" -ge 2 ]; then
+            reopen "options menu on screen offers no automatic wait — not selected"
+            exit 0
+          fi ;;
+      esac
+      [ "$(date +%s)" -lt "$deadline" ] || break
+      sleep "$POLL"
+    done
+    if [ "$seen" = 1 ]; then
+      reopen "options menu on screen — not selected"
+    else
+      log "no options menu within ${WAIT}s — Claude Code waits for the reset by itself; no keys"
+    fi
+    ;;
+  enter)
+    deadline=$(( $(date +%s) + 10 ))
+    while :; do
+      tmux has-session -t "$SESS" 2>/dev/null || exit 0
+      P=$(tmux capture-pane -p -J -t "$PANE" 2>/dev/null || true)
+      case "${P,,}" in
+        *"press enter to continue"*)
+          tmux send-keys -t "$PANE" Enter 2>/dev/null || true
+          log "pressed Enter on 'press enter to continue' — the session resumes after its reset"
+          exit 0 ;;
+      esac
+      [ "$(date +%s)" -lt "$deadline" ] || break
+      sleep "$POLL"
+    done
+    log "no 'press enter to continue' on the pane — no keys"
+    ;;
+esac
+exit 0
+MENUEOF
+chmod +x "$AGENT_HOME/.local/bin/sb-usage-limit-menu.sh"
 
 # --- Needs-input answer return (SCRUM-1375, KAN-204) --------------------------
 # Referenced from base/assets/claude-hooks.json as the SECOND PreToolUse command on

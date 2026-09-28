@@ -23,12 +23,16 @@ chmod +x "$AGENT_HOME/.xsession"
 # with the-assistant's agent-redeploy.sh, which re-merges the block onto existing
 # boxes (this step only runs at provision time). The referenced helper scripts
 # (sb-mark-tool-use.sh, sb-session-id.sh, claude-stop-hook.sh) are installed by
-# base/14 before any Claude job runs.
+# base/14 before any Claude job runs. The asset's `settings` object rides along
+# as top-level keys — autoContinueAtUsageLimit: true (DEV-51), so a session a
+# claude.ai usage limit stops waits for the reset and continues by itself whatever
+# the CLI's default becomes. lib-refresh.sh _sb_merge_claude_hooks merges the same
+# object on every refresh, which is how it reaches boxes provisioned before it.
 jq -n --slurpfile h "$BASE_DIR/assets/claude-hooks.json" '{
   skipDangerousModePermissionPrompt: true,
   env: { DISABLE_AUTOUPDATER: "1" },
   hooks: $h[0].hooks
-}' > "$AGENT_HOME/.claude/settings.json"
+} + ($h[0].settings // {})' > "$AGENT_HOME/.claude/settings.json"
 
 # Pre-seed Claude Code's global state so the FIRST `claude` run skips the
 # interactive first-run onboarding (theme picker / "Let's get started"). Agent

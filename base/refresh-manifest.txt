@@ -60,6 +60,9 @@
 # alone does not move the fingerprint.
 # The Claude hooks block (assets/claude-hooks.json) is re-merged separately by
 # sb_refresh_base_artifacts — it is an asset, not a step, so it is not listed here.
+# Its `settings` object rides the same merge (DEV-51: autoContinueAtUsageLimit: true).
+# base/09 writes ~/.claude/settings.json at provision only, so a Claude Code setting
+# that must reach live boxes belongs in that object, never in 09 alone.
 #
 # NOTE on 13-knowledge-packs.sh: do NOT add it here. The universal "agents" catalog
 # ops pack IS refreshed on a live agent — but by sb_refresh_knowledge_packs (gated on
@@ -68,6 +71,10 @@
 
 09b-clock.sh
 12b-git-credential-helpers.sh
+# 14 also carries the session-handoff lanes (DEV-51): sb-checkpoint-transcript.sh, the
+# PostToolUse checkpoint upload (one per SB_CHECKPOINT_INTERVAL_SEC, default 300 s; 0 in
+# ~/.agent-env turns it off per box), and the StopFailure / quota-notification arms of
+# sb-post-request.sh with the sb-usage-limit-menu.sh driver they start.
 14-claude-stop-hook.sh
 15b-claude-onboarding.sh
 18c-git-telemetry-timer.sh
