@@ -474,6 +474,21 @@ sleep 1.5
   && ok "a StopFailure / quota notification from another session (not the job's) posts nothing and starts no driver" \
   || bad "a non-job session was reported or driven"
 
+# ── 5a. no job session known at all (between dispatches, an operator box, an old runtime's context) ─────
+JCF="$HOME/.sidebutton/job-context.json"; mv "$JCF" "$JCF.saved"
+n="$(posts)"; scene menu 0; lines0="$(menu_lines)"
+fire "$(stopfailure rate_limit "$(jq -n --arg m "$LIMIT_LINE" '$m')")" >/dev/null
+fire "$(notif quota_auto_resume_disabled "Automatic continue was turned off")" >/dev/null
+fire "$(notif quota_auto_resume_fired "x")" >/dev/null
+fire "$(notif quota_auto_resume_stale "press enter to continue")" >/dev/null
+printf '{"job_id":77,"step_index":0}\n' > "$JCF"     # a context that names no session
+fire "$(stopfailure rate_limit "$(jq -n --arg m "$LIMIT_LINE" '$m')")" >/dev/null
+sleep 1.5
+[ "$(posts)" = "$n" ] && [ -z "$(keys)" ] && [ "$(menu_lines)" = "$lines0" ] \
+  && ok "with no job session known (no job context, or one naming no session) StopFailure and the quota notifications post nothing and start no driver" \
+  || bad "a session with no job context was reported or driven: $(tail -1 "$PLOG" 2>/dev/null)"
+mv "$JCF.saved" "$JCF"; quiesce
+
 # ── 5b. a StopFailure checkpoints the job session's transcript at once ────────────────────────────────
 TRJ="$HOME/.claude/projects/-home-agent-workspace/$SID.jsonl"; mkdir -p "$(dirname "$TRJ")"
 printf '{"type":"user","message":{"content":"go"}}\n{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"%s"}]}}\n' "$LIMIT_LINE" > "$TRJ"
@@ -487,6 +502,20 @@ CK="$(grep '"/api/jobs/transcript"' "$PLOG" | tail -1)"
   && ok "a StopFailure on the job session uploads a checkpoint at once (throttle bypassed): the portal's copy ends where the session blocked" \
   || bad "no checkpoint followed the StopFailure"
 quiesce
+
+# ── 5c. the per-box switch reads the same for the StopFailure checkpoint as for the PostToolUse one ─────
+cp "$HOME/.agent-env" "$HOME/.agent-env.saved"
+for off in 00 000; do
+  cp "$HOME/.agent-env.saved" "$HOME/.agent-env"; echo "SB_CHECKPOINT_INTERVAL_SEC=$off" >> "$HOME/.agent-env"
+  ck_before="$(grep -c '"/api/jobs/transcript"' "$PLOG")"; scene plain 0
+  fire "$(stopfailure rate_limit "$(jq -n --arg m "$LIMIT_LINE" '$m')" "$(jq -nc --arg tp "$TRJ" '{transcript_path:$tp}')")" >/dev/null
+  sleep 1.5
+  [ "$(grep -c '"/api/jobs/transcript"' "$PLOG")" = "$ck_before" ] \
+    && ok "SB_CHECKPOINT_INTERVAL_SEC=$off switches the StopFailure checkpoint off, as it does the PostToolUse one" \
+    || bad "SB_CHECKPOINT_INTERVAL_SEC=$off still uploaded a checkpoint on StopFailure"
+  quiesce
+done
+mv "$HOME/.agent-env.saved" "$HOME/.agent-env"
 
 # ── 6. the whole run, every key: only Down, Up and Enter ────────────────────────────────────────────
 if [ -s "$TMUX_STUB/all-keys.log" ] \

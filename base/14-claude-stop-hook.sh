@@ -311,6 +311,9 @@ if [ "${1:-}" = "--upload" ]; then
   _env
   PIDF="${HOME}/.sidebutton/checkpoint-${SID}.pid"
   echo "$$" > "$PIDF" 2>/dev/null
+  # The file names the NEWEST upload of the session (a StopFailure's can overlap a PostToolUse one still in
+  # flight): an upload that ends removes it only while it still names this one, so --cancel reaches the other.
+  _unpid() { local p=""; { read -r p < "$PIDF"; } 2>/dev/null; [ "$p" = "$$" ] && rm -f "$PIDF" 2>/dev/null; return 0; }
   MAXT="${SB_CHECKPOINT_MAX_TIME_SEC:-120}"
   case "$MAXT" in ''|0|*[!0-9]*) MAXT=120 ;; esac
   SENTINEL="${HOME}/.sidebutton/session-stopped/${SID}.json"
@@ -318,10 +321,10 @@ if [ "${1:-}" = "--upload" ]; then
   # off too. Count the newlines present now, then take exactly that many lines — the JSONL only grows, so
   # both reads see the same first N lines — and RAW is the size of exactly what the body holds.
   N=$(wc -l < "$TP" 2>/dev/null | tr -d ' ')
-  case "$N" in ''|0|*[!0-9]*) rm -f "$PIDF"; exit 0 ;; esac
-  GZ=$(mktemp 2>/dev/null) || { log "checkpoint: no temp file — skipped"; rm -f "$PIDF"; exit 0; }
+  case "$N" in ''|0|*[!0-9]*) _unpid; exit 0 ;; esac
+  GZ=$(mktemp 2>/dev/null) || { log "checkpoint: no temp file — skipped"; _unpid; exit 0; }
   RAWF="${GZ}.raw"
-  trap 'rm -f "$GZ" "$RAWF" "$PIDF"' EXIT
+  trap 'rm -f "$GZ" "$RAWF"; _unpid' EXIT
   # One pass over those lines: awk counts the bytes (C locale: length is bytes) while it passes them on.
   if ! head -n "$N" "$TP" 2>/dev/null \
        | LC_ALL=C awk -v out="$RAWF" '{ n += length($0) + 1; print } END { print n + 0 > out }' \
@@ -483,6 +486,10 @@ SID=$(echo "$IN" | jq -r '.session_id // empty' 2>/dev/null || true)
 # session is known, a different session's signal is dropped; with none known, post.
 JOB_SID=$(jq -r '.session_id // empty' "${HOME}/.sidebutton/job-context.json" 2>/dev/null || true)
 if [ -n "$JOB_SID" ] && [ "$SID" != "$JOB_SID" ]; then exit 0; fi
+# The blocked-session arms (DEV-51: StopFailure and the quota_auto_resume_* notifications) are gated STRICTLY,
+# like the checkpoint lane: a blocked row belongs to a job step, so with no job session known — no job
+# context, or one that names no session — nothing is posted and no driver starts.
+job_session() { [ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ]; }
 
 TOOL=$(echo "$IN" | jq -r '.tool_name // empty' 2>/dev/null || true)
 
@@ -605,15 +612,18 @@ case "$EVENT" in
       # continue was switched off (repeated hits, a blocked continuation, the setting), so the session
       # will NOT resume on its own — the row is re-opened saying so, with the line Claude Code printed.
       quota_auto_resume_fired)
+        job_session || exit 0
         ACTION=resolve; KIND=blocked
         log "blocked: session ${SID} is continuing by itself (quota_auto_resume_fired) — row resolved"
         ;;
       quota_auto_resume_stale)
+        job_session || exit 0
         start_menu enter "$SID"
         log "blocked: session ${SID} waits for Enter after the reset (quota_auto_resume_stale) — driver started"
         exit 0
         ;;
       quota_auto_resume_disabled)
+        job_session || exit 0
         ACTION=open; KIND=blocked; CAUSE=rate_limit; AUTO=false
         BMSG=$(printf '%s' "$IN" | jq -r '(.message // "") | tostring | gsub("[\r\n\t]+"; " ")' 2>/dev/null || true)
         [ -n "$BMSG" ] || BMSG="Automatic continue was turned off"
@@ -635,6 +645,7 @@ case "$EVENT" in
     ACTION=resolve   # bulk-resolve every open request for this session (no tool_use_id)
     ;;
   StopFailure)
+    job_session || exit 0
     # DEV-51 · SH-1 (plan §4.12) — a turn that ends on an API error fires StopFailure INSTEAD of Stop
     # (fire-and-forget: Claude Code ignores this hook's output and exit code). Nothing else fires: no
     # step-complete, no sentinel, no tidy countdown — the session stays alive and HELD, waiting for a
@@ -791,25 +802,23 @@ fi
 # copy up to a whole window behind the moment it blocked — and a blocked session is the one most likely to
 # be moved. Checkpoint it now (the job session only, the per-box switch honoured), outside the throttle,
 # stamping the window so the next tool call after a resume does not repeat it at once.
-if [ "$EVENT" = "StopFailure" ] && [ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ]; then
+if [ "$EVENT" = "StopFailure" ] && job_session; then
   _ivl="${SB_CHECKPOINT_INTERVAL_SEC:-300}"
   _tp=$(printf '%s' "$IN" | jq -r '.transcript_path // empty' 2>/dev/null || true)
   _ck="${HOME}/.local/bin/sb-checkpoint-transcript.sh"
-  case "$_ivl" in
-    ''|0|*[!0-9]*) ;;
-    *)
-      if [ -x "$_ck" ] && [ "${_tp##*/}" = "${SID}.jsonl" ] && [ -f "$_tp" ]; then
-        _jc="${HOME}/.sidebutton/job-context.json"
-        _jid=$(jq -r '.job_id // empty' "$_jc" 2>/dev/null || true)
-        _stp=$(jq -r '.step_index // empty' "$_jc" 2>/dev/null || true)
-        date +%s > "${HOME}/.sidebutton/last-checkpoint" 2>/dev/null
-        if command -v setsid >/dev/null 2>&1; then
-          setsid bash "$_ck" --upload "$SID" "$_tp" "$_jid" "$_stp" </dev/null >/dev/null 2>&1 &
-        else
-          bash "$_ck" --upload "$SID" "$_tp" "$_jid" "$_stp" </dev/null >/dev/null 2>&1 &
-        fi
-      fi ;;
-  esac
+  # The switch reads exactly as the helper's own: not a number, or not above 0 (00 included), is off.
+  case "$_ivl" in *[!0-9]*) _ivl=0 ;; esac
+  if [ "$_ivl" -gt 0 ] 2>/dev/null && [ -x "$_ck" ] && [ "${_tp##*/}" = "${SID}.jsonl" ] && [ -f "$_tp" ]; then
+    _jc="${HOME}/.sidebutton/job-context.json"
+    _jid=$(jq -r '.job_id // empty' "$_jc" 2>/dev/null || true)
+    _stp=$(jq -r '.step_index // empty' "$_jc" 2>/dev/null || true)
+    date +%s > "${HOME}/.sidebutton/last-checkpoint" 2>/dev/null
+    if command -v setsid >/dev/null 2>&1; then
+      setsid bash "$_ck" --upload "$SID" "$_tp" "$_jid" "$_stp" </dev/null >/dev/null 2>&1 &
+    else
+      bash "$_ck" --upload "$SID" "$_tp" "$_jid" "$_stp" </dev/null >/dev/null 2>&1 &
+    fi
+  fi
 fi
 exit 0
 PREOF

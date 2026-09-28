@@ -292,4 +292,19 @@ kill -0 "$decoy" 2>/dev/null && ok "--cancel never signals a pid whose command l
   || bad "--cancel killed an unrelated process"
 kill "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null
 
+# ── 7. overlapping uploads (a PostToolUse one still in flight when a StopFailure starts another) ─────────
+# The pid file names the newest upload; one that ends must not remove it, or --cancel at the Stop could no
+# longer reach the upload still running.
+echo hang > "$MODE_FILE"; before="$(posts)"
+env -i PATH="$PATH" HOME="$HOME" bash "$HOME/.local/bin/sb-checkpoint-transcript.sh" --upload "$SID" "$TR" 4242 1 </dev/null >/dev/null 2>&1 &
+first=$!
+wait_posts $((before + 1)) || bad "the first upload never reached the stub"
+echo 999999 > "$HOME/.sidebutton/checkpoint-$SID.pid"   # the newer upload's pid
+wait "$first" 2>/dev/null                                  # SB_CHECKPOINT_MAX_TIME_SEC=2: the first one gives up and exits
+[ "$(cat "$HOME/.sidebutton/checkpoint-$SID.pid" 2>/dev/null)" = 999999 ] \
+  && ok "an upload that ends removes the pid file only while it still names that upload — the newer one stays reachable for --cancel" \
+  || bad "an ending upload removed the pid file a newer upload of its session had written"
+rm -f "$HOME/.sidebutton/checkpoint-$SID.pid"
+echo 200 > "$MODE_FILE"
+
 finish
