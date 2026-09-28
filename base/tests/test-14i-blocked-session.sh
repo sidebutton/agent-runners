@@ -92,6 +92,7 @@ extract() {  # $1=basename  $2=heredoc marker
 }
 extract sb-post-request.sh PREOF || finish
 extract sb-usage-limit-menu.sh MENUEOF || finish
+extract sb-checkpoint-transcript.sh CKPTEOF || finish
 grep -q 'chmod +x "$AGENT_HOME/.local/bin/sb-usage-limit-menu.sh"' "$HOOK" \
   && ok "base/14 installs the menu driver executable" || bad "base/14 never chmods sb-usage-limit-menu.sh"
 
@@ -103,7 +104,7 @@ done
 export HOME="$TMP/home"
 SID="5d0e3c11-8a4b-4c7d-9e2f-1a2b3c4d5e6f"
 mkdir -p "$HOME/.sidebutton" "$HOME/.local/bin" "$TMP/stub" "$TMP/tmux"
-cp "$TMP/sb-post-request.sh" "$TMP/sb-usage-limit-menu.sh" "$HOME/.local/bin/"; chmod +x "$HOME/.local/bin"/*.sh
+cp "$TMP/sb-post-request.sh" "$TMP/sb-usage-limit-menu.sh" "$TMP/sb-checkpoint-transcript.sh" "$HOME/.local/bin/"; chmod +x "$HOME/.local/bin"/*.sh
 printf '{"job_id":77,"step_index":0,"session_id":"%s"}\n' "$SID" > "$HOME/.sidebutton/job-context.json"
 MODE_FILE="$TMP/portal.mode"; PLOG="$TMP/portal.log"; : > "$PLOG"; echo 200 > "$MODE_FILE"
 python3 "$STUB_PORTAL" "$MODE_FILE" "$PLOG" > "$TMP/portal.port" 2>/dev/null &
@@ -127,13 +128,21 @@ while [ $# -gt 0 ]; do
 done
 name="${target#=}"; name="${name%:}"
 live() { [ -n "$name" ] && grep -qxF "$name" "$S/sessions" 2>/dev/null; }
-rows() {  # one row per line: "<d|->\t<label>" (d = disabled)
+rows() {  # one row per line: "<d|->\t<label>" (d = disabled); $1 = the moment (epoch ms) whose menu is wanted
+  local at="${1:-$(date +%s%3N)}"
   case "$(cat "$S/scene" 2>/dev/null)" in
+    menu-promo)  # the CLI inserts a promo row once its data loads (2.1.283: toSpliced(1, 0, promo))
+      if [ "$at" -lt "$(cat "$S/shift_at" 2>/dev/null || echo 0)" ]; then
+        printf -- '-\tStop and wait for limit to reset\n-\tWait here, then continue automatically at 4pm\n'
+      else
+        printf -- '-\tStop and wait for limit to reset\n-\tClaim a free week of Max\n-\tWait here, then continue automatically at 4pm\n'
+      fi ;;
     menu)          printf -- '-\tStop and wait for limit to reset\n-\tWait here, then continue automatically at 4pm\n-\tUpgrade your plan\n' ;;
     menu-disabled) printf -- '-\tStop and wait for limit to reset\nd\tClaim free usage (already claimed)\n-\tWait here, then continue automatically shortly\n' ;;
     menu-noauto)   printf -- '-\tStop and wait for limit to reset\n-\tUpgrade your plan\n' ;;
     menu-armed)    printf -- '-\tStop and wait for limit to reset\n-\tDon\xe2\x80\x99t continue automatically\n' ;;
     menu-nofocus)  printf -- '-\tStop and wait for limit to reset\n-\tWait here, then continue automatically at 4pm\n' ;;
+    menu-usage)    printf -- '-\tStop\n-\tAdd funds to continue with usage credits\n-\tUpgrade your plan\n' ;;
   esac
 }
 render() {
@@ -155,7 +164,7 @@ render() {
         if [ "$scene" != menu-nofocus ] && [ "$i" = "$focus" ]; then printf ' \xe2\x9d\xaf %s. %s\n' $((i + 1)) "$lab"
         else printf '   %s. %s\n' $((i + 1)) "$lab"; fi
         i=$((i + 1))
-      done < <(rows)
+      done < <(rows "$(( $(date +%s%3N) - $(cat "$S/render_lag" 2>/dev/null || echo 0) ))")   # the frame may lag the menu
       printf '\n Enter to confirm \xc2\xb7 Esc to cancel\n' ;;
     stale)  printf '\xe2\x9c\xbb Usage limit has reset \xc2\xb7 press enter to continue\n\n> \n' ;;
     stale-old)  # the words only in old transcript text, well above the live bottom of the screen
@@ -175,6 +184,23 @@ move() {  # $1 = +1 | -1 — to the next enabled row, or stay
     echo "$i" > "$S/focus"; return 0
   done
 }
+apply_key() {
+  case "$1" in
+    Down) move 1 ;; Up) move -1 ;;
+    Enter) mapfile -t R < <(rows); f="$(cat "$S/focus" 2>/dev/null || echo 0)"
+           printf '%s\n' "${R[$f]#*$'\t'}" > "$S/picked"; echo picked > "$S/scene" ;;
+  esac
+}
+# "lag": a key takes effect only lag_ms after it was sent, like a TUI that redraws slowly — every stub call
+# first applies the keys that are due, in order.
+lag="$(cat "$S/lag_ms" 2>/dev/null || echo 0)"
+if [ "$lag" -gt 0 ] && [ -s "$S/queue" ]; then
+  now="$(date +%s%3N)"; : > "$S/queue.next"
+  while read -r ts key; do
+    if [ $((now - ts)) -ge "$lag" ]; then apply_key "$key"; else printf '%s %s\n' "$ts" "$key" >> "$S/queue.next"; fi
+  done < "$S/queue"
+  mv "$S/queue.next" "$S/queue"
+fi
 case "$cmd" in
   has-session)  live ;;
   capture-pane) live || exit 1; render ;;
@@ -182,18 +208,14 @@ case "$cmd" in
     live || exit 1
     printf '%s %s\n' "$target" "$*" >> "$S/keys.log"
     printf '%s %s\n' "$target" "$*" >> "$S/all-keys.log"   # never reset: the whole run's keys
-    case "$1" in
-      Down) move 1 ;; Up) move -1 ;;
-      Enter) mapfile -t R < <(rows); f="$(cat "$S/focus" 2>/dev/null || echo 0)"
-             printf '%s\n' "${R[$f]#*$'\t'}" > "$S/picked"; echo picked > "$S/scene" ;;
-    esac ;;
+    if [ "$lag" -gt 0 ]; then printf '%s %s\n' "$(date +%s%3N)" "$1" >> "$S/queue"; else apply_key "$1"; fi ;;
   *) exit 1 ;;
 esac
 TMUXEOF
 chmod +x "$TMP/stub/tmux"
 
 scene() { echo "$1" > "$TMUX_STUB/scene"; echo "${2:-0}" > "$TMUX_STUB/focus"; : > "$TMUX_STUB/keys.log"
-          rm -f "$TMUX_STUB/picked" "$TMUX_STUB/scene-next"; }
+          rm -f "$TMUX_STUB/picked" "$TMUX_STUB/scene-next" "$TMUX_STUB/lag_ms" "$TMUX_STUB/queue" "$TMUX_STUB/shift_at" "$TMUX_STUB/render_lag"; }
 echo "sbjob-$SID" > "$TMUX_STUB/sessions"
 PATH_S="$TMP/stub:$PATH"
 fire() {  # $1 = hook JSON, $2.. = extra env (a provider key for an API-key run)
@@ -219,7 +241,7 @@ posts() { wc -l < "$PLOG" | tr -d ' '; }
 wait_posts() { for _ in $(seq 1 40); do [ "$(posts)" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
 last_body() { tail -1 "$PLOG" | jq -c '.body | fromjson'; }
 # A detached driver is finished when it logs one of its closing lines (the raw-pane note comes first).
-DONE_RE="picked 'Wait here|no options menu within|re-opened with auto_continue=false|offers only to cancel|tmux session gone|pressed Enter on|no 'press enter to continue'"
+DONE_RE="picked 'Wait here|no options menu within|re-opened with auto_continue=false|offers only to cancel|tmux session gone|pressed Enter on|no 'press enter to continue'|closed without the driver"
 menu_lines() { grep -cE "usage-limit menu .*(${DONE_RE})" "$LOG" 2>/dev/null || true; }
 wait_menu_line() { for _ in $(seq 1 100); do [ "$(menu_lines)" -gt "$1" ] && return 0; sleep 0.1; done; return 1; }
 keys() { cat "$TMUX_STUB/keys.log" 2>/dev/null; }
@@ -295,6 +317,9 @@ case_auto "a subscription rate_limit with no reset (the transient server throttl
   "$(stopfailure rate_limit "$(jq -n --arg m "$TRANSIENT" '$m')")"
 case_auto "overloaded on a subscription run" false "API Error: Overloaded" \
   "$(stopfailure overloaded '"API Error: Overloaded"')"
+RAWBODY='429 {"error":{"message":"rate limited, the window will reset soon"}}'
+case_auto "a subscription rate_limit whose only 'reset' is a raw provider body (no printed ' · resets ' anchor)" false "$RAWBODY" \
+  "$(stopfailure rate_limit null "$(jq -nc --arg d "$RAWBODY" '{error_details:$d}')")"
 # The message fallbacks: error_details when the line is absent; the transcript's last API-error entry
 # when both are; the bare cause when nothing is left.
 case_auto "no last_assistant_message: error_details is the message" false "429 {\"error\":\"rate\"}" \
@@ -345,6 +370,25 @@ if wait_posts $((n + 1)); then
 else
   bad "a menu the driver could not use did not re-open the row"
 fi
+n="$(posts)"
+scene menu-usage 0; drive select "$SID" rate_limit "$LIMIT_LINE"
+[ -z "$(keys)" ] && wait_posts $((n + 1)) && last_body | jq -e '.auto_continue == false and (.message | endswith("offers no automatic wait — not selected"))' >/dev/null \
+  && ok "usage-based billing's menu (a bare 'Stop' row, no wait) is still the menu: no keys, the row re-opened as won't continue" \
+  || bad "the usage-based menu was not recognised: keys '$(keys)', $(( $(posts) - n )) posts"
+# A TUI that redraws 0.7 s late: every key must wait for its move, and Enter for a steady frame.
+quiesce; scene menu 0; echo 700 > "$TMUX_STUB/lag_ms"
+drive select "$SID" rate_limit "$LIMIT_LINE"
+sleep 0.8; env -i PATH="$PATH_S" TMUX_STUB="$TMUX_STUB" tmux has-session -t "=sbjob-$SID"   # let the last key land
+[ "$(keys | awk '{print $2}' | paste -sd, -)" = "Down,Enter" ] && [ "$(cat "$TMUX_STUB/picked" 2>/dev/null)" = "Wait here, then continue automatically at 4pm" ] \
+  && ok "a TUI that redraws late gets one key per step and Enter only on a steady frame — no overshoot" \
+  || bad "a slow redraw made the driver overshoot: keys $(keys | paste -sd'|' -), picked '$(cat "$TMUX_STUB/picked" 2>/dev/null)'"
+# The menu changes under the pointer (a promo row loads in) while the frame on screen is still the old one:
+# only a second, steady look keeps Enter off the row that slid under the pointer.
+quiesce; scene menu-promo 1; echo 400 > "$TMUX_STUB/render_lag"; date +%s%3N > "$TMUX_STUB/shift_at"
+drive select "$SID" rate_limit "$LIMIT_LINE"
+[ "$(cat "$TMUX_STUB/picked" 2>/dev/null)" = "Wait here, then continue automatically at 4pm" ] \
+  && ok "a menu that changes under the pointer (an async promo row) never gets Enter on a stale frame — two agreeing looks first" \
+  || bad "Enter landed on '$(cat "$TMUX_STUB/picked" 2>/dev/null)' after the menu shifted (keys $(keys | paste -sd'|' -))"
 n="$(posts)"
 scene menu-nofocus 0; drive select "$SID" rate_limit "$LIMIT_LINE"
 [ -z "$(keys)" ] && ok "a menu with no pointer line found gets no keys (a key is never guessed)" || bad "keys without a pointer: $(keys)"
@@ -429,6 +473,20 @@ sleep 1.5
 [ "$(posts)" = "$n" ] && [ -z "$(keys)" ] && [ "$(menu_lines)" = "$lines0" ] \
   && ok "a StopFailure / quota notification from another session (not the job's) posts nothing and starts no driver" \
   || bad "a non-job session was reported or driven"
+
+# ── 5b. a StopFailure checkpoints the job session's transcript at once ────────────────────────────────
+TRJ="$HOME/.claude/projects/-home-agent-workspace/$SID.jsonl"; mkdir -p "$(dirname "$TRJ")"
+printf '{"type":"user","message":{"content":"go"}}\n{"type":"assistant","isApiErrorMessage":true,"message":{"content":[{"type":"text","text":"%s"}]}}\n' "$LIMIT_LINE" > "$TRJ"
+date +%s > "$HOME/.sidebutton/last-checkpoint"   # a fresh window: a PostToolUse checkpoint would be throttled
+n="$(posts)"; scene plain 0
+fire "$(stopfailure rate_limit "$(jq -n --arg m "$LIMIT_LINE" '$m')" "$(jq -nc --arg tp "$TRJ" '{transcript_path:$tp}')")" >/dev/null
+for _ in $(seq 1 40); do grep -q '"/api/jobs/transcript"' "$PLOG" && break; sleep 0.1; done
+CK="$(grep '"/api/jobs/transcript"' "$PLOG" | tail -1)"
+[ -n "$CK" ] && [ "$(printf '%s' "$CK" | jq -r .query.checkpoint)" = 1 ] && [ "$(printf '%s' "$CK" | jq -r .query.session_id)" = "$SID" ] \
+  && [ "$(printf '%s' "$CK" | jq -r .body)" = "$(cat "$TRJ")" ] \
+  && ok "a StopFailure on the job session uploads a checkpoint at once (throttle bypassed): the portal's copy ends where the session blocked" \
+  || bad "no checkpoint followed the StopFailure"
+quiesce
 
 # ── 6. the whole run, every key: only Down, Up and Enter ────────────────────────────────────────────
 if [ -s "$TMUX_STUB/all-keys.log" ] \

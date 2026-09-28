@@ -59,10 +59,19 @@ grep -q 'chmod +x "$AGENT_HOME/.local/bin/sb-checkpoint-transcript.sh"' "$HOOK" 
 # The final Stop upload stays exactly what it was: no checkpoint flag, and still gated to the main Stop.
 awk "/cat > .*claude-stop-hook.sh.*<<'HOOKEOF'/{f=1;next} /^HOOKEOF\$/{f=0} f" "$HOOK" > "$TMP/stop.sh"
 if grep -q 'api/jobs/transcript?job_id=${JOB_ID}&step_index=${STEP_INDEX}&session_id=${SESSION_ID}&bytes=${RAW_BYTES}"' "$TMP/stop.sh" \
-   && ! grep -q 'checkpoint' "$TMP/stop.sh"; then
+   && ! grep -q 'checkpoint=1' "$TMP/stop.sh"; then
   ok "the Stop hook's final transcript upload is unchanged (no checkpoint flag) — it stays authoritative"
 else
   bad "the Stop hook's final upload changed shape or carries a checkpoint flag"
+fi
+
+# The Stop hook stops a checkpoint upload of its session still in flight, right after writing the sentinel
+# and before its own final upload — so no checkpoint can land after the final copy.
+if awk '/if \[ "\$HOOK_EVENT" = "Stop" \]; then/{f=1} f && /mark_session_stopped "\$SESSION_ID"/{m=NR} f && m && /sb-checkpoint-transcript\.sh" --cancel "\$SESSION_ID"/{c=NR; exit} END{exit !(c && c > m)}' "$TMP/stop.sh" \
+   && [ "$(grep -n 'sb-checkpoint-transcript.sh" --cancel' "$TMP/stop.sh" | head -1 | cut -d: -f1)" -lt "$(grep -n 'api/jobs/transcript?job_id' "$TMP/stop.sh" | head -1 | cut -d: -f1)" ]; then
+  ok "the Stop hook cancels its session's in-flight checkpoint right after the sentinel, before the final upload"
+else
+  bad "the Stop hook does not cancel an in-flight checkpoint before its final upload"
 fi
 
 for t in python3 gzip curl; do
@@ -148,6 +157,11 @@ chmod +x "$TMP/jqspy/jq"; : > "$TMP/jq.calls"
 printf '%s' "$(input "$SID")" | env -i PATH="$TMP/jqspy:$PATH" HOME="$HOME" bash "$HOME/.local/bin/sb-checkpoint-transcript.sh" >/dev/null
 [ ! -s "$TMP/jq.calls" ] && ok "a tool call inside the window runs no jq (the throttle comes before the input is parsed)" \
   || bad "an in-window call ran jq $(wc -l < "$TMP/jq.calls") time(s)"
+mv "$HOME/.sidebutton/job-context.json" "$TMP/jc.hold"; : > "$TMP/jq.calls"; rm -f "$STAMP"
+printf '%s' "$(input "$SID")" | env -i PATH="$TMP/jqspy:$PATH" HOME="$HOME" bash "$HOME/.local/bin/sb-checkpoint-transcript.sh" >/dev/null
+[ ! -s "$TMP/jq.calls" ] && ok "with no job context (an operator box) a tool call leaves before any fork, even with no stamp at all" \
+  || bad "a call with no job context ran jq $(wc -l < "$TMP/jq.calls") time(s)"
+mv "$TMP/jc.hold" "$HOME/.sidebutton/job-context.json"; echo "$(date +%s)" > "$STAMP"; touch -d '1 minute ago' "$HOME/.sidebutton/job-context.json"
 open_window
 SNAP2="$(cat "$TR")"; RAW2="$(wc -c < "$TR" | tr -d ' ')"
 # Claude Code is mid-append: the last record has no newline yet. Only complete lines are sent.
@@ -166,6 +180,14 @@ else
 fi
 printf 'ten"}]}}\n' >> "$TR"
 
+# A new dispatch rewrites job-context.json: its first checkpoint must not wait out the previous job's window.
+before="$(posts)"; echo "$(date +%s)" > "$STAMP"; touch -d '10 seconds ago' "$STAMP"
+job_context "$SID"   # rewritten now — newer than the stamp
+fire "$(input "$SID")" >/dev/null
+wait_posts $((before + 1)) && ok "a job context newer than the last checkpoint (a new dispatch) opens the window at once" \
+  || bad "a new job inherited the previous job's window"
+sleep 0.5
+
 # ── 3. only the job session, only its main transcript, only before its Stop ─────────────────────────
 # One case at a time, each given time to post before the next changes the sandbox: a wrongly launched
 # upload re-checks the Stop sentinel just before its POST, so a sentinel created by the NEXT case would
@@ -180,10 +202,16 @@ open_window; fire "$(input "ffffffff-0000-4000-8000-000000000000")" >/dev/null; 
 open_window; fire "$(input "$SID" '{"agent_id":"a1","agent_type":"general-purpose"}')" >/dev/null; gated "a sub-agent's tool call (agent_id)"
 open_window; fire "$(input "$SID" '{}' "$SUB")" >/dev/null; gated "a call naming a sub-agent transcript (not <session_id>.jsonl)"
 open_window; mkdir -p "$HOME/.sidebutton/session-stopped"; echo '{}' > "$HOME/.sidebutton/session-stopped/$SID.json"
+stamp_before="$(cat "$STAMP")"
 fire "$(input "$SID")" >/dev/null; gated "a session whose Stop sentinel exists (the final upload owns it)"
+[ "$(cat "$STAMP")" = "$stamp_before" ] && ok "…and a stopped session's call does not even claim the window (the stamp is untouched)" \
+  || bad "a stopped session's tool call consumed the checkpoint window"
 rm -f "$HOME/.sidebutton/session-stopped/$SID.json"
 open_window; mv "$HOME/.sidebutton/job-context.json" "$TMP/jc.bak"; fire "$(input "$SID")" >/dev/null
-gated "a session with no job context (an operator window)"; mv "$TMP/jc.bak" "$HOME/.sidebutton/job-context.json"
+gated "a session with no job context (an operator window)"
+printf '{"job_id":4242,"step_index":1}\n' > "$HOME/.sidebutton/job-context.json"; open_window; fire "$(input "$SID")" >/dev/null
+gated "a job context that names no session (an old runtime) — the gate is strict: no session id, no checkpoint"
+mv "$TMP/jc.bak" "$HOME/.sidebutton/job-context.json"
 open_window; agent_env 'SB_CHECKPOINT_INTERVAL_SEC=0'; fire "$(input "$SID")" >/dev/null; gated "SB_CHECKPOINT_INTERVAL_SEC=0 (switched off)"
 open_window; agent_env 'SB_CHECKPOINT_INTERVAL_SEC=off'; fire "$(input "$SID")" >/dev/null
 gated "SB_CHECKPOINT_INTERVAL_SEC=off (not a number: off, never the default)"
@@ -241,5 +269,27 @@ for m in 500 hang; do
     || bad "portal ${m}: a failed checkpoint was retried inside its window"
 done
 echo 200 > "$MODE_FILE"
+
+# ── 6. --cancel: the Stop hook's way to stop an upload still in flight ─────────────────────────────────
+echo hang > "$MODE_FILE"; open_window; before="$(posts)"
+fire "$(input "$SID")" >/dev/null; wait_posts $((before + 1))
+upid="$(pgrep -f -- "sb-checkpoint-transcript.sh --upload $SID" | head -1)"
+if [ -n "$upid" ] && [ -f "$HOME/.sidebutton/checkpoint-$SID.pid" ]; then
+  bash "$HOME/.local/bin/sb-checkpoint-transcript.sh" --cancel "$SID"
+  gone=0; for _ in $(seq 1 20); do kill -0 "$upid" 2>/dev/null || { gone=1; break; }; sleep 0.1; done
+  [ "$gone" = 1 ] && ! pgrep -f -- "sb-checkpoint-transcript.sh --upload $SID" >/dev/null \
+    && tail -1 "$LOG" | grep -q 'still in flight at its Stop — cancelled' \
+    && ok "--cancel stops this session's upload in flight (its whole process group) and logs it" \
+    || bad "--cancel left the upload running (pid $upid)"
+else
+  bad "no upload in flight to cancel (pid file / process missing)"
+fi
+echo 200 > "$MODE_FILE"
+sleep 30 & decoy=$!
+echo "$decoy" > "$HOME/.sidebutton/checkpoint-$SID.pid"
+bash "$HOME/.local/bin/sb-checkpoint-transcript.sh" --cancel "$SID"
+kill -0 "$decoy" 2>/dev/null && ok "--cancel never signals a pid whose command line is not this session's upload (a recycled pid)" \
+  || bad "--cancel killed an unrelated process"
+kill "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null
 
 finish
