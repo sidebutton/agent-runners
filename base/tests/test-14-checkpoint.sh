@@ -141,17 +141,30 @@ grep -q "checkpoint POST (${RAW}B raw): 200" "$LOG" 2>/dev/null && ok "the uploa
 printf '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}\n' >> "$TR"
 fire "$(input "$SID")" >/dev/null; sleep 1; fire "$(input "$SID")" >/dev/null; sleep 0.8
 [ "$(posts)" = 1 ] && ok "two more tool calls inside the window post nothing" || bad "posted $(posts) times inside one window"
+# Inside a window the helper decides on builtins alone: a jq that records its calls sees none.
+mkdir -p "$TMP/jqspy"
+printf '#!/usr/bin/env bash\necho "$*" >> "%s"\nexec %s "$@"\n' "$TMP/jq.calls" "$(command -v jq)" > "$TMP/jqspy/jq"
+chmod +x "$TMP/jqspy/jq"; : > "$TMP/jq.calls"
+printf '%s' "$(input "$SID")" | env -i PATH="$TMP/jqspy:$PATH" HOME="$HOME" bash "$HOME/.local/bin/sb-checkpoint-transcript.sh" >/dev/null
+[ ! -s "$TMP/jq.calls" ] && ok "a tool call inside the window runs no jq (the throttle comes before the input is parsed)" \
+  || bad "an in-window call ran jq $(wc -l < "$TMP/jq.calls") time(s)"
 open_window
 SNAP2="$(cat "$TR")"; RAW2="$(wc -c < "$TR" | tr -d ' ')"
+# Claude Code is mid-append: the last record has no newline yet. Only complete lines are sent.
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"half-writt' >> "$TR"
 fire "$(input "$SID")" >/dev/null
 if wait_posts 2; then
   REC="$(tail -1 "$PLOG")"
   [ "$(printf '%s' "$REC" | jq -r .body)" = "$SNAP2" ] && [ "$(printf '%s' "$REC" | jq -r .query.bytes)" = "$RAW2" ] \
     && ok "300 s later the next call posts again — the grown transcript, bytes=$RAW2" \
     || bad "the second checkpoint does not carry the transcript of its moment"
+  printf '%s' "$REC" | jq -e '.body | endswith("\n") and (contains("half-writt") | not)' >/dev/null \
+    && ok "a torn last record (mid-append) is cut: the body is complete lines only, bytes= counts exactly them" \
+    || bad "the checkpoint carried a torn last line"
 else
   bad "no checkpoint once the window had expired"
 fi
+printf 'ten"}]}}\n' >> "$TR"
 
 # ── 3. only the job session, only its main transcript, only before its Stop ─────────────────────────
 # One case at a time, each given time to post before the next changes the sandbox: a wrongly launched
@@ -207,6 +220,14 @@ for m in 500 hang; do
   t0="$(ms)"; fire "$(input "$SID")" >/dev/null; t1="$(ms)"
   [ $((t1 - t0)) -lt 1500 ] && ok "portal ${m}: the tool call's hook returns in $((t1 - t0)) ms (the upload is detached)" \
     || bad "portal ${m}: the hook took $((t1 - t0)) ms — the upload is in the tool call's path"
+  if [ "$m" = hang ] && command -v setsid >/dev/null 2>&1; then
+    upid=""; for _ in $(seq 1 20); do upid="$(pgrep -f -- "sb-checkpoint-transcript.sh --upload $SID" | head -1)"; [ -n "$upid" ] && break; sleep 0.1; done
+    if [ -n "$upid" ] && [ "$(ps -o sid= -p "$upid" | tr -d ' ')" = "$upid" ] && [ "$(ps -o sid= -p "$upid" | tr -d ' ')" != "$(ps -o sid= -p $$ | tr -d ' ')" ]; then
+      ok "the upload in flight leads its own session (setsid): closing the job's window cannot hang it up"
+    else
+      bad "the upload is not in a session of its own (pid ${upid:-none})"
+    fi
+  fi
   wait_posts $((before + 1)) || bad "portal ${m}: the checkpoint never reached the stub"
   for _ in $(seq 1 60); do [ "$(grep -c 'checkpoint POST' "$LOG")" -gt "$lines_before" ] && break; sleep 0.1; done
   sleep 0.5

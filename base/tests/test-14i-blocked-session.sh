@@ -137,7 +137,14 @@ rows() {  # one row per line: "<d|->\t<label>" (d = disabled)
   esac
 }
 render() {
-  local scene i=0 focus lab dis
+  local scene i=0 focus lab dis n left
+  # "<n> <scene>" in scene-next: after n more captures the pane turns into that scene (a menu somebody
+  # answered on the desktop, say).
+  if [ -s "$S/scene-next" ]; then
+    read -r left n < "$S/scene-next"
+    if [ "$left" -le 0 ]; then echo "$n" > "$S/scene"; rm -f "$S/scene-next"
+    else echo "$((left - 1)) $n" > "$S/scene-next"; fi
+  fi
   scene="$(cat "$S/scene" 2>/dev/null)"; focus="$(cat "$S/focus" 2>/dev/null || echo 0)"
   printf '> earlier the model quoted it: Wait here, then continue automatically\n'   # above the dialog: a decoy
   printf '\xe2\x97\x8f API Error: You\x27ve hit your weekly limit \xc2\xb7 resets Sep 29, 4pm (UTC)\n\n'
@@ -151,6 +158,10 @@ render() {
       done < <(rows)
       printf '\n Enter to confirm \xc2\xb7 Esc to cancel\n' ;;
     stale)  printf '\xe2\x9c\xbb Usage limit has reset \xc2\xb7 press enter to continue\n\n> \n' ;;
+    stale-old)  # the words only in old transcript text, well above the live bottom of the screen
+      printf 'the docs said: press Enter to continue\n'
+      for i in 1 2 3 4 5 6 7 8 9 10; do printf '\xe2\x97\x8f Bash(ls step-%s)\n' "$i"; done
+      printf '\xe2\x9c\xbb Working\xe2\x80\xa6 (esc to interrupt)\n\n> \n' ;;
     picked) printf 'Claude Code will continue automatically at 4pm. Keep this session open.\n\n> \n' ;;
     *)      printf '\xe2\x9c\xbb Working\xe2\x80\xa6 (esc to interrupt)\n\n> \n' ;;
   esac
@@ -181,16 +192,28 @@ esac
 TMUXEOF
 chmod +x "$TMP/stub/tmux"
 
-scene() { echo "$1" > "$TMUX_STUB/scene"; echo "${2:-0}" > "$TMUX_STUB/focus"; : > "$TMUX_STUB/keys.log"; rm -f "$TMUX_STUB/picked"; }
+scene() { echo "$1" > "$TMUX_STUB/scene"; echo "${2:-0}" > "$TMUX_STUB/focus"; : > "$TMUX_STUB/keys.log"
+          rm -f "$TMUX_STUB/picked" "$TMUX_STUB/scene-next"; }
 echo "sbjob-$SID" > "$TMUX_STUB/sessions"
 PATH_S="$TMP/stub:$PATH"
 fire() {  # $1 = hook JSON, $2.. = extra env (a provider key for an API-key run)
   local in="$1"; shift
   printf '%s' "$in" | env -i PATH="$PATH_S" HOME="$HOME" TMUX_STUB="$TMUX_STUB" "$@" bash "$HOME/.local/bin/sb-post-request.sh"
 }
-# A driver still inside its budget holds the per-session lock, and a second one would leave at once:
-# every direct run first waits for the previous driver to be gone.
-quiesce() { for _ in $(seq 1 100); do ls "$HOME/.sidebutton"/usage-limit-menu-*.lock >/dev/null 2>&1 || return 0; sleep 0.1; done; return 1; }
+# A driver still inside its budget holds the per-session lock (the file itself stays behind by design),
+# and a second one would leave at once: every direct run first waits until nobody holds it.
+quiesce() {
+  local f busy
+  for _ in $(seq 1 100); do
+    busy=0
+    for f in "$HOME/.sidebutton"/usage-limit-menu-*.lock; do
+      [ -e "$f" ] || continue
+      if command -v flock >/dev/null 2>&1; then flock -n "$f" true || busy=1; fi
+    done
+    [ "$busy" = 0 ] && return 0; sleep 0.1
+  done
+  return 1
+}
 drive() { quiesce; env -i PATH="$PATH_S" HOME="$HOME" TMUX_STUB="$TMUX_STUB" bash "$HOME/.local/bin/sb-usage-limit-menu.sh" "$@"; }
 posts() { wc -l < "$PLOG" | tr -d ' '; }
 wait_posts() { for _ in $(seq 1 40); do [ "$(posts)" -ge "$1" ] && return 0; sleep 0.1; done; return 1; }
@@ -329,6 +352,13 @@ wait_posts $((n + 1)) && last_body | jq -e --arg m "$LIMIT_LINE" \
     '.auto_continue == false and .message == ($m + " · options menu on screen — not selected")' >/dev/null \
   && ok "…and it too ends as auto_continue:false once the budget is spent ('options menu on screen — not selected')" \
   || bad "no re-open after an unusable menu: $(last_body 2>/dev/null)"
+# Seen once, then gone before the driver could act (answered on the desktop): the LAST look decides, so
+# the row is not turned into "won't continue" for a wait somebody else armed.
+n="$(posts)"; scene menu-nofocus 0; echo "1 plain" > "$TMUX_STUB/scene-next"
+drive select "$SID" rate_limit "$LIMIT_LINE"; sleep 0.3
+[ -z "$(keys)" ] && [ "$(posts)" = "$n" ] && tail -1 "$LOG" | grep -q 'closed without the driver' \
+  && ok "a menu that closes on its own before the budget ends: no keys, no re-open (judged on the last look)" \
+  || bad "a menu answered elsewhere was still reported: keys '$(keys)', $(( $(posts) - n )) posts, log: $(tail -1 "$LOG")"
 scene menu 0; sed -i '1d' "$TMUX_STUB/sessions"; drive select "$SID" rate_limit "$LIMIT_LINE"
 [ -z "$(keys)" ] && ok "no tmux session sbjob-<session_id> (cancelled, moved, a Mac box): no keys" || bad "keys without a session: $(keys)"
 echo "sbjob-$SID" > "$TMUX_STUB/sessions"
@@ -343,6 +373,17 @@ wait "$p1" "$p2"; sleep 0.3
 [ "$(keys | awk '{print $2}' | paste -sd, -)" = "Down,Enter" ] && [ "$(menu_lines)" = $((lines0 + 1)) ] && [ "$(posts)" = "$n" ] \
   && ok "two drivers for one session: one acts, the other leaves at once (flock) — one closing line, no re-open" \
   || bad "two drivers both acted: keys $(keys | paste -sd'|' -), $(( $(menu_lines) - lines0 )) closing lines, $(( $(posts) - n )) posts"
+# The lock file outlives its driver on purpose (removing it lets two drivers lock two inodes at once);
+# the SessionStart janitor prunes week-old ones.
+LOCKF="$HOME/.sidebutton/usage-limit-menu-$SID.lock"
+[ -e "$LOCKF" ] && ok "the driver leaves its lock file in place when it exits" || bad "the driver removed its lock file"
+awk "/cat > .*sb-session-start.sh.*<<'SESSIONEOF'/{f=1;next} /^SESSIONEOF\$/{f=0} f" "$HOOK" > "$TMP/sb-session-start.sh"
+OLDLOCK="$HOME/.sidebutton/usage-limit-menu-11111111-2222-4333-8444-555555555555.lock"
+: > "$OLDLOCK"; touch -d '8 days ago' "$OLDLOCK"
+printf '%s' "{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$SID\",\"source\":\"startup\"}" \
+  | env -i PATH="$PATH_S" HOME="$HOME" bash "$TMP/sb-session-start.sh" >/dev/null 2>&1
+[ ! -e "$OLDLOCK" ] && [ -e "$LOCKF" ] && ok "sb-session-start.sh's janitor prunes a week-old driver lock and keeps a fresh one" \
+  || bad "the janitor left a week-old lock or removed a fresh one"
 
 # ── 4. the quota notifications and the Stop ────────────────────────────────────────────────────────
 n="$(posts)"
@@ -370,6 +411,11 @@ scene plain 0; lines0="$(menu_lines)"
 fire "$(notif quota_auto_resume_stale "Usage limit has reset · press enter to continue")" >/dev/null
 wait_menu_line "$lines0"
 [ -z "$(keys)" ] && ok "quota_auto_resume_stale on a pane without that prompt -> no keys" || bad "Enter sent to a pane without the prompt: $(keys)"
+scene stale-old 0; lines0="$(menu_lines)"
+fire "$(notif quota_auto_resume_stale "Usage limit has reset · press enter to continue")" >/dev/null
+wait_menu_line "$lines0"
+[ -z "$(keys)" ] && ok "…nor when the words are only old transcript text above the live bottom of the screen" \
+  || bad "Enter sent because of old transcript text: $(keys)"
 n="$(posts)"
 fire "$(notif idle_prompt "Claude is waiting for your input")" >/dev/null; sleep 0.5
 [ "$(posts)" = "$n" ] && ok "idle_prompt is still dropped (KAN-205's fall-through untouched)" || bad "idle_prompt posted"

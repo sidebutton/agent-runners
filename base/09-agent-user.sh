@@ -27,7 +27,9 @@ chmod +x "$AGENT_HOME/.xsession"
 # as top-level keys — autoContinueAtUsageLimit: true (DEV-51), so a session a
 # claude.ai usage limit stops waits for the reset and continues by itself whatever
 # the CLI's default becomes. lib-refresh.sh _sb_merge_claude_hooks merges the same
-# object on every refresh, which is how it reaches boxes provisioned before it.
+# object on every refresh, which is how it reaches boxes provisioned before it
+# (agent-redeploy.sh keeps its own `.hooks`-only merge, so a box it redeploys gets the
+# setting on its next sb-self-update).
 jq -n --slurpfile h "$BASE_DIR/assets/claude-hooks.json" '{
   skipDangerousModePermissionPrompt: true,
   env: { DISABLE_AUTOUPDATER: "1" },

@@ -250,80 +250,53 @@ chmod +x "$AGENT_HOME/.local/bin/sb-post-tool-event.sh"
 # a late checkpoint must not land on top of it (the SH-3 route also refuses a smaller or post-final
 # copy; the sentinel re-check before the POST narrows the window on a portal that predates it).
 #
-# The throttle is the sb-drain-steer.sh pattern with two differences: the stamp is taken under
-# `flock -n`, because up to CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY (10) calls finish at once and all ten
-# would otherwise read an expired stamp; and it is written BEFORE the upload starts, so a failing
-# portal costs one attempt per window, never one per tool call. The gzip + POST run detached with all
-# three standard streams closed, so they add no latency to the tool call (a hook's pipes held open by
-# a child keep Claude Code waiting), and every attempt logs exactly one line to usage-hook.log. The
-# upload is a `gzip -c` of exactly the bytes `wc -c` counted, so `bytes=` matches the body and the
-# stream is the single-member gzip whose trailer the portal reads. Always exits 0 with no stdout.
+# The throttle is the sb-drain-steer.sh pattern with three differences: it runs BEFORE the input is
+# parsed, on builtins alone, so a call inside the window forks nothing but its `cat`; the stamp is then
+# taken under `flock -n` after a second check, because up to CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY (10)
+# calls finish at once and all ten would otherwise read an expired stamp; and it is written BEFORE the
+# upload starts, so a failing portal costs one attempt per window, never one per tool call. The upload
+# is the script re-invoked under `setsid` with every standard stream closed: no latency for the tool
+# call (a hook's pipes held open by a child keep Claude Code waiting), and no hangup from a window being
+# closed mid-upload. It sends complete lines only (a torn last record is cut, as the exporter does), as
+# the single-member `gzip -c` stream whose trailer the portal reads, with `bytes=` equal to what the
+# body holds, and every attempt logs exactly one line to usage-hook.log. Always exits 0 with no stdout.
 #
 # Switch, per box, in ~/.agent-env: SB_CHECKPOINT_INTERVAL_SEC=0 turns it off; a value that is not a
 # number turns it off too (a switch never degrades into the default — the 19e TTL rule), and anything
 # under 60 is raised to 60. SB_CHECKPOINT_MAX_TIME_SEC bounds one attempt (default 120).
 cat > "$AGENT_HOME/.local/bin/sb-checkpoint-transcript.sh" <<'CKPTEOF'
 #!/usr/bin/env bash
-# stdin: Claude Code PostToolUse hook JSON (session_id, transcript_path; agent_id on a sub-agent's call).
-IN=$(cat 2>/dev/null || true)
-[ -z "$IN" ] && exit 0
-# One jq, one value per line (why not @tsv: see sb-mark-tool-use.sh).
-SID=""; TP=""; AID=""
-{ read -r SID; read -r TP; read -r AID; } < <(printf '%s' "$IN" | jq -r \
-    '.session_id // "", .transcript_path // "", .agent_id // ""' 2>/dev/null)
-# The session id reaches a path (the sentinel) and the upload URL: reject, never sanitise.
-case "$SID" in ''|.|..|*[!A-Za-z0-9._-]*) exit 0 ;; esac
-JC="${HOME}/.sidebutton/job-context.json"
-JOB_SID=$(jq -r '.session_id // empty' "$JC" 2>/dev/null || true)
-[ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ] || exit 0
-[ -z "$AID" ] || exit 0
-[ "${TP##*/}" = "${SID}.jsonl" ] && [ -f "$TP" ] || exit 0
-SENTINEL="${HOME}/.sidebutton/session-stopped/${SID}.json"
-[ -e "$SENTINEL" ] && exit 0
-
-[ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
-INTERVAL="${SB_CHECKPOINT_INTERVAL_SEC:-300}"
-case "$INTERVAL" in *[!0-9]*) exit 0 ;; esac
-[ "$INTERVAL" -gt 0 ] 2>/dev/null || exit 0
-[ "$INTERVAL" -lt 60 ] && INTERVAL=60
-AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
-AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
-PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
-[ -n "$AGENT_TOKEN" ] && [ -n "$AGENT_NAME" ] || exit 0
-MAXT="${SB_CHECKPOINT_MAX_TIME_SEC:-120}"
-case "$MAXT" in ''|0|*[!0-9]*) MAXT=120 ;; esac
-
-# Throttle: claim this window, or leave. The first check is unlocked and builtin-only (EPOCHSECONDS,
-# `read`), so the tool calls inside a window — nearly all of them — exit here without a fork; only a
-# call that finds the window open takes the lock and checks again before it stamps.
-mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
-STAMP="${HOME}/.sidebutton/last-checkpoint"
-NOW="${EPOCHSECONDS:-$(date +%s 2>/dev/null || echo 0)}"
-_due() {
-  local last=0
-  [ -f "$STAMP" ] && { read -r last < "$STAMP"; } 2>/dev/null
-  case "$last" in ''|*[!0-9]*) last=0 ;; esac
-  [ "$last" -gt "$NOW" ] && last=0          # a clock that went back must not park the lane
-  [ $((NOW - last)) -ge "$INTERVAL" ]
-}
-_due || exit 0
-if command -v flock >/dev/null 2>&1; then
-  ( flock -n 9 || exit 1; _due && printf '%s\n' "$NOW" > "$STAMP" ) 9>>"${STAMP}.lock" 2>/dev/null || exit 0
-else
-  printf '%s\n' "$NOW" > "$STAMP" 2>/dev/null || exit 0
-fi
-
-JOB_ID=$(jq -r '.job_id // empty' "$JC" 2>/dev/null || true)
-STEP_INDEX=$(jq -r '.step_index // empty' "$JC" 2>/dev/null || true)
+# As the PostToolUse hook: stdin is Claude Code's hook JSON (session_id, transcript_path; agent_id on a
+# sub-agent's call). As `--upload <session_id> <transcript> <job_id> <step_index>`: this script re-invoked,
+# detached, to do the upload itself.
 USAGE_LOG="${HOME}/.sidebutton/usage-hook.log"
-(
+_env() {
+  [ -f "${HOME}/.agent-env" ] && . "${HOME}/.agent-env"
+  AGENT_TOKEN="${AGENT_TOKEN:-${SIDEBUTTON_AGENT_TOKEN:-}}"
+  AGENT_NAME="${AGENT_NAME:-${SIDEBUTTON_AGENT_NAME:-}}"
+  PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
+}
+
+if [ "${1:-}" = "--upload" ]; then
+  SID="${2:-}"; TP="${3:-}"; JOB_ID="${4:-}"; STEP_INDEX="${5:-}"
+  case "$SID" in ''|.|..|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+  case "$JOB_ID$STEP_INDEX" in *[!0-9]*) exit 0 ;; esac
+  [ -f "$TP" ] || exit 0
   set -o pipefail
   log() { echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" >> "$USAGE_LOG" 2>/dev/null || true; }
-  RAW=$(wc -c < "$TP" 2>/dev/null | tr -d ' ')
-  case "$RAW" in ''|0|*[!0-9]*) exit 0 ;; esac
+  _env
+  MAXT="${SB_CHECKPOINT_MAX_TIME_SEC:-120}"
+  case "$MAXT" in ''|0|*[!0-9]*) MAXT=120 ;; esac
+  SENTINEL="${HOME}/.sidebutton/session-stopped/${SID}.json"
+  # Complete lines only: Claude Code may be mid-append, and a torn last record is what the exporter cuts
+  # off too. Count the newlines present now, then take exactly that many lines — the JSONL only grows, so
+  # both reads see the same first N lines — and RAW is the size of exactly what the body holds.
+  N=$(wc -l < "$TP" 2>/dev/null | tr -d ' ')
+  case "$N" in ''|0|*[!0-9]*) exit 0 ;; esac
+  RAW=$(head -n "$N" "$TP" 2>/dev/null | wc -c | tr -d ' ')
   GZ=$(mktemp 2>/dev/null) || { log "checkpoint (${RAW}B raw): no temp file — skipped"; exit 0; }
   trap 'rm -f "$GZ"' EXIT
-  if ! head -c "$RAW" "$TP" 2>/dev/null | gzip -c > "$GZ" 2>/dev/null; then
+  if ! head -n "$N" "$TP" 2>/dev/null | gzip -c > "$GZ" 2>/dev/null; then
     log "checkpoint (${RAW}B raw): could not gzip the transcript — skipped"; exit 0
   fi
   GZB=$(wc -c < "$GZ" 2>/dev/null | tr -d ' ')
@@ -340,7 +313,60 @@ USAGE_LOG="${HOME}/.sidebutton/usage-hook.log"
     --data-binary "@${GZ}" \
     --connect-timeout 5 --max-time "$MAXT") || true
   log "checkpoint POST (${RAW}B raw): ${CODE:-000}"
-) </dev/null >/dev/null 2>&1 &
+  exit 0
+fi
+
+IN=$(cat 2>/dev/null || true)
+[ -z "$IN" ] && exit 0
+_env
+INTERVAL="${SB_CHECKPOINT_INTERVAL_SEC:-300}"
+case "$INTERVAL" in *[!0-9]*) exit 0 ;; esac
+[ "$INTERVAL" -gt 0 ] 2>/dev/null || exit 0
+[ "$INTERVAL" -lt 60 ] && INTERVAL=60
+[ -n "$AGENT_TOKEN" ] && [ -n "$AGENT_NAME" ] || exit 0
+
+# Throttle FIRST, on builtins alone (EPOCHSECONDS, `read`, arithmetic): nearly every tool call falls inside
+# a window and leaves here having forked nothing but the `cat` above. Only a call that finds the window
+# open pays for jq, the gates and the lock, where the check runs a second time before the stamp.
+STAMP="${HOME}/.sidebutton/last-checkpoint"
+NOW="${EPOCHSECONDS:-$(date +%s 2>/dev/null || echo 0)}"
+_due() {
+  local last=0
+  [ -f "$STAMP" ] && { read -r last < "$STAMP"; } 2>/dev/null
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  [ "$last" -gt "$NOW" ] && last=0          # a clock that went back must not park the lane
+  [ $((NOW - last)) -ge "$INTERVAL" ]
+}
+_due || exit 0
+
+# One jq, one value per line (why not @tsv: see sb-mark-tool-use.sh).
+SID=""; TP=""; AID=""
+{ read -r SID; read -r TP; read -r AID; } < <(printf '%s' "$IN" | jq -r \
+    '.session_id // "", .transcript_path // "", .agent_id // ""' 2>/dev/null)
+# The session id reaches a path (the sentinel) and the upload URL: reject, never sanitise.
+case "$SID" in ''|.|..|*[!A-Za-z0-9._-]*) exit 0 ;; esac
+JC="${HOME}/.sidebutton/job-context.json"
+JOB_SID=$(jq -r '.session_id // empty' "$JC" 2>/dev/null || true)
+[ -n "$JOB_SID" ] && [ "$SID" = "$JOB_SID" ] || exit 0
+[ -z "$AID" ] || exit 0
+[ "${TP##*/}" = "${SID}.jsonl" ] && [ -f "$TP" ] || exit 0
+[ -e "${HOME}/.sidebutton/session-stopped/${SID}.json" ] && exit 0
+
+mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+  ( flock -n 9 || exit 1; _due && printf '%s\n' "$NOW" > "$STAMP" ) 9>>"${STAMP}.lock" 2>/dev/null || exit 0
+else
+  printf '%s\n' "$NOW" > "$STAMP" 2>/dev/null || exit 0
+fi
+JOB_ID=$(jq -r '.job_id // empty' "$JC" 2>/dev/null || true)
+STEP_INDEX=$(jq -r '.step_index // empty' "$JC" 2>/dev/null || true)
+# The upload runs as its own session (setsid), so the hangup of a window being closed — the very death a
+# checkpoint exists for — does not take an upload in flight down with the session's process group.
+if command -v setsid >/dev/null 2>&1; then
+  setsid bash "${BASH_SOURCE[0]}" --upload "$SID" "$TP" "$JOB_ID" "$STEP_INDEX" </dev/null >/dev/null 2>&1 &
+else
+  bash "${BASH_SOURCE[0]}" --upload "$SID" "$TP" "$JOB_ID" "$STEP_INDEX" </dev/null >/dev/null 2>&1 &
+fi
 exit 0
 CKPTEOF
 chmod +x "$AGENT_HOME/.local/bin/sb-checkpoint-transcript.sh"
@@ -764,12 +790,14 @@ command -v tmux >/dev/null 2>&1 || exit 0
 SESS="=sbjob-${SID}"; PANE="${SESS}:"
 tmux has-session -t "$SESS" 2>/dev/null || exit 0
 mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
+# The lock file stays behind on purpose: removing it on exit would let a driver that opened it just
+# before the removal and one that creates a fresh file lock two different inodes, and act at once.
+# sb-session-start.sh's weekly janitor prunes old ones.
 LOCK="${HOME}/.sidebutton/usage-limit-menu-${SID}.lock"
 if command -v flock >/dev/null 2>&1; then
   { exec 9>>"$LOCK"; } 2>/dev/null || exit 0
   flock -n 9 || exit 0
 fi
-trap 'rm -f "$LOCK"' EXIT
 WAIT="${SB_USAGE_MENU_WAIT_SEC:-60}"; case "$WAIT" in ''|*[!0-9]*) WAIT=60 ;; esac
 POLL="${SB_USAGE_MENU_POLL_SEC:-2}";  case "$POLL" in ''|0|*[!0-9]*) POLL=2 ;; esac
 
@@ -828,7 +856,7 @@ reopen() {
 
 case "$MODE" in
   select)
-    deadline=$(( $(date +%s) + WAIT )); seen=0; moves=0; unsel=0
+    deadline=$(( $(date +%s) + WAIT )); seen=0; moves=0; unsel=0; st=none
     while :; do
       tmux has-session -t "$SESS" 2>/dev/null || { log "tmux session gone (cancelled or moved) — stopped"; exit 0; }
       P=$(tmux capture-pane -p -J -t "$PANE" 2>/dev/null || true)
@@ -860,8 +888,12 @@ case "$MODE" in
       [ "$(date +%s)" -lt "$deadline" ] || break
       sleep "$POLL"
     done
-    if [ "$seen" = 1 ]; then
+    # Judged on the LAST look only: a menu somebody answered on the desktop meanwhile is gone from the pane,
+    # and it would be wrong to report that session as one that will not continue.
+    if [ "$st" != none ]; then
       reopen "options menu on screen — not selected"
+    elif [ "$seen" = 1 ]; then
+      log "the options menu closed without the driver (answered on the desktop?) — the row stays as it is; no keys"
     else
       log "no options menu within ${WAIT}s — Claude Code waits for the reset by itself; no keys"
     fi
@@ -871,6 +903,9 @@ case "$MODE" in
     while :; do
       tmux has-session -t "$SESS" 2>/dev/null || exit 0
       P=$(tmux capture-pane -p -J -t "$PANE" 2>/dev/null || true)
+      # Only the bottom of the screen — where the TUI shows its live state — may carry the prompt; the same
+      # words higher up are transcript text, and an Enter then would land on whatever the input box holds.
+      P=$(printf '%s\n' "$P" | awk 'NF' | tail -n 8)
       case "${P,,}" in
         *"press enter to continue"*)
           tmux send-keys -t "$PANE" Enter 2>/dev/null || true
@@ -1322,8 +1357,10 @@ ENTRY="${ENTRY/#\~/$HOME}"
 mkdir -p "${HOME}/.sidebutton" 2>/dev/null || true
 # Janitor: these are per-session files on a persistent VM that runs 12-23 sessions a day, and nothing
 # else deletes them. A week is far longer than any session (the tidy timer closes a TUI after 60min).
+# The usage-limit menu driver's per-session locks (DEV-51) are kept on purpose, so they are pruned here.
 find "${HOME}/.sidebutton" -maxdepth 1 -type f \
-  \( -name 'session-heads-*.json' -o -name 'session-branches-*.log' -o -name 'inflight-tool-*.json' \) \
+  \( -name 'session-heads-*.json' -o -name 'session-branches-*.log' -o -name 'inflight-tool-*.json' \
+     -o -name 'usage-limit-menu-*.lock' \) \
   -mtime +7 -delete 2>/dev/null || true
 OUT="${HOME}/.sidebutton/session-heads-${SID}.json"
 # First SessionStart of a session wins. SessionStart re-fires with the SAME session_id on resume and on
