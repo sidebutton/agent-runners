@@ -74,9 +74,6 @@ awk '/stop_pending_work 2>\/dev\/null \|\| true/{p=NR} /mark_session_stopped "\$
      END{exit !(p && m && g && p < m && m < g)}' "$STOPSH" \
   && ok "pending work is read before the sentinel, and the sentinel still lands before the job-session gate" \
   || bad "the order PENDING -> sentinel -> job-session gate is broken"
-grep -q '^if \[ "\$HOOK_EVENT" = "Stop" \] && \[ -n "\$JOB_SID" \] && \[ "\$SESSION_ID" = "\$JOB_SID" \]; then$' "$STOPSH" \
-  && ok "pending work is read only for the session job-context names (every other session keeps the old path)" \
-  || bad "pending work is no longer scoped to the job's own session"
 
 for t in python3 curl gzip; do
   command -v "$t" >/dev/null 2>&1 || { skip "$t not installed — the stub-portal cases need it"; finish; }

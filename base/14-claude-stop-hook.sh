@@ -2857,7 +2857,10 @@ mark_session_stopped() {
 #      ledger: 2.1.281 also drops an entry with no record (a Monitor's "stream ended" during a usage-limit
 #      wait, seen on a real transcript). So only an enqueue written after the session's LAST user record —
 #      a prompt, a delivered notification, a tool result — can count: one queued while the closing response
-#      was being written. Any later turn start or tool result leaves an older entry behind for good.
+#      was being written. Any later turn start or tool result leaves an older entry behind for good. The
+#      cost is deliberate: an entry still queued across a turn boundary (the CLI delivers one of two), or
+#      one not yet on disk when this reads, is not seen and that Stop completes as it always did — a lossy
+#      log may miss a race, but must never strand a job with no later Stop to complete it.
 #      Read from the last 4 MB only.
 # A CLI that sends neither stdin field prints nothing here: every Stop completes, as before. Never fails
 # the hook — any miss prints nothing, which is exactly the old path.
@@ -2940,19 +2943,21 @@ case "$SESSION_ID" in ''|.|..|*[!A-Za-z0-9._-]*) ;; *) DEFER_MARK="${HOME}/.side
 #
 # `|| true` on a best-effort local marker that runs ahead of the sole completion
 # signal — see the mark_session_stopped header.
-if [ "$HOOK_EVENT" = "Stop" ] && [ -z "$PENDING" ]; then
-  mark_session_stopped "$SESSION_ID" || true
-  # DEV-51: a transcript checkpoint of this session may still be uploading; stop it so no checkpoint can land
-  # after the final upload below. Its own sentinel check covers only the moment before its POST. The helper
-  # verifies the pid's command line first, and a missing helper or a failure changes nothing here.
-  [ -x "${HOME}/.local/bin/sb-checkpoint-transcript.sh" ] \
-    && "${HOME}/.local/bin/sb-checkpoint-transcript.sh" --cancel "$SESSION_ID" </dev/null >/dev/null 2>&1 || true
-  # DEV-181: this session is not waiting any more (also when job-context has since moved on), and a marker
-  # older than the 24 h workflow ceiling belongs to a session that died while it waited.
-  if [ -n "$DEFER_MARK" ]; then rm -f "$DEFER_MARK" 2>/dev/null || true; fi
-  find "${HOME}/.sidebutton" -maxdepth 1 -type f -name 'stop-deferred-*' -mmin +1500 -delete 2>/dev/null || true
-elif [ "$HOOK_EVENT" = "Stop" ]; then
-  log "session ${SESSION_ID:-?} paused, not finished — background work in flight (${PENDING}): no session-stopped sentinel"
+if [ "$HOOK_EVENT" = "Stop" ]; then
+  if [ -z "$PENDING" ]; then
+    mark_session_stopped "$SESSION_ID" || true
+    # DEV-51: a transcript checkpoint of this session may still be uploading; stop it so no checkpoint can land
+    # after the final upload below. Its own sentinel check covers only the moment before its POST. The helper
+    # verifies the pid's command line first, and a missing helper or a failure changes nothing here.
+    [ -x "${HOME}/.local/bin/sb-checkpoint-transcript.sh" ] \
+      && "${HOME}/.local/bin/sb-checkpoint-transcript.sh" --cancel "$SESSION_ID" </dev/null >/dev/null 2>&1 || true
+    # DEV-181: this session is not waiting any more (also when job-context has since moved on), and a marker
+    # older than the 24 h workflow ceiling belongs to a session that died while it waited.
+    if [ -n "$DEFER_MARK" ]; then rm -f "$DEFER_MARK" 2>/dev/null || true; fi
+    find "${HOME}/.sidebutton" -maxdepth 1 -type f -name 'stop-deferred-*' -mmin +1500 -delete 2>/dev/null || true
+  else
+    log "session ${SESSION_ID:-?} paused, not finished — background work in flight (${PENDING}): no session-stopped sentinel"
+  fi
 fi
 
 # Session identity (v3): job-context carries the dispatch-assigned Claude
