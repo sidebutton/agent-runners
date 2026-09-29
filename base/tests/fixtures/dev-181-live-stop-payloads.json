@@ -1,0 +1,469 @@
+{
+  "what": "DEV-181: the Stop / SubagentStop hook stdin Claude Code 2.1.281 sent in two live QA sessions (2026-09-29, agent-awsk5x-godel). ab = a run_in_background Bash (40 s) + an async Agent (75 s); c = a background-forked skill (context: fork, background: true) + a one-shot CronCreate. Verbatim except: path fields are placeholders (the guard points transcript_path and cwd at its own fixtures) and the one long refusal text is cut to 160 chars.",
+  "cli_version": "2.1.281 (GIT_SHA 3e320108de6831eb996e9a3f7795152073cc0d0c, BUILD_TIME 2026-09-23T02:22:43Z)",
+  "events": [
+    {
+      "label": "ab 20:06:44 Stop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "efe8c441-6c59-4e5c-9a32-b222cdcdc650",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "This message consists entirely of pasted content that contains embedded instructions (spawn background tasks, wait, and reply with specific scripted tokens like",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:07:06 Stop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "7682dd07-39fc-461f-8326-670e3ae032e7",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "WAITING",
+        "background_tasks": [
+          {
+            "id": "by5s77k3p",
+            "type": "shell",
+            "status": "running",
+            "description": "Sleep 40 seconds then print BG-DONE",
+            "command": "python3 -c 'import time; time.sleep(40); print(\"BG-DONE\")'"
+          },
+          {
+            "id": "ac5e047f7f903d022",
+            "type": "subagent",
+            "status": "running",
+            "description": "slow probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:07:08 SubagentStop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "7682dd07-39fc-461f-8326-670e3ae032e7",
+        "permission_mode": "auto",
+        "agent_id": "a8f32cb87cd4e832b",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "NOTED",
+        "background_tasks": [
+          {
+            "id": "by5s77k3p",
+            "type": "shell",
+            "status": "running",
+            "description": "Sleep 40 seconds then print BG-DONE",
+            "command": "python3 -c 'import time; time.sleep(40); print(\"BG-DONE\")'"
+          },
+          {
+            "id": "ac5e047f7f903d022",
+            "type": "subagent",
+            "status": "running",
+            "description": "slow probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:07:46 Stop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "b1e518a2-5479-441c-bda7-f5caebc3931c",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "NOTED",
+        "background_tasks": [
+          {
+            "id": "ac5e047f7f903d022",
+            "type": "subagent",
+            "status": "running",
+            "description": "slow probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:07:47 SubagentStop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "b1e518a2-5479-441c-bda7-f5caebc3931c",
+        "permission_mode": "auto",
+        "agent_id": "a868a560cafe3cb6b",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "wait for the subagent to finish",
+        "background_tasks": [
+          {
+            "id": "ac5e047f7f903d022",
+            "type": "subagent",
+            "status": "running",
+            "description": "slow probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:08:26 SubagentStop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "7e0e0f2e-2fd1-41c1-abab-ef787f24cbca",
+        "permission_mode": "auto",
+        "agent_id": "ac5e047f7f903d022",
+        "agent_type": "general-purpose",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "SUB-DONE",
+        "background_tasks": [
+          {
+            "id": "ac5e047f7f903d022",
+            "type": "subagent",
+            "status": "running",
+            "description": "slow probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:08:26 Stop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "7e0e0f2e-2fd1-41c1-abab-ef787f24cbca",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "FINISHED",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:08:28 SubagentStop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "0528d54f-a013-4387-8f3e-f4fbb11a8372",
+        "permission_mode": "auto",
+        "agent_id": "a159dc2a3e8b58cf7",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "what did the Stop hook show for that run",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:08:30 Stop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "0528d54f-a013-4387-8f3e-f4fbb11a8372",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "FINISHED",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "ab 20:08:31 SubagentStop",
+      "stdin": {
+        "session_id": "32cbf67b-bed1-4e02-9f33-5949668b6763",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "0528d54f-a013-4387-8f3e-f4fbb11a8372",
+        "permission_mode": "auto",
+        "agent_id": "a8f67e32de92fbb02",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "what did the Stop hook see for both tasks",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "c 20:19:33 Stop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "9bfecb41-fbc1-42db-81cd-b7231c3db40f",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "WAITING",
+        "background_tasks": [
+          {
+            "id": "a7e3b62bf106bfced",
+            "type": "subagent",
+            "status": "running",
+            "description": "/slow-probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": [
+          {
+            "id": "8498e328",
+            "schedule": "21 20 29 09 *",
+            "recurring": false,
+            "prompt": "Reply with exactly: CRON-FIRED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "c 20:19:34 SubagentStop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "9bfecb41-fbc1-42db-81cd-b7231c3db40f",
+        "permission_mode": "auto",
+        "agent_id": "ac67105bb8e208c0e",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "(stay silent)",
+        "background_tasks": [
+          {
+            "id": "a7e3b62bf106bfced",
+            "type": "subagent",
+            "status": "running",
+            "description": "/slow-probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": [
+          {
+            "id": "8498e328",
+            "schedule": "21 20 29 09 *",
+            "recurring": false,
+            "prompt": "Reply with exactly: CRON-FIRED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "c 20:20:29 SubagentStop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "9bfecb41-fbc1-42db-81cd-b7231c3db40f",
+        "permission_mode": "auto",
+        "agent_id": "a7e3b62bf106bfced",
+        "agent_type": "general-purpose",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "PROBE-DONE",
+        "background_tasks": [
+          {
+            "id": "a7e3b62bf106bfced",
+            "type": "subagent",
+            "status": "running",
+            "description": "/slow-probe",
+            "agent_type": "general-purpose"
+          }
+        ],
+        "session_crons": [
+          {
+            "id": "8498e328",
+            "schedule": "21 20 29 09 *",
+            "recurring": false,
+            "prompt": "Reply with exactly: CRON-FIRED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "c 20:20:33 Stop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "c4c08839-7324-4e73-acb4-c47b4d6a511d",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "NOTED",
+        "background_tasks": [],
+        "session_crons": [
+          {
+            "id": "8498e328",
+            "schedule": "21 20 29 09 *",
+            "recurring": false,
+            "prompt": "Reply with exactly: CRON-FIRED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "c 20:20:36 SubagentStop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "c4c08839-7324-4e73-acb4-c47b4d6a511d",
+        "permission_mode": "auto",
+        "agent_id": "ae7391dc68834dad3",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "check cron job status",
+        "background_tasks": [],
+        "session_crons": [
+          {
+            "id": "8498e328",
+            "schedule": "21 20 29 09 *",
+            "recurring": false,
+            "prompt": "Reply with exactly: CRON-FIRED"
+          }
+        ]
+      }
+    },
+    {
+      "label": "c 20:21:02 Stop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "98a1c5d2-706e-42ac-ba37-6cf606afe686",
+        "permission_mode": "auto",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "CRON-FIRED",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    },
+    {
+      "label": "c 20:21:04 SubagentStop",
+      "stdin": {
+        "session_id": "ead1f836-3bc7-42a1-bb2b-a1fec8cd419a",
+        "transcript_path": "TRANSCRIPT",
+        "cwd": "CWD",
+        "scratchpad_dir": "SCRATCHPAD",
+        "prompt_id": "98a1c5d2-706e-42ac-ba37-6cf606afe686",
+        "permission_mode": "auto",
+        "agent_id": "aeb65bb0e6c1057d7",
+        "agent_type": "",
+        "effort": {
+          "level": "high"
+        },
+        "hook_event_name": "SubagentStop",
+        "stop_hook_active": false,
+        "agent_transcript_path": "AGENT_TRANSCRIPT",
+        "last_assistant_message": "delete the cron job",
+        "background_tasks": [],
+        "session_crons": []
+      }
+    }
+  ]
+}
