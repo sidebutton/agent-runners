@@ -2856,12 +2856,12 @@ mark_session_stopped() {
 #      (queue-operation enqueue, then dequeue for a new turn or remove when absorbed mid-turn), but not as a
 #      ledger: 2.1.281 also drops an entry with no record (a Monitor's "stream ended" during a usage-limit
 #      wait, seen on a real transcript). So only an enqueue written after the session's LAST user record —
-#      a prompt, a delivered notification, a tool result — can count: one queued while the closing response
-#      was being written. Any later turn start or tool result leaves an older entry behind for good. The
-#      cost is deliberate: an entry still queued across a turn boundary (the CLI delivers one of two), or
-#      one not yet on disk when this reads, is not seen and that Stop completes as it always did — a lossy
-#      log may miss a race, but must never strand a job with no later Stop to complete it.
-#      Read from the last 4 MB only.
+#      a prompt, a delivered notification, a tool result — and after its last tool call can count: one
+#      queued while the closing response was being written. Any later turn start, tool call or tool result
+#      leaves an older entry behind for good. The cost is deliberate: an entry that stays queued while the
+#      CLI runs a turn for another one, or one not yet on disk when this reads, is not seen, and that Stop
+#      completes as it always did — a lossy log may miss a race, but must never strand a job with no later
+#      Stop to complete it. Read from the last 4 MB only.
 # A CLI that sends neither stdin field prints nothing here: every Stop completes, as before. Never fails
 # the hook — any miss prints nothing, which is exactly the old path.
 stop_pending_work() {
@@ -2955,8 +2955,11 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
     # older than the 24 h workflow ceiling belongs to a session that died while it waited.
     if [ -n "$DEFER_MARK" ]; then rm -f "$DEFER_MARK" 2>/dev/null || true; fi
     find "${HOME}/.sidebutton" -maxdepth 1 -type f -name 'stop-deferred-*' -mmin +1500 -delete 2>/dev/null || true
-  else
-    log "session ${SESSION_ID:-?} paused, not finished — background work in flight (${PENDING}): no session-stopped sentinel"
+  elif [ -n "$DEFER_MARK" ]; then
+    # DEV-181: waiting on its own work. A sentinel left by an earlier completing Stop must not let the sweep close
+    # the session now, nor stop the checkpoint below (sb-clear-session-stopped.sh clears it on UserPromptSubmit;
+    # this holds without that hook too). DEFER_MARK set = the session id passed the sentinel's charset check.
+    rm -f "${HOME}/.sidebutton/session-stopped/${SESSION_ID}.json" 2>/dev/null || true
   fi
 fi
 
@@ -3054,8 +3057,8 @@ log "posted usage (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-
 # session; the per-box switch honoured; the helper marks it a checkpoint, so the
 # portal keeps no interim summary) — the completing Stop cancels it if still in
 # flight and uploads the final copy.
-if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$PENDING" ]; then
-  log "deferred step-complete: pending ${PENDING} (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-?})"
+if [ -n "$PENDING" ]; then
+  log "deferred step-complete: pending ${PENDING} (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-?}) — a pause: no sentinel, no final transcript, no artifact drain"
   if [ -n "$DEFER_MARK" ]; then
     { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PENDING" > "$DEFER_MARK"; } 2>/dev/null || true
   fi

@@ -67,7 +67,7 @@ fi
 
 # The Stop hook stops a checkpoint upload of its session still in flight, right after writing the sentinel
 # and before its own final upload — so no checkpoint can land after the final copy.
-if awk '/if \[ "\$HOOK_EVENT" = "Stop" \]; then/{f=1} f && /mark_session_stopped "\$SESSION_ID"/{m=NR} f && m && /sb-checkpoint-transcript\.sh" --cancel "\$SESSION_ID"/{c=NR; exit} END{exit !(c && c > m)}' "$TMP/stop.sh" \
+if awk '/^if \[ "\$HOOK_EVENT" = "Stop" \]; then$/{f=1} f && /mark_session_stopped "\$SESSION_ID"/{m=NR} f && m && /sb-checkpoint-transcript\.sh" --cancel "\$SESSION_ID"/{c=NR; exit} END{exit !(c && c > m)}' "$TMP/stop.sh" \
    && [ "$(grep -n 'sb-checkpoint-transcript.sh" --cancel' "$TMP/stop.sh" | head -1 | cut -d: -f1)" -lt "$(grep -n 'api/jobs/transcript?job_id' "$TMP/stop.sh" | head -1 | cut -d: -f1)" ]; then
   ok "the Stop hook cancels its session's in-flight checkpoint right after the sentinel, before the final upload"
 else

@@ -148,9 +148,9 @@ input() {
 
 # Fire the hook exactly as Claude Code does: a `claude` process -> a shell -> the hook, stdin = the hook JSON,
 # a bare environment. Snapshots what reached the portal into $TMP/last.jsonl; RC = the hook's exit code.
-fire() {  # $1 = stdin JSON  $2 = wait for a checkpoint upload? (1 = yes)
+fire() {  # $1 = stdin JSON  $2 = wait for a checkpoint upload? (1 = yes)  $3 = keep existing sentinels (1 = yes)
   local before; before="$(wc -l < "$PLOG" | tr -d ' ')"
-  rm -rf "$HOME/.sidebutton/session-stopped"
+  [ "${3:-0}" = 1 ] || rm -rf "$HOME/.sidebutton/session-stopped"
   printf '%s' "$1" | env -i HOME="$HOME" PATH="$PATH" "$CLAUDE_SH" \
     -c 'exec 3<&0; bash "$0" <&3; echo $? > "$1"; :' "$HOME/.local/bin/claude-stop-hook.sh" "$TMP/rc" >/dev/null 2>&1
   RC="$(cat "$TMP/rc" 2>/dev/null || echo x)"
@@ -258,8 +258,9 @@ fi
   || bad "the deferred checkpoint did not stamp last-checkpoint"
 [ -f "$HOME/workspace/artifacts/review-evidence.png" ] && ok "…and the evidence file under artifacts/ is still on disk for the session to publish" \
   || bad "the deferred Stop drained (and deleted) artifacts/"
-grep -qF 'paused, not finished — background work in flight (subagent a04a903e0cb039115): no session-stopped sentinel' "$LOG" \
-  && ok "…and logs why the session is not marked stopped" || bad "no 'paused, not finished' log line"
+grep -qF 'pending subagent a04a903e0cb039115 (job 181 step 0 session '"$SID"') — a pause: no sentinel, no final transcript, no artifact drain' "$LOG" \
+  && [ "$(grep -c 'a04a903e0cb039115' "$LOG")" = 1 ] \
+  && ok "…and logs it once, saying what the pause skips" || bad "the deferral is not logged once with what it skips"
 # The fork returns; the session posts its verdict and ends the turn with the footer.
 VERDICT=$'Code review done: 7 findings, all fixed and pushed.\n===SB_RESULT=== PASS'
 fire "$(input Stop "$SID" '[]' '[]' "$VERDICT")"
@@ -269,6 +270,15 @@ expect_completed "run-3012 shape, 18:28 Stop (fork returned)" "$SID" "$VERDICT"
 [ "$(sc_msg)" != "PREVIOUS-TURN-TEXT" ] \
   && ok "output_message comes from stdin last_assistant_message, not the transcript's stale closing text (QA F2)" \
   || bad "output_message is still the previous turn's text"
+# That completing Stop left a sentinel. A later turn that launches more work and defers must not leave it for
+# the sweep (normally UserPromptSubmit clears it first) — nor let it stop the deferred checkpoint.
+sentinel "$SID" || bad "precondition: no sentinel after the completing Stop"
+fire "$(input Stop "$SID" "$FORK" '[]' 'Re-review launched.')" 1 1
+expect_deferred "a deferred Stop while an earlier completing Stop's sentinel is still on disk" "$SID" "subagent a04a903e0cb039115"
+[ "$(transcripts)" = checkpoint ] && ok "…the stale sentinel is removed and the checkpoint still uploads" \
+  || bad "a stale sentinel blocked the deferred checkpoint: transcripts='$(transcripts)'"
+fire "$(input Stop "$SID" '[]' '[]' 'Re-review done.')"
+expect_completed "…and the Stop after it completes again" "$SID" "Re-review done."
 
 # ── 3. a notification already queued when the turn ends (QA F4a) ─────────────────────────────────────
 SID="3c1d8e2f-7a9b-4c6d-8e0f-181f4a000001"
