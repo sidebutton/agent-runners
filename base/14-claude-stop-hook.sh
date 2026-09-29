@@ -29,11 +29,12 @@
 # DEV-181: completion = a main-session Stop with NO pending background work. Claude Code fires Stop at
 # every turn end, including a turn that ends only to wait for a forked skill (/code-review since 2.1.28x),
 # an async Agent, a background Bash or Monitor, or a one-shot cron / ScheduleWakeup. Treating that Stop as
-# the end closed the job before the verdict (KURABU runs 3010/3012/3013, 2026-09-28). The hook now reads the
-# work off its stdin — background_tasks + session_crons, which 2.1.28x sends on every Stop — plus a
-# task-notification already queued in the transcript, and such a Stop is a PAUSE: usage final=false, a
-# checkpoint transcript, no step-complete, no session-tidy sentinel, no artifact drain. The completing Stop
-# (nothing pending) reports exactly as before. A CLI that sends neither field keeps the old contract.
+# the end closed the job before the verdict (KURABU runs 3010/3012/3013, 2026-09-28). For the job's own
+# session the hook now reads the work off its stdin — background_tasks + session_crons, which 2.1.28x sends
+# on every Stop — plus a task-notification queued during the closing response, and such a Stop is a PAUSE:
+# usage final=false, a checkpoint transcript, no step-complete, no session-tidy sentinel, no artifact drain.
+# The completing Stop (nothing pending) reports exactly as before. A CLI that sends neither field, and every
+# session that is not the job's, keep the old contract.
 
 step "Step 14/16: Claude stop hook"
 
@@ -2852,9 +2853,12 @@ mark_session_stopped() {
 #      never drains, so it does not hold completion.
 #   3. the transcript tail — a task that ends DURING the closing turn is already gone from background_tasks,
 #      but its notification waits in the CLI's queue and runs one more turn. The transcript logs that queue
-#      (queue-operation enqueue, then dequeue for a new turn or remove when absorbed mid-turn). An enqueue with
-#      neither after it counts only after the turn's last tool call, so a stale one left by a killed process
-#      can never hold a later session. Read from the last 4 MB only.
+#      (queue-operation enqueue, then dequeue for a new turn or remove when absorbed mid-turn), but not as a
+#      ledger: 2.1.281 also drops an entry with no record (a Monitor's "stream ended" during a usage-limit
+#      wait, seen on a real transcript). So only an enqueue written after the session's LAST user record —
+#      a prompt, a delivered notification, a tool result — can count: one queued while the closing response
+#      was being written. Any later turn start or tool result leaves an older entry behind for good.
+#      Read from the last 4 MB only.
 # A CLI that sends neither stdin field prints nothing here: every Stop completes, as before. Never fails
 # the hook — any miss prints nothing, which is exactly the old path.
 stop_pending_work() {
@@ -2875,12 +2879,12 @@ stop_pending_work() {
   [ "$work" = legacy ] && return 0
   if [ -z "$work" ] && [ -n "${TRANSCRIPT_PATH:-}" ] && [ -f "${TRANSCRIPT_PATH:-}" ]; then
     work=$(tail -c 4194304 "$TRANSCRIPT_PATH" 2>/dev/null \
-      | grep -E '"type":"(queue-operation|tool_use)"' 2>/dev/null \
+      | grep -E '"type":"(queue-operation|tool_use|user)"' 2>/dev/null \
       | jq -Rrn '
           reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $r
             ({n: 0, id: ""};
-             if $r.type == "assistant"
-                and ([$r.message.content[]? | select(type == "object" and .type == "tool_use")] | length) > 0
+             if $r.type == "user" or ($r.type == "assistant"
+                and ([$r.message.content[]? | select(type == "object" and .type == "tool_use")] | length) > 0)
                then {n: 0, id: ""}
              elif $r.type == "queue-operation" and $r.operation == "enqueue"
                then {n: (.n + 1),
@@ -2906,11 +2910,19 @@ fi
 SESSION_ID=$(echo "$HOOK_INPUT" | jq -r '.session_id // empty')
 TRANSCRIPT_PATH=$(echo "$HOOK_INPUT" | jq -r '.transcript_path // empty')
 HOOK_EVENT=$(echo "$HOOK_INPUT" | jq -r '.hook_event_name // empty')
-# DEV-181: the background work this Stop's session still waits on (see stop_pending_work). Non-empty makes
-# the Stop a pause for every gate below: no sentinel, usage final=false, no step-complete, no final
-# transcript, no artifact drain. Empty — nothing in flight, or a CLI that does not say — is the old path.
+# DEV-181: the background work the JOB session still waits on at this Stop (see stop_pending_work). Non-empty
+# makes the Stop a pause for every gate below: no sentinel, usage final=false, no step-complete, no final
+# transcript, no artifact drain. Empty — nothing in flight, a CLI that does not say, or any session that is
+# not the one job-context names (an operator window, a lingering session: they complete nothing, and the
+# session-tidy sweep must keep closing them) — is the old path. stop-deferred-<session_id> records what a
+# deferred Stop waited for (diagnostics only).
+JOB_SID=$(jq -r '.session_id // empty' "$JOB_CONTEXT" 2>/dev/null || true)
 PENDING=""
-if [ "$HOOK_EVENT" = "Stop" ]; then PENDING=$(stop_pending_work 2>/dev/null || true); fi
+if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$JOB_SID" ] && [ "$SESSION_ID" = "$JOB_SID" ]; then
+  PENDING=$(stop_pending_work 2>/dev/null || true)
+fi
+DEFER_MARK=""
+case "$SESSION_ID" in ''|.|..|*[!A-Za-z0-9._-]*) ;; *) DEFER_MARK="${HOME}/.sidebutton/stop-deferred-${SESSION_ID}" ;; esac
 
 # SCRUM-1769: mark this finished session for sb-session-tidy (base/19e), BEFORE the
 # job-session gate below. The sentinel is a LOCAL lifecycle marker, not a portal
@@ -2935,6 +2947,10 @@ if [ "$HOOK_EVENT" = "Stop" ] && [ -z "$PENDING" ]; then
   # verifies the pid's command line first, and a missing helper or a failure changes nothing here.
   [ -x "${HOME}/.local/bin/sb-checkpoint-transcript.sh" ] \
     && "${HOME}/.local/bin/sb-checkpoint-transcript.sh" --cancel "$SESSION_ID" </dev/null >/dev/null 2>&1 || true
+  # DEV-181: this session is not waiting any more (also when job-context has since moved on), and a marker
+  # older than the 24 h workflow ceiling belongs to a session that died while it waited.
+  if [ -n "$DEFER_MARK" ]; then rm -f "$DEFER_MARK" 2>/dev/null || true; fi
+  find "${HOME}/.sidebutton" -maxdepth 1 -type f -name 'stop-deferred-*' -mmin +1500 -delete 2>/dev/null || true
 elif [ "$HOOK_EVENT" = "Stop" ]; then
   log "session ${SESSION_ID:-?} paused, not finished — background work in flight (${PENDING}): no session-stopped sentinel"
 fi
@@ -2944,7 +2960,7 @@ fi
 # When both are known and differ, this Stop belongs to a lingering previous
 # session or an operator window — it must not complete, bill, or overwrite
 # the transcript of the current job. No assigned id => legacy behavior.
-JOB_SID=$(jq -r '.session_id // empty' "$JOB_CONTEXT" 2>/dev/null || true)
+# (JOB_SID is read once, up top, beside PENDING.)
 if [ -n "$JOB_SID" ] && [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "$JOB_SID" ]; then
   log "session $SESSION_ID != job session $JOB_SID — skipping portal posts"
   exit 0
@@ -3027,15 +3043,12 @@ log "posted usage (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-
 #
 # DEV-181: a Stop whose session still waits on background work DEFERS it: no
 # step-complete, so the job stays running and no gate is evaluated until the
-# Stop after that work returned. stop-deferred-<session_id> records what it waited
-# for (diagnostics only; the completing Stop removes it). The session makes no
-# tool calls while it waits, so the PostToolUse checkpoint would fall behind:
-# start one now, the way sb-post-request.sh does for a StopFailure (job session
-# only, the per-box switch honoured; the helper marks it a checkpoint, so the
+# Stop after that work returned. The session makes no tool calls while it waits,
+# so the PostToolUse checkpoint would fall behind: start one now, the way
+# sb-post-request.sh does for a StopFailure (PENDING is only ever set for the job
+# session; the per-box switch honoured; the helper marks it a checkpoint, so the
 # portal keeps no interim summary) — the completing Stop cancels it if still in
 # flight and uploads the final copy.
-DEFER_MARK=""
-case "$SESSION_ID" in ''|.|..|*[!A-Za-z0-9._-]*) ;; *) DEFER_MARK="${HOME}/.sidebutton/stop-deferred-${SESSION_ID}" ;; esac
 if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$PENDING" ]; then
   log "deferred step-complete: pending ${PENDING} (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-?})"
   if [ -n "$DEFER_MARK" ]; then
@@ -3044,7 +3057,7 @@ if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$PENDING" ]; then
   _ck="${HOME}/.local/bin/sb-checkpoint-transcript.sh"
   _ivl="${SB_CHECKPOINT_INTERVAL_SEC:-300}"
   case "$_ivl" in *[!0-9]*) _ivl=0 ;; esac
-  if [ -n "$JOB_SID" ] && [ "$SESSION_ID" = "$JOB_SID" ] && [ "$_ivl" -gt 0 ] 2>/dev/null && [ -x "$_ck" ] \
+  if [ "$_ivl" -gt 0 ] 2>/dev/null && [ -x "$_ck" ] \
      && [ "${TRANSCRIPT_PATH##*/}" = "${SESSION_ID}.jsonl" ] && [ -f "$TRANSCRIPT_PATH" ]; then
     { date +%s > "${HOME}/.sidebutton/last-checkpoint"; } 2>/dev/null || true
     if command -v setsid >/dev/null 2>&1; then
@@ -3054,7 +3067,6 @@ if [ "$HOOK_EVENT" = "Stop" ] && [ -n "$PENDING" ]; then
     fi
   fi
 elif [ "$HOOK_EVENT" = "Stop" ]; then
-  if [ -n "$DEFER_MARK" ]; then rm -f "$DEFER_MARK" 2>/dev/null || true; fi
   # SCRUM-1199 (A2): forward the agent's final assistant message as output_message so
   # the portal can parse the ===SB_RESULT=== verdict footer from it (its last line)
   # without re-reading Jira. Claude Code hands it on stdin (last_assistant_message):

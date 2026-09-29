@@ -6,9 +6,10 @@
 # (/code-review), an async Agent, a background Bash or a scheduled wakeup. The Stop hook used to complete the
 # job at that Stop (usage final=true + step-complete), so the playbook gate ran before the verdict comment
 # existed (KURABU runs 3010/3012/3013, 2026-09-28). This guard pins the contract that replaced it:
-#   1. the work comes from the Stop stdin (background_tasks, session_crons — Claude Code 2.1.28x), replayed
-#      from 17 events two live 2.1.281 sessions sent (fixtures/dev-181-live-stop-payloads.json), and from a
-#      notification already queued in the transcript;
+#   1. for the job's own session, the work comes from the Stop stdin (background_tasks, session_crons —
+#      Claude Code 2.1.28x), replayed from 17 events two live 2.1.281 sessions sent
+#      (fixtures/dev-181-live-stop-payloads.json), and from a notification queued during the closing response
+#      (the transcript's queue log is no ledger — an entry the CLI dropped silently must never hold a job);
 #   2. a deferred Stop posts usage final=false, NO step-complete, no final transcript, drains no artifacts,
 #      writes no session-tidy sentinel; it logs what it waits for, leaves stop-deferred-<sid>, and starts a
 #      checkpoint=1 upload (job session only, the per-box switch honoured);
@@ -16,7 +17,8 @@
 #      stdin last_assistant_message (the transcript does not hold the closing text yet);
 #   4. what does NOT hold a job: a recurring cron, the ambient kinds (dream, auto-mode scan), an unknown kind,
 #      a finished task, a stale queue entry, a CLI that sends neither field (the old contract, unchanged);
-#   5. SubagentStop and non-job sessions post exactly what they did; the hook exits 0 on every path;
+#   5. SubagentStop and non-job sessions post exactly what they did, and a non-job session is still marked for
+#      session-tidy at every Stop; stop-deferred markers are cleared and pruned; the hook exits 0 on every path;
 #   6. AC5: the whole hook on a 3 MB transcript stays under 5 s.
 #
 # Every case drives the REAL hook and checkpoint helper, extracted from base/14's heredocs, under `env -i`
@@ -72,6 +74,9 @@ awk '/stop_pending_work 2>\/dev\/null \|\| true/{p=NR} /mark_session_stopped "\$
      END{exit !(p && m && g && p < m && m < g)}' "$STOPSH" \
   && ok "pending work is read before the sentinel, and the sentinel still lands before the job-session gate" \
   || bad "the order PENDING -> sentinel -> job-session gate is broken"
+grep -q '^if \[ "\$HOOK_EVENT" = "Stop" \] && \[ -n "\$JOB_SID" \] && \[ "\$SESSION_ID" = "\$JOB_SID" \]; then$' "$STOPSH" \
+  && ok "pending work is read only for the session job-context names (every other session keeps the old path)" \
+  || bad "pending work is no longer scoped to the job's own session"
 
 for t in python3 curl gzip; do
   command -v "$t" >/dev/null 2>&1 || { skip "$t not installed — the stub-portal cases need it"; finish; }
@@ -118,9 +123,19 @@ queue_op() {  # $1 sid  $2 operation  $3 content ('' = none)  $4 reason ('' = no
      + (if $c != "" then {content:$c} else {} end) + (if $r != "" then {reason:$r} else {} end)' >> "$(tr_path "$1")"
 }
 notif() { printf '<task-notification>\n<task-id>%s</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n<status>completed</status>\n<summary>Agent "slow probe" completed</summary>\n</task-notification>' "$1"; }
-tool_call() {  # $1 sid — one more tool call in the transcript (a later turn)
+tool_call() {  # $1 sid — one more tool call and its result in the transcript
   jq -nc --arg s "$1" '{type:"assistant", sessionId:$s, message:{model:"claude-opus-5-5",
-      content:[{type:"tool_use", id:"toolu_02", name:"Bash", input:{command:"ls"}}]}}' >> "$(tr_path "$1")"
+      content:[{type:"tool_use", id:"toolu_02", name:"Bash", input:{command:"ls"}}]}},
+    {type:"user", sessionId:$s, message:{role:"user", content:[{type:"tool_result", tool_use_id:"toolu_02", content:"ok"}]}}' \
+    >> "$(tr_path "$1")"
+}
+turn_start() {  # $1 sid  $2 prompt text  $3 origin kind ('' = a typed prompt) — a user record that starts a turn
+  jq -nc --arg s "$1" --arg p "$2" --arg o "${3:-}" '{type:"user", sessionId:$s, message:{role:"user", content:$p}}
+    + (if $o != "" then {origin:{kind:$o}, promptSource:"system"} else {} end)' >> "$(tr_path "$1")"
+}
+closing_text() {  # $1 sid  $2 text — a text-only assistant record (no tool call)
+  jq -nc --arg s "$1" --arg t "$2" '{type:"assistant", sessionId:$s, message:{model:"claude-opus-5-5",
+      content:[{type:"text", text:$t}]}}' >> "$(tr_path "$1")"
 }
 # Stop / SubagentStop stdin. $3 = background_tasks JSON, $4 = session_crons JSON; '-' for $3 omits BOTH
 # fields (a CLI before 2.1.28x). $5 = last_assistant_message.
@@ -276,7 +291,25 @@ fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
 expect_deferred "an operator prompt queued while the turn ran" "$SID" "queued prompt"
 tool_call "$SID"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
-expect_completed "a STALE enqueue (a later tool call came after it: a killed process's leftover)" "$SID" "DONE"
+expect_completed "a STALE enqueue (a tool call and its result came after it)" "$SID" "DONE"
+# The queue log is no ledger: a real 2.1.281 transcript (2026-09-24) shows two notifications enqueued, ONE
+# dequeue that delivered only the second, and the first — a Monitor's "stream ended" during a usage-limit
+# wait — never dequeued, removed or delivered. The next turn start must leave it behind, even when that turn
+# makes no tool call at all.
+new_transcript "$SID"
+queue_op "$SID" enqueue "$(notif btsgobe5v)"
+queue_op "$SID" enqueue "$(notif a28d789b3a4497954)"
+queue_op "$SID" dequeue
+turn_start "$SID" "$(notif a28d789b3a4497954)" task-notification
+closing_text "$SID" "Background review finished; nothing left to do."
+fire "$(input Stop "$SID" '[]' '[]' 'Background review finished; nothing left to do.')"
+expect_completed "an entry the CLI dropped with no record (then a text-only turn)" "$SID" "Background review finished; nothing left to do."
+new_transcript "$SID"
+queue_op "$SID" enqueue "$(notif a9eeb62fb10599bff)"      # queued when the process was killed
+turn_start "$SID" "continue the task"                       # the session resumed with a new prompt
+closing_text "$SID" "Verdict posted."
+fire "$(input Stop "$SID" '[]' '[]' 'Verdict posted.')"
+expect_completed "a killed process's queued entry, then a resumed text-only turn" "$SID" "Verdict posted."
 
 # ── 4. what holds a job, what does not ──────────────────────────────────────────────────────────────
 SID="5a6b7c8d-9e0f-4a1b-8c2d-181000000004"
@@ -311,15 +344,10 @@ fire "$(input Stop "$SID" - - 'DONE')"
 expect_completed "…even with an entry queued: the queue reading is only trusted beside the stdin fields it was verified with" "$SID" "DONE"
 queue_op "$SID" dequeue
 
-# An old runtime's job context names no session: the hook still reports (keyed by job_id/step_index) and still
-# defers — but the checkpoint lane is strictly the job session's, so no upload.
-printf '{"job_id":181,"step_index":0}\n' > "$HOME/.sidebutton/job-context.json"; : > "$LOG"
+# An old runtime's job context names no session, so no Stop can be told to be the job's: the old contract.
+printf '{"job_id":181,"step_index":0}\n' > "$HOME/.sidebutton/job-context.json"
 fire "$(input Stop "$SID" "$FORK" '[]' 'WAITING')"
-expect_deferred "a job context with no session id (old runtime)" "$SID" "subagent a04a903e0cb039115"
-[ -z "$(transcripts)" ] && ok "…and no checkpoint upload: that lane is strictly the job session's (as in sb-checkpoint-transcript.sh)" \
-  || bad "a job context naming no session got a checkpoint upload: $(transcripts)"
-fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
-expect_completed "…and the Stop after the work returned completes it" "$SID" "DONE"
+expect_completed "a job context that names no session (old runtime): the old contract, whatever is in flight" "$SID" "WAITING"
 job_context "$SID"
 
 # ── 5. SubagentStop, non-job sessions, the checkpoint switch ────────────────────────────────────────
@@ -330,14 +358,21 @@ fire "$(input SubagentStop "$SID" "$FORK" '[]' 'sub done')"
 OTHER="7e7e7e7e-0000-4000-8000-000000000181"
 new_transcript "$OTHER"; : > "$LOG"
 fire "$(input Stop "$OTHER" "$FORK" '[]' 'WAITING')"
-[ "$RC" = 0 ] && [ "$(nposts)" = 0 ] && ! sentinel "$OTHER" && [ ! -e "$(marker "$OTHER")" ] \
-  && grep -q "session $OTHER != job session $SID — skipping portal posts" "$LOG" \
-  && ok "a non-job session waiting on work: zero POSTs, no checkpoint, and it is not marked stopped while it waits" \
-  || bad "a non-job session with pending work: rc=$RC posts=$(nposts)"
+[ "$RC" = 0 ] && [ "$(nposts)" = 0 ] && sentinel "$OTHER" && [ ! -e "$(marker "$OTHER")" ] \
+  && grep -q "session $OTHER != job session $SID — skipping portal posts" "$LOG" && ! grep -q "paused, not finished" "$LOG" \
+  && ok "a non-job session with work in flight: zero POSTs and still marked stopped, as before (session-tidy keeps closing it)" \
+  || bad "a non-job session with pending work changed: rc=$RC posts=$(nposts) sentinel=$(sentinel "$OTHER" && echo yes || echo no)"
+# Marker hygiene: a session's own completing Stop clears its marker even once job-context has moved on, and a
+# marker older than the 24 h workflow ceiling (its session died while it waited) is pruned; a fresh one stays.
+echo "2026-09-28T18:19:04Z subagent a1" > "$(marker "$OTHER")"
+echo "stale" > "$(marker "dead-session-1")"; touch -d '26 hours ago' "$(marker "dead-session-1")"
+echo "fresh" > "$(marker "live-session-2")"
 fire "$(input Stop "$OTHER" '[]' '[]' 'DONE')"
-[ "$RC" = 0 ] && [ "$(nposts)" = 0 ] && sentinel "$OTHER" \
-  && ok "…and once it is done: still zero POSTs, and the sentinel is written ahead of the gate, as before" \
-  || bad "a finished non-job session: rc=$RC posts=$(nposts) sentinel=$(sentinel "$OTHER" && echo yes || echo no)"
+[ "$RC" = 0 ] && [ "$(nposts)" = 0 ] && sentinel "$OTHER" && [ ! -e "$(marker "$OTHER")" ] \
+  && [ ! -e "$(marker "dead-session-1")" ] && [ -e "$(marker "live-session-2")" ] \
+  && ok "a completing Stop clears its own stop-deferred marker (even as a non-job session) and prunes one older than 25 h" \
+  || bad "marker hygiene: own=$([ -e "$(marker "$OTHER")" ] && echo kept || echo gone) stale=$([ -e "$(marker dead-session-1)" ] && echo kept || echo gone) fresh=$([ -e "$(marker live-session-2)" ] && echo kept || echo gone)"
+rm -f "$(marker "live-session-2")"
 agent_env 'SB_CHECKPOINT_INTERVAL_SEC=0'; : > "$LOG"
 fire "$(input Stop "$SID" "$FORK" '[]' 'WAITING')"
 expect_deferred "SB_CHECKPOINT_INTERVAL_SEC=0" "$SID" "subagent a04a903e0cb039115"
