@@ -2955,11 +2955,15 @@ if [ "$HOOK_EVENT" = "Stop" ]; then
     # older than the 24 h workflow ceiling belongs to a session that died while it waited.
     if [ -n "$DEFER_MARK" ]; then rm -f "$DEFER_MARK" 2>/dev/null || true; fi
     find "${HOME}/.sidebutton" -maxdepth 1 -type f -name 'stop-deferred-*' -mmin +1500 -delete 2>/dev/null || true
-  elif [ -n "$DEFER_MARK" ]; then
-    # DEV-181: waiting on its own work. A sentinel left by an earlier completing Stop must not let the sweep close
-    # the session now, nor stop the checkpoint below (sb-clear-session-stopped.sh clears it on UserPromptSubmit;
-    # this holds without that hook too). DEFER_MARK set = the session id passed the sentinel's charset check.
-    rm -f "${HOME}/.sidebutton/session-stopped/${SESSION_ID}.json" 2>/dev/null || true
+  else
+    # DEV-181: waiting on its own work. A sentinel left by an earlier completing Stop would make the helper skip the
+    # checkpoint started below, and let the sweep close this session once job-context moves on (while it names
+    # this session the sweep skips it). sb-clear-session-stopped.sh clears it on UserPromptSubmit; this holds
+    # without that hook too. Same charset check as the writer: an id it rejects never had a sentinel.
+    case "$SESSION_ID" in
+      ''|.|..|*[!A-Za-z0-9._-]*) ;;
+      *) rm -f "${HOME}/.sidebutton/session-stopped/${SESSION_ID}.json" 2>/dev/null || true ;;
+    esac
   fi
 fi
 

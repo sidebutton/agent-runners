@@ -273,6 +273,7 @@ expect_completed "run-3012 shape, 18:28 Stop (fork returned)" "$SID" "$VERDICT"
 # That completing Stop left a sentinel. A later turn that launches more work and defers must not leave it for
 # the sweep (normally UserPromptSubmit clears it first) — nor let it stop the deferred checkpoint.
 sentinel "$SID" || bad "precondition: no sentinel after the completing Stop"
+: > "$LOG"
 fire "$(input Stop "$SID" "$FORK" '[]' 'Re-review launched.')" 1 1
 expect_deferred "a deferred Stop while an earlier completing Stop's sentinel is still on disk" "$SID" "subagent a04a903e0cb039115"
 [ "$(transcripts)" = checkpoint ] && ok "…the stale sentinel is removed and the checkpoint still uploads" \
