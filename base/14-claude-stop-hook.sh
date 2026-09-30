@@ -2857,8 +2857,9 @@ mark_session_stopped() {
 #      artifact <url>". Both are persistent (no timeout — they run until the session ends) and wake it only
 #      if someone comments, and the Stop input drops the `ambient` flag the CLI keeps on them, so they are
 #      told apart by that description. Held on, one publish would keep the job open until its 24 h ceiling.
-#      Should a later CLI send `ambient`, it exempts every kind but a subagent: the CLI's own ambient test
-#      also covers transcript-less workers such as a forked skill's, and those do report back.
+#      An `ambient` field is not read: 2.1.281 never sends one, and the CLI's own ambient test (transcript-
+#      less, or an ambient monitor_ws) also covers a forked skill's worker, which does report back — the kind
+#      and that description decide.
 #   2. stdin session_crons — a one-shot cron or ScheduleWakeup wakes the session later. A recurring cron
 #      never drains, so it does not hold completion.
 #   3. the transcript tail — a task that ends DURING the closing turn is already gone from background_tasks,
@@ -2874,14 +2875,16 @@ mark_session_stopped() {
 #      an artifact watch's connection events: no such status, 2.1.281 bundle) and prompts, typed or a cron's,
 #      which may be a local slash command (/cost, /clear) — and holding on those would strand the job; the one
 #      passive result known is a detached tool call the user cancels (the user's own act, in a watched
-#      window). Results are tracked by their text, so a remove (it carries the text of every string entry,
-#      and a result is always one) takes off exactly the result it names, and one queued before the last
-#      reset takes off nothing. A remove without text is some other entry. A dequeue names nothing and is
-#      charged to the other entries first: a result leaves the queue only to start its own turn, whose user
-#      record resets the count anyway. The cost is deliberate: an entry that stays queued while the CLI runs a
-#      turn for another one, a prompt that does run a turn, or one not yet on disk when this reads, is not
-#      seen, and that Stop completes as it always did — a lossy log may miss a race, but must never strand a
-#      job with no later Stop to complete it. Read from the last 4 MB only.
+#      window). Entries are tracked by their text — results, the other entries, and those queued before the
+#      last reset — because a remove carries the text of every string entry (and a result is always one): it
+#      takes off exactly what it names, found by text or else by a result's task id. A removed result that
+#      matches nothing (a peer message's text is cleaned between its enqueue and its remove) takes off the
+#      oldest result — fail open, never a stranded job; any other remove never touches a result. A dequeue
+#      names nothing and is charged to the other entries first: a result leaves the queue only to start its
+#      own turn, whose user record resets it all anyway. The cost is deliberate: an entry that stays queued
+#      while the CLI runs a turn for another one, a prompt that does run a turn, or one not yet on disk when
+#      this reads, is not seen, and that Stop completes as it always did — a lossy log may miss a race, but
+#      must never strand a job with no later Stop to complete it. Read from the last 4 MB only.
 # A CLI that sends neither stdin field prints nothing here: every Stop completes, as before. Never fails
 # the hook — any miss prints nothing, which is exactly the old path.
 stop_pending_work() {
@@ -2889,8 +2892,8 @@ stop_pending_work() {
   work=$(printf '%s' "$HOOK_INPUT" | jq -r '
       def wakes: . as $k | ["shell", "subagent", "workflow", "monitor", "MCP task", "teammate", "cloud session"]
         | any(.[]; . == $k);
-      def ambient: (.ambient == true and .type != "subagent") or (.type == "monitor"
-        and ((.description // "") | tostring | test("^(live updates for|presence on) artifact ")));
+      def ambient: .type == "monitor"
+        and ((.description // "") | tostring | test("^(live updates for|presence on) artifact "));
       def items: if type == "array" then .[] | select(type == "object") else empty end;
       if type != "object" or ((has("background_tasks") or has("session_crons")) | not) then "legacy"
       else
@@ -2909,23 +2912,30 @@ stop_pending_work() {
       | jq -Rrn '
           def text: if (.content | type) == "string" then .content else "" end;
           def result: contains("<task-notification>") and test("<status>(completed|failed|stopped)</status>");
-          def tid: [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "notification";
+          def tid: [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "";
+          def drop($x): index([$x]) as $i | if $i == null then empty else del(.[$i]) end;
           reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $r
-            ({q: [], u: 0};
+            ({q: [], w: [], pre: []};
              if $r.type == "user" or ($r.type == "assistant"
                 and ([$r.message.content[]? | select(type == "object" and .type == "tool_use")] | length) > 0)
-               then {q: [], u: 0}
+               then {q: [], w: [], pre: ((.pre + .q + .w) | .[-500:])}
              elif $r.type != "queue-operation" then .
-             elif $r.operation == "enqueue" and ($r | text | result) then .q += [$r | text]
-             elif $r.operation == "enqueue" then .u += 1
-             elif $r.operation == "remove" and ($r | text | result)
-               then ($r | text) as $c | (.q | index([$c])) as $i
-                    | if $i == null then . else .q |= del(.[$i]) end
-             elif $r.operation == "remove" or ($r.operation == "dequeue" and .u > 0)
-               then .u = ([.u - 1, 0] | max)
-             elif $r.operation == "dequeue" then .q |= .[1:]
-             else . end)
-          | .q | map("queued " + tid) | join(", ")' 2>/dev/null) || work=""
+             else ($r | text) as $t
+               | if $r.operation == "enqueue" then (if ($t | result) then .q += [$t] else .w += [$t] end)
+                 elif $r.operation == "remove" and ($t | result) then
+                   first( ((.q | drop($t)) as $a | .q = $a),
+                          (($t | tid) as $id | select($id != "") | ([.q[] | tid] | index([$id])) as $i
+                             | select($i != null) | .q |= del(.[$i])),
+                          ((.pre | drop($t)) as $a | .pre = $a),
+                          (.q |= .[1:]) )
+                 elif $r.operation == "remove" then
+                   first( ((.w | drop($t)) as $a | .w = $a), ((.pre | drop($t)) as $a | .pre = $a), . )
+                 elif $r.operation == "dequeue" then (if (.w | length) > 0 then .w |= .[1:] else .q |= .[1:] end)
+                 else . end
+             end)
+          | [.q[] | tid | if . == "" then "notification" else . end] | unique
+          | if length > 4 then (.[:4] | map("queued " + .) | join(", ")) + " (+\(length - 4) more)"
+            else map("queued " + .) | join(", ") end' 2>/dev/null) || work=""
   fi
   printf '%s' "$work"
   return 0

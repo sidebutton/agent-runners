@@ -360,6 +360,37 @@ queue_op "$SID" dequeue
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "…then a dequeue with nothing else queued takes the result off" "$SID" "DONE"
 tool_call "$SID"
+# A result's remove may carry other text than its enqueue did (2.1.281 cleans a peer message's routing header in
+# between): the task id still finds it, and a removed result that matches nothing takes off the oldest one — fail
+# open, never a stranded job. A remove that is no result never touches one.
+queue_op "$SID" enqueue "$(notif a8older00000005)"
+queue_op "$SID" enqueue "$(notif a8peer000000006)"
+queue_op "$SID" remove "$(printf '<task-notification>\n<task-id>a8peer000000006</task-id>\n<status>completed</status>\n</task-notification>')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "a result removed with other text but its task id (that one goes, the older one stays)" "$SID" "queued a8older00000005"
+queue_op "$SID" remove "$(notif a8older00000005)"
+queue_op "$SID" enqueue "$(notif a9lost000000007)"
+queue_op "$SID" remove "$(printf '<task-notification>\n<status>completed</status>\n<summary>unnamed</summary>\n</task-notification>')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "a removed result that matches nothing takes off the oldest (fail open, never stranded)" "$SID" "DONE"
+queue_op "$SID" enqueue "$(notif b0kept000000008)"
+queue_op "$SID" remove "a prompt this window never saw queued"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "a remove that is no result and matches nothing (the result stays)" "$SID" "queued b0kept000000008"
+tool_call "$SID"
+queue_op "$SID" enqueue "please also run the linters"
+queue_op "$SID" remove "$(notice s9watch04 '' 'a notice this window never saw queued')"
+queue_op "$SID" enqueue "$(notif b1late000000009)"
+queue_op "$SID" dequeue
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "a prompt, an unknown notice removed, a result, a dequeue (charged to the prompt)" "$SID" "queued b1late000000009"
+tool_call "$SID"
+for i in 1 2 3 4 5 6; do queue_op "$SID" enqueue "$(notif "r${i}bound0000000")"; done
+: > "$LOG"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "six results queued: the log names four and counts the rest" "$SID" \
+  "queued r1bound0000000, queued r2bound0000000, queued r3bound0000000, queued r4bound0000000 (+2 more)"
+tool_call "$SID"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a STALE enqueue (a tool call and its result came after it)" "$SID" "DONE"
 # The queue log is no ledger: a real 2.1.281 transcript (2026-09-24) shows two notifications enqueued, ONE
@@ -408,11 +439,9 @@ PRESENCE='{"id":"s1a3c5e7q","type":"monitor","status":"running","description":"p
 free "an Artifact publish's own watch + presence (listed as monitors, but they run until the session ends)" "[$WATCH,$PRESENCE]" '[]'
 held "…beside a real monitor, the real one still holds the job" \
   "[$WATCH,{\"id\":\"m7\",\"type\":\"monitor\",\"status\":\"running\",\"server\":\"ci\",\"tool\":\"watch\"}]" '[]' "monitor m7"
-free "entries the CLI flags ambient (should a later CLI send the flag): a monitor, a workflow" \
-  '[{"id":"s9","type":"monitor","status":"running","ambient":true},{"id":"w9","type":"workflow","status":"running","ambient":true}]' '[]'
-held "…but not a subagent: a forked skill's worker (the CLI calls it ambient too) reports back, so it still holds" \
-  '[{"id":"a9f8e7d6c5b4a3921","type":"subagent","status":"running","description":"/code-review","ambient":true}]' '[]' \
-  "subagent a9f8e7d6c5b4a3921"
+held "an ambient field is not read (2.1.281 sends none; the CLI's own test covers a forked skill's worker): the kind decides" \
+  '[{"id":"a9f8e7d6c5b4a3921","type":"subagent","status":"running","description":"/code-review","ambient":true},{"id":"m9","type":"monitor","status":"running","server":"ci","tool":"watch","ambient":true}]' '[]' \
+  "subagent a9f8e7d6c5b4a3921, monitor m9"
 free "an unknown kind (treated as the old behaviour, never a stranded job)" '[{"id":"x1","type":"hologram","status":"running"}]' '[]'
 free "a task listed as finished" '[{"id":"b1","type":"shell","status":"completed"}]' '[]'
 free "malformed fields (background_tasks a string, session_crons an object)" '"soon"' '{"id":"c1"}'
