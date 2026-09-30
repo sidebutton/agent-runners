@@ -299,10 +299,10 @@ queue_op "$SID" enqueue "$(notif b9y3kq2vw)"
 queue_op "$SID" remove "$(notif b9y3kq2vw)" absorbed_mid_turn
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a notification absorbed mid-turn (enqueue, then remove)" "$SID" "DONE"
-# Only a finished task's result holds. The queue also logs entries that run no turn, and holding on one would
-# strand the job with no later Stop: a typed prompt (it may be a local slash command) and the notices the CLI
-# queues passive (2.1.281: a task the user stopped, a resume note, an artifact watch's connection events —
-# none with status completed/failed).
+# Only a finished task's result holds (status completed, failed or stopped). The queue also logs entries that
+# run no turn, and holding on one would strand the job with no later Stop: a typed prompt (it may be a local
+# slash command) and the notices the CLI queues passive (2.1.281: a task the user killed, a resume note, an
+# artifact watch's connection events — none with such a status).
 queue_op "$SID" enqueue "please also run the linters"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a typed prompt queued while the turn ran (it may be a local slash command)" "$SID" "DONE"
@@ -320,6 +320,20 @@ queue_op "$SID" remove "$(passive_notif s9watch02 '' 'another live session of th
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
 expect_deferred "a result queued while an older passive notice is withdrawn (that remove cancels nothing counted)" \
   "$SID" "queued a1b2c3d4e5f60718"
+tool_call "$SID"
+# A dequeue names no entry (2.1.281 writes it without content). It is charged to an uncounted entry first: a result
+# leaves the queue only to start its own turn, and that turn's user record resets the count anyway.
+queue_op "$SID" enqueue "$(passive_notif s9watch03 '' 'Stopped watching the artifact (signed out)')"
+queue_op "$SID" enqueue "$(notif a2c4e6a8b0d1f3e5)"
+queue_op "$SID" dequeue
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "a passive notice and a result queued, then one content-less dequeue (the result is still queued)" \
+  "$SID" "queued a2c4e6a8b0d1f3e5"
+tool_call "$SID"
+# A task another agent stopped is reported with status stopped, queued as a result that runs a turn (not passive).
+queue_op "$SID" enqueue "$(passive_notif b3stop002 stopped 'Task "linter" was stopped by agent reviewer')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "a task stopped by another agent (status stopped: a result that runs a turn)" "$SID" "queued b3stop002"
 tool_call "$SID"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a STALE enqueue (a tool call and its result came after it)" "$SID" "DONE"
@@ -370,6 +384,9 @@ free "an Artifact publish's own watch + presence (listed as monitors, but they r
 held "…beside a real monitor, the real one still holds the job" \
   "[$WATCH,{\"id\":\"m7\",\"type\":\"monitor\",\"status\":\"running\",\"server\":\"ci\",\"tool\":\"watch\"}]" '[]' "monitor m7"
 free "an entry the CLI flags ambient (should a later CLI send the flag)" '[{"id":"s9","type":"monitor","status":"running","ambient":true}]' '[]'
+held "…but only a monitor's flag exempts it: a forked skill's worker (the CLI calls it ambient too) still holds" \
+  '[{"id":"a9f8e7d6c5b4a3921","type":"subagent","status":"running","description":"/code-review","ambient":true}]' '[]' \
+  "subagent a9f8e7d6c5b4a3921"
 free "an unknown kind (treated as the old behaviour, never a stranded job)" '[{"id":"x1","type":"hologram","status":"running"}]' '[]'
 free "a task listed as finished" '[{"id":"b1","type":"shell","status":"completed"}]' '[]'
 free "malformed fields (background_tasks a string, session_crons an object)" '"soon"' '{"id":"c1"}'

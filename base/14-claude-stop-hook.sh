@@ -2856,8 +2856,9 @@ mark_session_stopped() {
 #      (or a doc, or an ArtifactComments watch) arms, "live updates for artifact <url> (…)", and "presence on
 #      artifact <url>". Both are persistent (no timeout — they run until the session ends) and wake it only
 #      if someone comments, and the Stop input drops the `ambient` flag the CLI keeps on them, so they are
-#      told apart by that description (or by `ambient`, should a later CLI send it). Held on, one publish
-#      would keep the job open until its 24 h ceiling.
+#      told apart by that description, or by an `ambient` flag on a monitor should a later CLI send one.
+#      Only on a monitor: the CLI's own ambient test also covers transcript-less workers such as a forked
+#      skill's, and those do report back. Held on, one publish would keep the job open until its 24 h ceiling.
 #   2. stdin session_crons — a one-shot cron or ScheduleWakeup wakes the session later. A recurring cron
 #      never drains, so it does not hold completion.
 #   3. the transcript tail — a task that ends DURING the closing turn is already gone from background_tasks,
@@ -2868,13 +2869,17 @@ mark_session_stopped() {
 #      a prompt, a delivered notification, a tool result — and after its last tool call can count: one
 #      queued while the closing response was being written. Any later turn start, tool call or tool result
 #      leaves an older entry behind for good. And only a finished task's result counts: a <task-notification>
-#      with status completed or failed, which the CLI always delivers with a turn. The same queue also logs
-#      entries that run none — passive notices (a task the user stopped, a resume note, an artifact watch's
-#      connection events: no such status, 2.1.281 bundle) and a typed prompt, which may be a local slash
-#      command (/cost, /clear) — and holding on those would strand the job. The cost is deliberate: an entry
-#      that stays queued while the CLI runs a turn for another one, or one not yet on disk when this reads,
-#      is not seen, and that Stop completes as it always did — a lossy log may miss a race, but must never
-#      strand a job with no later Stop to complete it. Read from the last 4 MB only.
+#      with status completed, failed or stopped (by another agent), which the CLI delivers with a turn. The
+#      same queue also logs entries that run none — passive notices (a task the user killed, a resume note,
+#      an artifact watch's connection events: no such status, 2.1.281 bundle) and prompts, typed or a cron's,
+#      which may be a local slash command (/cost, /clear) — and holding on those would strand the job; the one
+#      passive result known is a detached tool call the user cancels (the user's own act, in a watched
+#      window). A record that takes an entry off without saying which (every dequeue, a remove without
+#      content) is charged to the uncounted entries first: a result leaves the queue only to start its own
+#      turn, whose user record resets the count anyway. The cost is deliberate: an entry that stays queued
+#      while the CLI runs a turn for another one, a prompt that does run a turn, or one not yet on disk when
+#      this reads, is not seen, and that Stop completes as it always did — a lossy log may miss a race, but
+#      must never strand a job with no later Stop to complete it. Read from the last 4 MB only.
 # A CLI that sends neither stdin field prints nothing here: every Stop completes, as before. Never fails
 # the hook — any miss prints nothing, which is exactly the old path.
 stop_pending_work() {
@@ -2882,8 +2887,8 @@ stop_pending_work() {
   work=$(printf '%s' "$HOOK_INPUT" | jq -r '
       def wakes: . as $k | ["shell", "subagent", "workflow", "monitor", "MCP task", "teammate", "cloud session"]
         | any(.[]; . == $k);
-      def ambient: .ambient == true or (.type == "monitor"
-        and ((.description // "") | tostring | test("^(live updates for|presence on) artifact ")));
+      def ambient: .type == "monitor" and (.ambient == true
+        or ((.description // "") | tostring | test("^(live updates for|presence on) artifact ")));
       def items: if type == "array" then .[] | select(type == "object") else empty end;
       if type != "object" or ((has("background_tasks") or has("session_crons")) | not) then "legacy"
       else
@@ -2900,19 +2905,24 @@ stop_pending_work() {
     work=$(tail -c 4194304 "$TRANSCRIPT_PATH" 2>/dev/null \
       | grep -E '"type":"(queue-operation|tool_use|user)"' 2>/dev/null \
       | jq -Rrn '
-          def result: tostring | contains("<task-notification>") and test("<status>(completed|failed)</status>");
+          def result: tostring | contains("<task-notification>")
+            and test("<status>(completed|failed|stopped)</status>");
+          def off($k): .[$k] = ([.[$k] - 1, 0] | max);
           reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $r
-            ({n: 0, id: ""};
+            ({n: 0, u: 0, id: ""};
              if $r.type == "user" or ($r.type == "assistant"
                 and ([$r.message.content[]? | select(type == "object" and .type == "tool_use")] | length) > 0)
-               then {n: 0, id: ""}
-             elif $r.type == "queue-operation" and $r.operation == "enqueue" and ($r.content // "" | result)
-               then {n: (.n + 1),
-                     id: ($r.content | tostring
-                          | [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "notification")}
-             elif $r.type == "queue-operation" and ($r.operation == "dequeue"
-                or ($r.operation == "remove" and (($r | has("content") | not) or ($r.content | result))))
-               then .n = ([.n - 1, 0] | max)
+               then {n: 0, u: 0, id: ""}
+             elif $r.type != "queue-operation" then .
+             elif $r.operation == "enqueue" and ($r.content // "" | result)
+               then .n += 1
+                 | .id = ($r.content | tostring
+                          | [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "notification")
+             elif $r.operation == "enqueue" then .u += 1
+             elif $r.operation == "remove" and ($r | has("content"))
+               then (if ($r.content | result) then off("n") else off("u") end)
+             elif $r.operation == "dequeue" or $r.operation == "remove"
+               then (if .u > 0 then off("u") else off("n") end)
              else . end)
           | if .n > 0 then "queued \(.id)" else empty end' 2>/dev/null) || work=""
   fi
