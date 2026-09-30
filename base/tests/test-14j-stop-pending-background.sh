@@ -400,6 +400,25 @@ tool_call "$SID"
 queue_op "$SID" enqueue "$(printf 'why did this fail? %s' "$(notif b4quoted0000012)")"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a prompt that quotes a task-notification (the tag must start the entry)" "$SID" "DONE"
+# A detached tool call's result carries a tool-use id and no task id: that id tracks it.
+queue_op "$SID" enqueue "$(notif b5other0000013)"
+queue_op "$SID" enqueue "$(printf '<task-notification>\n<tool-use-id>toolu_detached14</tool-use-id>\n<status>completed</status>\n<summary>The Bash call finished</summary>\n</task-notification>')"
+queue_op "$SID" remove "$(printf '<task-notification>\n<tool-use-id>toolu_detached14</tool-use-id>\n<status>completed</status>\n</task-notification>')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "a detached tool call's result, removed by its tool-use id (the other result stays)" "$SID" "queued b5other0000013"
+tool_call "$SID"
+# A removed result that names no id at all — not even one kept aside from an id-less result before the reset — and
+# one whose tag no longer starts its (cleaned) text both take off the oldest: fail open.
+queue_op "$SID" enqueue "$(printf '<task-notification>\n<status>completed</status>\n<summary>no ids at all</summary>\n</task-notification>')"
+tool_call "$SID"
+queue_op "$SID" enqueue "$(notif b6live000000015)"
+queue_op "$SID" remove "$(printf '<task-notification>\n<status>completed</status>\n<summary>cleaned</summary>\n</task-notification>')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "an id-less remove while an id-less result sits aside from before the reset (fail open)" "$SID" "DONE"
+queue_op "$SID" enqueue "$(notif b7live000000016)"
+queue_op "$SID" remove "$(printf 'from: peer\n<task-notification>\n<status>completed</status>\n</task-notification>')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "a removed result whose cleaned text no longer starts with the tag (still a result: fail open)" "$SID" "DONE"
 for i in 6 5 4 3 2 1; do queue_op "$SID" enqueue "$(notif "r${i}bound0000000")"; done
 : > "$LOG"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1

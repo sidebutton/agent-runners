@@ -2875,11 +2875,12 @@ mark_session_stopped() {
 #      an artifact watch's connection events: no such status, 2.1.281 bundle) and prompts, typed or a cron's,
 #      which may be a local slash command (/cost, /clear) — and holding on those would strand the job; the one
 #      passive result known is a detached tool call the user cancels (the user's own act, in a watched
-#      window). A result (its text starts with the tag) is tracked by its task id, the other entries by count:
-#      a remove carries the text of every string entry, so one that names a queued result's task id — or one
-#      queued before the last reset, kept aside — takes off exactly that one, a removed result that names
-#      nothing known takes off the oldest (fail open, never a stranded job), and any other remove takes off an
-#      uncounted entry, never a result. A dequeue names nothing and is charged to the uncounted entries first:
+#      window). A result (its text starts with the tag) is tracked by its task id — or its tool-use id: a
+#      detached tool call's result carries no task id — and the other entries by count. A remove carries the
+#      text of every string entry, so one that names a queued result's id, or one kept aside from before the
+#      last reset, takes off exactly that one; a removed result (the tag anywhere: a peer's text is cleaned
+#      between enqueue and remove) that names no id, or none known, takes off the oldest (fail open, never a
+#      stranded job); any other remove takes off an uncounted entry, never a result. A dequeue names nothing and is charged to the uncounted entries first:
 #      a result leaves the queue only to start its own turn, whose user record resets it all anyway (so it is
 #      on every real transcript here). The cost is deliberate: an entry that stays queued
 #      while the CLI runs a turn for another one, a prompt that does run a turn, or one not yet on disk when
@@ -2911,8 +2912,9 @@ stop_pending_work() {
       | grep -E '"type":"(queue-operation|tool_use|user)"' 2>/dev/null \
       | jq -Rrn '
           def text: if (.content | type) == "string" then .content else "" end;
-          def result: test("^\\s*<task-notification>") and test("<status>(completed|failed|stopped)</status>");
-          def tid: [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "";
+          def done: test("<status>(completed|failed|stopped)</status>");
+          def tid: ([match("<task-id>([^<]+)</task-id>").captures[0].string] | first)
+            // ([match("<tool-use-id>([^<]+)</tool-use-id>").captures[0].string] | first) // "";
           def cut($x): index([$x]) as $i | if $i == null then empty else del(.[$i]) end;
           def one_less: .u = ([.u - 1, 0] | max);
           reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $r
@@ -2921,11 +2923,15 @@ stop_pending_work() {
                 and ([$r.message.content[]? | select(type == "object" and .type == "tool_use")] | length) > 0)
                then (if (.q | length) > 0 then .pre = ((.pre + .q) | .[-500:]) else . end) | .q = [] | .u = 0
              elif $r.type != "queue-operation" then .
-             else ($r | text) as $t | ($t | tid) as $id | ($t | result) as $res
-               | if $r.operation == "enqueue" then (if $res then .q += [$id] else .u += 1 end)
-                 elif $r.operation == "remove" and ($res or $id != "") then
-                   first( ((.q | cut($id)) as $a | .q = $a), ((.pre | cut($id)) as $a | .pre = $a),
-                          (if $res then .q |= .[1:] else one_less end) )
+             else ($r | text) as $t | ($t | tid) as $id
+               | if $r.operation == "enqueue"
+                   then (if ($t | test("^\\s*<task-notification>")) and ($t | done) then .q += [$id] else .u += 1 end)
+                 elif $r.operation == "remove" and ($t | contains("<task-notification>")) and ($t | done) then
+                   (if $id == "" then .q |= .[1:]
+                    else first( ((.q | cut($id)) as $a | .q = $a), ((.pre | cut($id)) as $a | .pre = $a),
+                                (.q |= .[1:]) ) end)
+                 elif $r.operation == "remove" and $id != "" then
+                   first( ((.q | cut($id)) as $a | .q = $a), ((.pre | cut($id)) as $a | .pre = $a), one_less )
                  elif $r.operation == "remove" then one_less
                  elif $r.operation == "dequeue" then (if .u > 0 then one_less else .q |= .[1:] end)
                  else . end
