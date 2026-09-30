@@ -60,7 +60,7 @@ chmod +x "$TMP"/*.sh
 # ── 1. the mark is written on Stop only, and BEFORE the job-session gate ──────
 # SubagentStop fires when a sub-agent returns while the main agent is still working; marking
 # there would arm the sweep against a live session.
-grep -q 'if \[ "\$HOOK_EVENT" = "Stop" \]; then' "$TMP/claude-stop-hook.sh" \
+grep -q '^if \[ "\$HOOK_EVENT" = "Stop" \]; then$' "$TMP/claude-stop-hook.sh" \
   && grep -q 'mark_session_stopped "\$SESSION_ID" || true' "$TMP/claude-stop-hook.sh" \
   && ok "sentinel writer is gated to hook_event_name=Stop" \
   || bad "sentinel writer is not Stop-gated (SubagentStop would mark a live session)"
