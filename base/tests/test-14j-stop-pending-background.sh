@@ -378,18 +378,33 @@ queue_op "$SID" remove "a prompt this window never saw queued"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
 expect_deferred "a remove that is no result and matches nothing (the result stays)" "$SID" "queued b0kept000000008"
 tool_call "$SID"
+# The other entries are only counted: an unknown notice's remove takes one off, so a dequeue with none left counted
+# takes the result — fail open (a real dequeue is followed by its turn's user record anyway).
 queue_op "$SID" enqueue "please also run the linters"
 queue_op "$SID" remove "$(notice s9watch04 '' 'a notice this window never saw queued')"
 queue_op "$SID" enqueue "$(notif b1late000000009)"
 queue_op "$SID" dequeue
-fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
-expect_deferred "a prompt, an unknown notice removed, a result, a dequeue (charged to the prompt)" "$SID" "queued b1late000000009"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "a prompt, an unknown notice removed, a result, a dequeue (charged to the result: fail open)" "$SID" "DONE"
+# A result queued before the last reset is kept aside by its task id, so its late remove — even with cleaned text —
+# takes off that one, not a newer result.
+queue_op "$SID" enqueue "$(notif b2stale00000010)"
 tool_call "$SID"
-for i in 1 2 3 4 5 6; do queue_op "$SID" enqueue "$(notif "r${i}bound0000000")"; done
+queue_op "$SID" enqueue "$(notif b3live000000011)"
+queue_op "$SID" remove "$(printf '<task-notification>\n<task-id>b2stale00000010</task-id>\n<status>completed</status>\n</task-notification>')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
+expect_deferred "an older result's late remove with cleaned text (its task id is kept aside; the newer one holds)" \
+  "$SID" "queued b3live000000011"
+tool_call "$SID"
+# Only an entry that IS a notification counts — not a prompt that quotes one.
+queue_op "$SID" enqueue "$(printf 'why did this fail? %s' "$(notif b4quoted0000012)")"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "a prompt that quotes a task-notification (the tag must start the entry)" "$SID" "DONE"
+for i in 6 5 4 3 2 1; do queue_op "$SID" enqueue "$(notif "r${i}bound0000000")"; done
 : > "$LOG"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
-expect_deferred "six results queued: the log names four and counts the rest" "$SID" \
-  "queued r1bound0000000, queued r2bound0000000, queued r3bound0000000, queued r4bound0000000 (+2 more)"
+expect_deferred "six results queued: the log names the first four in queue order and counts the rest" "$SID" \
+  "queued r6bound0000000, queued r5bound0000000, queued r4bound0000000, queued r3bound0000000 (+2 more)"
 tool_call "$SID"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a STALE enqueue (a tool call and its result came after it)" "$SID" "DONE"
