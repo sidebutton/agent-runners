@@ -31,10 +31,12 @@
 # an async Agent, a background Bash or Monitor, or a one-shot cron / ScheduleWakeup. Treating that Stop as
 # the end closed the job before the verdict (KURABU runs 3010/3012/3013, 2026-09-28). For the job's own
 # session the hook now reads the work off its stdin — background_tasks + session_crons, which 2.1.28x sends
-# on every Stop — plus a task-notification queued during the closing response, and such a Stop is a PAUSE:
-# usage final=false, a checkpoint transcript, no step-complete, no session-tidy sentinel, no artifact drain.
-# The completing Stop (nothing pending) reports exactly as before. A CLI that sends neither field, and every
-# session that is not the job's, keep the old contract.
+# on every Stop — plus a finished task's result queued during the closing response, and such a Stop is a
+# PAUSE: usage final=false, a checkpoint transcript, no step-complete, no session-tidy sentinel, no artifact
+# drain. Work that never wakes the session on its own (the ambient kinds, Claude Code's own artifact watches,
+# recurring crons, passive queue entries) does not hold it. The completing Stop (nothing pending) reports
+# exactly as before. A CLI that sends neither field, and every session that is not the job's, keep the old
+# contract.
 
 step "Step 14/16: Claude stop hook"
 
@@ -1532,7 +1534,8 @@ CLEAREOF
 chmod +x "$AGENT_HOME/.local/bin/sb-clear-session-stopped.sh"
 
 # --- Decommission: retired idle-session reaper (SCRUM-1250/SCRUM-1433) ---------
-# Job completeness is signalled ONLY by the Stop hook's step-complete POST below;
+# Job completeness is signalled ONLY by the Stop hook's completion POSTs below (usage
+# final=true, then step-complete — from a completing Stop only, DEV-181);
 # the idle-session reaper (former base/19e) and its session-done sentinel
 # machinery (writer in this hook, sb-clear-session-done.sh, the UserPromptSubmit
 # hook entry) are retired. base/14 is refresh-manifest-listed, so this teardown
@@ -2848,7 +2851,13 @@ mark_session_stopped() {
 #      Only kinds that report back with a <task-notification> count: shell, subagent (a forked skill is
 #      one), workflow, monitor, MCP task, teammate, cloud session. `dream` and `auto-mode scan` end with an
 #      ambient notification that runs no turn (2.1.281 bundle), so holding the job on them would strand it
-#      with no later Stop to complete it; an unknown kind is treated the same — the old behaviour.
+#      with no later Stop to complete it; an unknown kind is treated the same — the old behaviour. Claude
+#      Code's own artifact connections are ambient too, but listed as `monitor`: the watch an Artifact publish
+#      (or a doc, or an ArtifactComments watch) arms, "live updates for artifact <url> (…)", and "presence on
+#      artifact <url>". Both are persistent (no timeout — they run until the session ends) and wake it only
+#      if someone comments, and the Stop input drops the `ambient` flag the CLI keeps on them, so they are
+#      told apart by that description (or by `ambient`, should a later CLI send it). Held on, one publish
+#      would keep the job open until its 24 h ceiling.
 #   2. stdin session_crons — a one-shot cron or ScheduleWakeup wakes the session later. A recurring cron
 #      never drains, so it does not hold completion.
 #   3. the transcript tail — a task that ends DURING the closing turn is already gone from background_tasks,
@@ -2858,10 +2867,14 @@ mark_session_stopped() {
 #      wait, seen on a real transcript). So only an enqueue written after the session's LAST user record —
 #      a prompt, a delivered notification, a tool result — and after its last tool call can count: one
 #      queued while the closing response was being written. Any later turn start, tool call or tool result
-#      leaves an older entry behind for good. The cost is deliberate: an entry that stays queued while the
-#      CLI runs a turn for another one, or one not yet on disk when this reads, is not seen, and that Stop
-#      completes as it always did — a lossy log may miss a race, but must never strand a job with no later
-#      Stop to complete it. Read from the last 4 MB only.
+#      leaves an older entry behind for good. And only a finished task's result counts: a <task-notification>
+#      with status completed or failed, which the CLI always delivers with a turn. The same queue also logs
+#      entries that run none — passive notices (a task the user stopped, a resume note, an artifact watch's
+#      connection events: no such status, 2.1.281 bundle) and a typed prompt, which may be a local slash
+#      command (/cost, /clear) — and holding on those would strand the job. The cost is deliberate: an entry
+#      that stays queued while the CLI runs a turn for another one, or one not yet on disk when this reads,
+#      is not seen, and that Stop completes as it always did — a lossy log may miss a race, but must never
+#      strand a job with no later Stop to complete it. Read from the last 4 MB only.
 # A CLI that sends neither stdin field prints nothing here: every Stop completes, as before. Never fails
 # the hook — any miss prints nothing, which is exactly the old path.
 stop_pending_work() {
@@ -2869,12 +2882,15 @@ stop_pending_work() {
   work=$(printf '%s' "$HOOK_INPUT" | jq -r '
       def wakes: . as $k | ["shell", "subagent", "workflow", "monitor", "MCP task", "teammate", "cloud session"]
         | any(.[]; . == $k);
+      def ambient: .ambient == true or (.type == "monitor"
+        and ((.description // "") | tostring | test("^(live updates for|presence on) artifact ")));
       def items: if type == "array" then .[] | select(type == "object") else empty end;
       if type != "object" or ((has("background_tasks") or has("session_crons")) | not) then "legacy"
       else
         [ ( .background_tasks | items
             | select((.status // "running") as $s | $s == "running" or $s == "pending")
             | select((.type // "") | wakes)
+            | select(ambient | not)
             | "\(.type) \(.id // "?")" ),
           ( .session_crons | items | select(.recurring != true) | "cron \(.id // "?")" ) ]
         | join(", ")
@@ -2884,16 +2900,18 @@ stop_pending_work() {
     work=$(tail -c 4194304 "$TRANSCRIPT_PATH" 2>/dev/null \
       | grep -E '"type":"(queue-operation|tool_use|user)"' 2>/dev/null \
       | jq -Rrn '
+          def result: tostring | contains("<task-notification>") and test("<status>(completed|failed)</status>");
           reduce (inputs | fromjson? | select(type == "object" and .isSidechain != true)) as $r
             ({n: 0, id: ""};
              if $r.type == "user" or ($r.type == "assistant"
                 and ([$r.message.content[]? | select(type == "object" and .type == "tool_use")] | length) > 0)
                then {n: 0, id: ""}
-             elif $r.type == "queue-operation" and $r.operation == "enqueue"
+             elif $r.type == "queue-operation" and $r.operation == "enqueue" and ($r.content // "" | result)
                then {n: (.n + 1),
-                     id: ($r.content // "" | tostring
-                          | [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "prompt")}
-             elif $r.type == "queue-operation" and ($r.operation == "dequeue" or $r.operation == "remove")
+                     id: ($r.content | tostring
+                          | [match("<task-id>([^<]+)</task-id>").captures[0].string] | first // "notification")}
+             elif $r.type == "queue-operation" and ($r.operation == "dequeue"
+                or ($r.operation == "remove" and (($r | has("content") | not) or ($r.content | result))))
                then .n = ([.n - 1, 0] | max)
              else . end)
           | if .n > 0 then "queued \(.id)" else empty end' 2>/dev/null) || work=""
@@ -3117,16 +3135,21 @@ elif [ "$HOOK_EVENT" = "Stop" ]; then
   PRS_JSON=$(capture_git_prs "$ENTRY_PATH" "$SESSION_ID" 2>/dev/null || echo '[]')
   case "$PRS_JSON" in ''|'[]') PRS_JSON='[]' ;; esac
   log "git telemetry: $(echo "$PRS_JSON" | jq -c 'length') PR(s) from $ENTRY_PATH"
-  STEP_COMPLETE_PAYLOAD=$(jq -n --argjson job_id "${JOB_ID:-null}" --argjson step "${STEP_INDEX:-null}" \
-    --arg msg "$OUTPUT_MSG" --arg sid "$SESSION_ID" --argjson prs "$PRS_JSON" \
-    '{job_id:$job_id, step_index:$step, session_id:$sid, status:"success", output_message:$msg}
+  # The closing message and the payload travel on stdin, never as one argument: Linux caps a single
+  # argument at 128 KB (MAX_ARG_STRLEN), and a longer message failed `jq --arg` with E2BIG, which under
+  # set -e ended the hook before step-complete, the final transcript and the artifact drain (whose files
+  # the next job's Stop would then post as its own). jq -R -s reads it back as exactly one string.
+  STEP_COMPLETE_PAYLOAD=$(printf '%s' "$OUTPUT_MSG" | jq -Rs --argjson job_id "${JOB_ID:-null}" \
+    --argjson step "${STEP_INDEX:-null}" --arg sid "$SESSION_ID" --argjson prs "$PRS_JSON" \
+    '{job_id:$job_id, step_index:$step, session_id:$sid, status:"success", output_message:.}
       + (if ($prs|length) > 0 then {prs:$prs} else {} end)')
-  # Retried like the usage POST above — completion must survive a portal blip.
-  curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/step-complete" \
+  # Retried like the usage POST above — completion must survive a portal blip. (--data-binary @- reads the
+  # body into memory before the first attempt, so every retry sends it whole.)
+  printf '%s' "$STEP_COMPLETE_PAYLOAD" | curl -4 -sf -X POST "${PORTAL_URL}/api/jobs/step-complete" \
     -H "Content-Type: application/json" \
     -H "Authorization: Bearer ${AGENT_TOKEN}" \
     -H "X-Agent-Name: ${AGENT_NAME}" \
-    -d "$STEP_COMPLETE_PAYLOAD" --connect-timeout 10 --max-time 90 \
+    --data-binary @- --connect-timeout 10 --max-time 90 \
     --retry 3 --retry-delay 2 --retry-all-errors >/dev/null 2>&1 || true
   log "posted step-complete (job ${JOB_ID:-?} step ${STEP_INDEX:-?} session ${SESSION_ID:-?})"
 fi

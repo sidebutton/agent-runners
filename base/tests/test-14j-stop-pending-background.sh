@@ -15,8 +15,9 @@
 #      checkpoint=1 upload (job session only, the per-box switch honoured);
 #   3. the Stop after the work returned completes exactly as before — once — with output_message taken from
 #      stdin last_assistant_message (the transcript does not hold the closing text yet);
-#   4. what does NOT hold a job: a recurring cron, the ambient kinds (dream, auto-mode scan), an unknown kind,
-#      a finished task, a stale queue entry, a CLI that sends neither field (the old contract, unchanged);
+#   4. what does NOT hold a job: a recurring cron, the ambient kinds (dream, auto-mode scan) and Claude Code's
+#      own artifact watch / presence monitors, an unknown kind, a finished task, a stale queue entry, a CLI
+#      that sends neither field (the old contract, unchanged);
 #   5. SubagentStop and non-job sessions post exactly what they did, and a non-job session is still marked for
 #      session-tidy at every Stop; stop-deferred markers are cleared and pruned; the hook exits 0 on every path;
 #   6. AC5: the whole hook on a 3 MB transcript stays under 5 s.
@@ -120,6 +121,10 @@ queue_op() {  # $1 sid  $2 operation  $3 content ('' = none)  $4 reason ('' = no
      + (if $c != "" then {content:$c} else {} end) + (if $r != "" then {reason:$r} else {} end)' >> "$(tr_path "$1")"
 }
 notif() { printf '<task-notification>\n<task-id>%s</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n<status>completed</status>\n<summary>Agent "slow probe" completed</summary>\n</task-notification>' "$1"; }
+passive_notif() {  # $1 task id  $2 status ('' = none)  $3 summary — a notice the CLI queues passive: it runs no turn
+  local st=""; [ -n "${2:-}" ] && st="<status>$2</status>"$'\n'
+  printf '<task-notification>\n<task-id>%s</task-id>\n%s<summary>%s</summary>\n</task-notification>' "$1" "$st" "$3"
+}
 tool_call() {  # $1 sid — one more tool call and its result in the transcript
   jq -nc --arg s "$1" '{type:"assistant", sessionId:$s, message:{model:"claude-opus-5-5",
       content:[{type:"tool_use", id:"toolu_02", name:"Bash", input:{command:"ls"}}]}},
@@ -294,9 +299,27 @@ queue_op "$SID" enqueue "$(notif b9y3kq2vw)"
 queue_op "$SID" remove "$(notif b9y3kq2vw)" absorbed_mid_turn
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a notification absorbed mid-turn (enqueue, then remove)" "$SID" "DONE"
+# Only a finished task's result holds. The queue also logs entries that run no turn, and holding on one would
+# strand the job with no later Stop: a typed prompt (it may be a local slash command) and the notices the CLI
+# queues passive (2.1.281: a task the user stopped, a resume note, an artifact watch's connection events —
+# none with status completed/failed).
 queue_op "$SID" enqueue "please also run the linters"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "a typed prompt queued while the turn ran (it may be a local slash command)" "$SID" "DONE"
+queue_op "$SID" enqueue "/cost"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "a queued local slash command (/cost runs no model turn, so no later Stop would come)" "$SID" "DONE"
+queue_op "$SID" enqueue "$(passive_notif b7stop001 killed 'Task "dev server" was stopped by the user')"
+queue_op "$SID" enqueue "$(passive_notif s9watch01 '' 'the live connection kept failing and reconnecting has stopped')"
+fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
+expect_completed "passive notices queued (a user's stop, an artifact watch event: no completed/failed status)" "$SID" "DONE"
+queue_op "$SID" enqueue "$(passive_notif s9watch02 '' 'another live session of this conversation is running')"
+tool_call "$SID"                                                  # that notice predates the closing response…
+queue_op "$SID" enqueue "$(notif a1b2c3d4e5f60718)"
+queue_op "$SID" remove "$(passive_notif s9watch02 '' 'another live session of this conversation is running')"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')" 1
-expect_deferred "an operator prompt queued while the turn ran" "$SID" "queued prompt"
+expect_deferred "a result queued while an older passive notice is withdrawn (that remove cancels nothing counted)" \
+  "$SID" "queued a1b2c3d4e5f60718"
 tool_call "$SID"
 fire "$(input Stop "$SID" '[]' '[]' 'DONE')"
 expect_completed "a STALE enqueue (a tool call and its result came after it)" "$SID" "DONE"
@@ -338,6 +361,15 @@ held "a ScheduleWakeup (one-shot cron)" '[]' '[{"id":"8498e328","schedule":"21 2
 free "a RECURRING cron alone (it never drains)" '[]' '[{"id":"c9","schedule":"*/5 * * * *","recurring":true,"prompt":"poll"}]'
 free "the ambient kinds alone (dream, auto-mode scan: they never run a turn)" \
   '[{"id":"d1","type":"dream","status":"running"},{"id":"s1","type":"auto-mode scan","status":"running"}]' '[]'
+# Claude Code's own artifact connections are monitor_ws tasks the Stop input lists as plain `monitor` — persistent
+# and ambient (2.1.281: `live updates for artifact <url> (…)`, `presence on artifact <url>`, both timeout 0).
+ART="https://claude.ai/code/artifact/5f0c2a1e-8d3b-4c7a-9e6f-181a2b3c4d5e"
+WATCH='{"id":"s0k2m4n6p","type":"monitor","status":"running","description":"live updates for artifact '"$ART"' (watching comments)"}'
+PRESENCE='{"id":"s1a3c5e7q","type":"monitor","status":"running","description":"presence on artifact '"$ART"'"}'
+free "an Artifact publish's own watch + presence (listed as monitors, but they run until the session ends)" "[$WATCH,$PRESENCE]" '[]'
+held "…beside a real monitor, the real one still holds the job" \
+  "[$WATCH,{\"id\":\"m7\",\"type\":\"monitor\",\"status\":\"running\",\"server\":\"ci\",\"tool\":\"watch\"}]" '[]' "monitor m7"
+free "an entry the CLI flags ambient (should a later CLI send the flag)" '[{"id":"s9","type":"monitor","status":"running","ambient":true}]' '[]'
 free "an unknown kind (treated as the old behaviour, never a stranded job)" '[{"id":"x1","type":"hologram","status":"running"}]' '[]'
 free "a task listed as finished" '[{"id":"b1","type":"shell","status":"completed"}]' '[]'
 free "malformed fields (background_tasks a string, session_crons an object)" '"soon"' '{"id":"c1"}'
@@ -367,7 +399,7 @@ OTHER="7e7e7e7e-0000-4000-8000-000000000181"
 new_transcript "$OTHER"; : > "$LOG"
 fire "$(input Stop "$OTHER" "$FORK" '[]' 'WAITING')"
 [ "$RC" = 0 ] && [ "$(nposts)" = 0 ] && sentinel "$OTHER" && [ ! -e "$(marker "$OTHER")" ] \
-  && grep -q "session $OTHER != job session $SID — skipping portal posts" "$LOG" && ! grep -q "paused, not finished" "$LOG" \
+  && grep -q "session $OTHER != job session $SID — skipping portal posts" "$LOG" && ! grep -q "deferred step-complete" "$LOG" \
   && ok "a non-job session with work in flight: zero POSTs and still marked stopped, as before (session-tidy keeps closing it)" \
   || bad "a non-job session with pending work changed: rc=$RC posts=$(nposts) sentinel=$(sentinel "$OTHER" && echo yes || echo no)"
 # Marker hygiene: a session's own completing Stop clears its marker even once job-context has moved on, and a
@@ -387,6 +419,18 @@ expect_deferred "SB_CHECKPOINT_INTERVAL_SEC=0" "$SID" "subagent a04a903e0cb03911
 [ -z "$(transcripts)" ] && ok "…and with the checkpoint switch off the deferred Stop uploads no transcript at all" \
   || bad "the deferred Stop ignored SB_CHECKPOINT_INTERVAL_SEC=0: $(transcripts)"
 agent_env
+# A closing message over Linux's 128 KB cap on ONE argument (MAX_ARG_STRLEN): passed to jq as --arg it failed
+# with E2BIG, and under set -e that ended the hook before step-complete, the final transcript and the drain.
+BIG="$TMP/closing-message.txt"
+{ head -c 150000 /dev/zero | tr '\0' 'r'; printf '\n===SB_RESULT=== PASS'; } > "$BIG"
+fire "$(input Stop "$SID" '[]' '[]' 'placeholder' | jq -c --rawfile m "$BIG" '.last_assistant_message = $m')"
+if [ "$RC" = 0 ] && [ "$(usage_final)" = true ] && [ "$(sc_count)" = 1 ] && [ "$(transcripts)" = final ] \
+   && [ "$(jq -j 'select(.path == "/api/jobs/step-complete") | .body | fromjson | .output_message' "$TMP/last.jsonl" \
+          | sha256sum)" = "$(sha256sum < "$BIG")" ]; then
+  ok "a $(wc -c < "$BIG" | tr -d ' ')-byte closing message (over the 128 KB one-argument cap): step-complete carries it whole, then the final transcript"
+else
+  bad "a closing message over 128 KB broke the completing Stop: rc=$RC final=$(usage_final) step-complete=$(sc_count) transcripts=$(transcripts)"
+fi
 
 # ── 6. AC5: the whole hook on a 3 MB transcript ─────────────────────────────────────────────────────
 SID="0f0f0f0f-3333-4000-8000-00000000ac05"
