@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # sb-self-update — the agent fleet's single self-service update path (SCRUM-1380).
 # Installed to /usr/local/bin/sb-self-update by base/08 and run as root via a
-# narrow NOPASSWD sudoers rule scoped to ONLY this wrapper, by the agent_pull_repos
-# ops job (`sudo sb-self-update`). It is the ONE privileged action the fleet has.
+# narrow NOPASSWD sudoers rule scoped to ONLY this wrapper, by the Self Update
+# ops job (`agent_self_update`: `sudo sb-self-update`). It is the ONE privileged action the fleet has.
 # It takes NO arguments: `-h`/`--help` prints usage and exits 0 having done nothing,
 # anything else is rejected with rc 2, and a non-root run refuses with rc 1 — see
 # the gate block below (SCRUM-2029).
@@ -87,7 +87,7 @@ fi
 # Anything else is FAIL-CLOSED (rc 2, nothing fetched or refreshed) rather than
 # ignored: a typo or a stale habit like `--force` must never silently trigger a
 # real fleet update. Audited at the time of writing — the only production caller,
-# the agent_pull_repos ops job, passes no arguments at all.
+# the Self Update ops job (agent_self_update), passes no arguments at all.
 if [ "$#" -ne 0 ]; then
   printf 'sb-self-update: unrecognized argument: %s\n' "$1" >&2
   echo "sb-self-update: this wrapper takes no arguments" >&2

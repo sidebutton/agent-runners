@@ -25,7 +25,7 @@
 #   18-heartbeat.sh    re-registers the agent + swaps in a fresh sb_token
 #   18b-heartbeat-timer / 20-mark-installed  install-lifecycle, not artifacts
 #   01..13, 15..17     OS/toolchain/desktop install + one-time user/workspace setup
-#                      — EXCEPT 09b, 12b and 15b (listed below), see their carve-out notes.
+#                      — EXCEPT 09b, 12b, 15b, 16b and 16c (listed below), see their carve-out notes.
 #
 # CARVE-OUT — 09b-clock.sh is listed despite sitting in the 01..13 range. It installs
 # nothing and sets up no user/workspace: it points /etc/localtime + /etc/timezone at
@@ -64,6 +64,20 @@
 # base/09 writes ~/.claude/settings.json at provision only, so a Claude Code setting
 # that must reach live boxes belongs in that object, never in 09 alone.
 #
+# CARVE-OUT — 16c-agent-browser.sh is listed although 16 (the systemd units) stays
+# provision-only. 16c OWNS chrome.service, split out of 16 for exactly this: the unit
+# carries the browser's start page, and a start page that keeps Chrome busy on a
+# GPU-less box costs every live agent a vCPU (fleet RCA 2026-10-05), so a change to it
+# must reach the fleet. It rewrites the unit only when its text differs and NEVER
+# restarts Chrome; on a refresh it keeps a chrome.service only where one exists (the
+# refresh carries no component flags). It also installs sb-browser-idle.timer, which
+# resets a browser that burns CPU while the agent is idle.
+#
+# CARVE-OUT — 16b-wallpaper.sh: it installs nothing but an image, an in-session applier
+# and an XFCE autostart entry, all idempotent, and re-applies the image in the running
+# session. The image (assets/wallpaper.png) is in the fingerprint, so a new brand image
+# reaches the fleet without a re-provision.
+#
 # NOTE on 13-knowledge-packs.sh: do NOT add it here. The universal "agents" catalog
 # ops pack IS refreshed on a live agent — but by sb_refresh_knowledge_packs (gated on
 # the CATALOG version), NOT as a manifest step (which would wrongly gate the pack on
@@ -77,6 +91,8 @@
 # sb-post-request.sh with the sb-usage-limit-menu.sh driver they start.
 14-claude-stop-hook.sh
 15b-claude-onboarding.sh
+16b-wallpaper.sh
+16c-agent-browser.sh
 18c-git-telemetry-timer.sh
 19c-health-report.sh
 19d-account-registry.sh

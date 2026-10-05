@@ -164,7 +164,9 @@ agent-runners/
 │   ├── 01-preflight.sh … 20-mark-installed.sh   # shared steps (sourced in order)
 │   ├── 06-chrome.sh              # gated on INSTALL_CHROME
 │   ├── 08-sidebutton.sh          # SB server (gated) + installs the sb-self-update wrapper (all agents)
-│   ├── 16-services-prep.sh       # chrome/sidebutton units written conditionally
+│   ├── 16-services-prep.sh       # xvfb/xfce/x11vnc/sidebutton units written conditionally (provision only)
+│   ├── 16b-wallpaper.sh          # the Kadmo desktop wallpaper (also refreshed on live agents)
+│   ├── 16c-agent-browser.sh      # chrome.service (start page https://kadmo.ai) + sb-browser-idle reset (refreshed)
 │   ├── 18b-heartbeat-timer.sh    # recurring online beat when serverless
 │   ├── components/               # per-component install + lifecycle scripts
 │   │   ├── dotnet9/install.sh
@@ -175,7 +177,7 @@ agent-runners/
 │   │   ├── wireguard/{install.sh,sb-wg-connect}
 │   │   ├── rdp-client/{install.sh,sb-rdp-connect}
 │   │   └── sidebutton-extension/{pre,post}-services.sh
-│   ├── assets/                   # wallpaper.png, report-health-snapshot.sh, sb-registry-sync.sh, sb-self-update.sh
+│   ├── assets/                   # wallpaper.png (+ its source wallpaper.html), report-health-snapshot.sh, sb-registry-sync.sh, sb-self-update.sh
 │   ├── tests/                    # pure bash+jq regression guards + run-all.sh runner
 │   └── run.sh                    # orchestrator
 └── variants/

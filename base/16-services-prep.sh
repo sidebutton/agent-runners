@@ -2,7 +2,7 @@
 # Does NOT start anything; the variant pre-services hook gets a chance to
 # write extra config (e.g. Chrome managed policy) before services-start.sh.
 
-step "Step 16/16: Systemd services (xvfb, xfce-session, x11vnc, chrome, sidebutton)"
+step "Step 16/16: Systemd services (xvfb, xfce-session, x11vnc, sidebutton; chrome in 16c)"
 
 cat > /etc/systemd/system/xvfb.service <<'EOF'
 [Unit]
@@ -57,46 +57,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
-# chrome.service — only when the `chrome` component is selected (INSTALL_CHROME).
-# Ordering depends on whether sidebutton.service exists: when the SB server is
-# absent (SKIP_SIDEBUTTON_SERVER=1) drop the After= clause so Chrome doesn't wait
-# on a unit that will never start.
-if [ "${INSTALL_CHROME:-1}" != "1" ]; then
-  rm -f /etc/systemd/system/chrome.service
-  log "chrome.service unit not written (chrome component not selected)"
-else
-  if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
-    CHROME_AFTER='After=xfce-session.service'
-  else
-    CHROME_AFTER='After=xfce-session.service sidebutton.service'
-  fi
-
-  cat > /etc/systemd/system/chrome.service <<EOF
-[Unit]
-Description=Chrome Browser with SideButton Extension
-${CHROME_AFTER}
-Requires=xvfb.service
-
-[Service]
-Type=simple
-User=agent
-Environment=DISPLAY=:10
-ExecStartPre=/bin/bash -c 'rm -f /home/agent/.config/google-chrome/Singleton*'
-ExecStart=/opt/google/chrome/chrome \\
-  --no-first-run \\
-  --disable-session-crashed-bubble \\
-  --disable-infobars \\
-  --noerrdialogs \\
-  --disable-features=InfiniteSessionRestore \\
-  --profile-directory=Default \\
-  https://sidebutton.com
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-fi
+# chrome.service is written by 16c-agent-browser.sh (run right after this step), not here: this step is
+# provision-only, and the unit carries the browser's start page, which must reach live agents through the
+# refresh path (refresh-manifest.txt). 16c keeps the same gate (INSTALL_CHROME) and the same flags.
 
 if [ "${SKIP_SIDEBUTTON_SERVER:-}" = "1" ]; then
   rm -f /etc/systemd/system/sidebutton.service
