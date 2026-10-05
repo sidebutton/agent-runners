@@ -63,7 +63,7 @@ workspace repos (credential helpers are pre-wired), and run `claude` manually.
 | Polkit (RDP auth popups) | `11-polkit` |
 | `~/.agent-env` template + `.bashrc` + **git credential helpers** + `~/workspace` | `12-workspace` |
 | Per-agent secrets fetch | `19-secrets` |
-| Wallpaper | `16b-wallpaper` |
+| Wallpaper (Kadmo; `assets/wallpaper.png`, source `assets/wallpaper.html`) | `16b-wallpaper` (also refreshed on live agents and applied in the running session — see `refresh-manifest.txt`) |
 | **Register + recurring heartbeat** (online) | `18-heartbeat` + **new `sb-heartbeat.timer`** |
 | Install marker | `20-mark-installed` |
 
@@ -89,7 +89,7 @@ separate, role-driven catalog (`plugins.json`) — see §4b**, not components.
 |---|---|---|---|---|
 | `claude-code` | runtime | `components/claude-code/install.sh` (was `07-claude-code`) — **default-on**: installs when selected OR when `AGENT_COMPONENTS` is empty/unset | — | Claude Code (lead — hardcoded in portal) |
 | `claude-code-router` | runtime | **new** — `components/claude-code-router/install.sh`: pinned `@musistudio/claude-code-router` on a loopback proxy `127.0.0.1:3456` + `~/.claude-code-router/config.json` (literal `$VAR` placeholders, env-interpolated at runtime) + `ccr.service` (enabled at install, first-started in `post-services.sh`) + logrotate; routes Claude Code to a configured provider via `~/.agent-env` (see env contract below) | `claude-code` | Router |
-| `chrome` | runtime | `06-chrome` + `chrome.service` | — | Chrome (live) |
+| `chrome` | runtime | `06-chrome` + `chrome.service` (written by `16c-agent-browser`: start page `AGENT_BROWSER_HOME`, default `https://kadmo.ai`; plus `sb-browser-idle.timer`, which restarts or parks a browser that burns CPU while the agent is idle — refreshed on live agents) | — | Chrome (live) |
 | `sidebutton-server` | runtime | `08-sidebutton` + `sidebutton.service` + `15-claude-mcp` + `14-claude-stop-hook` + `19c-health-report` + server start (`19b`) | — | SB server (live) — **unlocks dispatch + capabilities** |
 | `sidebutton-extension` | runtime | ext `pre-services` (Chrome managed-policy force-install) + `post-services` (browser_connected wait) | `chrome`, `sidebutton-server` | Extension (live) |
 | `knowledge-packs` | packs | `13-knowledge-packs` + `19d-account-registry` (+ update timer) — **`required: true`** (globally required, see below) | `sidebutton-server` | Knowledge packs |

@@ -74,7 +74,8 @@ fi
 . "$BASE_DIR/14-claude-stop-hook.sh"
 . "$BASE_DIR/15-claude-mcp.sh"       # gated on SKIP_SIDEBUTTON_SERVER
 . "$BASE_DIR/15b-claude-onboarding.sh"
-. "$BASE_DIR/16-services-prep.sh"    # chrome.service gated on INSTALL_CHROME
+. "$BASE_DIR/16-services-prep.sh"    # xvfb, xfce-session, x11vnc, sidebutton units
+. "$BASE_DIR/16c-agent-browser.sh"   # chrome.service (gated on INSTALL_CHROME, start page) + idle reset
 . "$BASE_DIR/16b-wallpaper.sh"
 
 # ── pre-services phase ──────────────────────────────────────────────────────

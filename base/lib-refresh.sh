@@ -10,7 +10,7 @@
 # agent" so the fleet self-service path and the operator break-glass path can
 # never drift:
 #   - base/assets/sb-self-update.sh  (root wrapper, run fleet-wide by the
-#     agent_pull_repos ops job via `sudo sb-self-update`)
+#     Self Update ops job, agent_self_update, via `sudo sb-self-update`)
 #   - the-assistant agent-redeploy.sh §4/§4b  (operator manual-SSH break-glass)
 # Both download agent-runners@<ref> to a tmp tree, then source THIS file from that
 # tree and call sb_refresh_base_artifacts "<tree>/base" "<ref>".
@@ -57,14 +57,15 @@ sb_base_artifacts_fingerprint() {
     # the health reporter installed by 19c (report-health-snapshot.sh — an
     # asset that 19c copies to /opt, so a reporter-only edit leaves 19c's own bytes
     # unchanged and would NOT flip the fingerprint; SCRUM-1626), and the registry
-    # sync helper installed by 19d (same trap; KAN-150). Listing them here
-    # makes a wrapper/reconcile/reporter/registry-only change flip the fingerprint
+    # sync helper installed by 19d (same trap; KAN-150), and the desktop image 16b
+    # copies (a new wallpaper alone changes no step's bytes). Listing them here
+    # makes a wrapper/reconcile/reporter/registry/image-only change flip the fingerprint
     # (else the change-gate would skip the refresh and the fleet would keep the old
     # artifact — the exact drift SCRUM-1380 exists to prevent).
     for f in assets/claude-hooks.json assets/sb-self-update.sh \
              assets/sb-config-place.sh assets/sb-config-reconcile.sh \
              assets/report-health-snapshot.sh assets/sb-reboot.sh \
-             assets/sb-registry-sync.sh \
+             assets/sb-registry-sync.sh assets/wallpaper.png \
              lib-refresh.sh refresh-manifest.txt; do
       [ -f "$base/$f" ] && cat "$base/$f"
     done

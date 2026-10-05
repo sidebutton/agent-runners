@@ -1,8 +1,8 @@
-# 16b-wallpaper.sh — SideButton-branded desktop wallpaper.
+# 16b-wallpaper.sh — the Kadmo-branded desktop wallpaper.
 #
-# The image ships bundled in agent-runners (base/assets/wallpaper.png) and is
-# copied into place here — no per-install network fetch. If the bundled asset is
-# somehow absent (partial tarball), fall back to downloading it from the portal.
+# The image ships bundled in agent-runners (base/assets/wallpaper.png; its source is
+# base/assets/wallpaper.html) and is copied into place here — no per-install network fetch. If the
+# bundled asset is somehow absent (partial tarball), fall back to downloading it from the portal.
 #
 # xfdesktop assigns the backdrop's monitor name dynamically (it varies on a
 # headless Xvfb display), so rather than hard-code a name we drop an XFCE
@@ -10,16 +10,28 @@
 # image from *inside* the session — where DISPLAY and the session D-Bus are
 # already correct. It runs when 17-services-start brings the session up (so the
 # brand lands during install) and again on every reboot / RDP relogin.
+#
+# REFRESH-SAFE (listed in refresh-manifest.txt): it only copies the image and rewrites the applier and the
+# autostart entry, all idempotent, so a new image reaches live agents through `sudo sb-self-update`. On a
+# live box the XFCE session is already up and its autostart has run, so after the copy the applier is run
+# once more INSIDE that session — its DISPLAY and D-Bus address read from the running xfce4-session — so
+# the desktop changes without a relogin. At provision there is no session yet and autostart does it.
+# The installed names (sidebutton-wallpaper.png, sidebutton-set-wallpaper.sh, the autostart entry) stay as
+# they were so no live box is left with a stale copy under an old name.
 
-step "Step 16b/16: SideButton desktop wallpaper"
+step "Step 16b/16: Kadmo desktop wallpaper"
 
 WALLPAPER_SRC="${BASE_DIR}/assets/wallpaper.png"
 WALLPAPER_DEST="/usr/share/backgrounds/sidebutton-wallpaper.png"
 
 mkdir -p "$(dirname "$WALLPAPER_DEST")"
 if [ -f "$WALLPAPER_SRC" ]; then
-  install -m 0644 "$WALLPAPER_SRC" "$WALLPAPER_DEST"
-  log "wallpaper copied from bundled asset"
+  if [ -f "$WALLPAPER_DEST" ] && cmp -s "$WALLPAPER_SRC" "$WALLPAPER_DEST"; then
+    log "wallpaper unchanged"
+  else
+    install -m 0644 "$WALLPAPER_SRC" "$WALLPAPER_DEST"
+    log "wallpaper copied from bundled asset"
+  fi
 else
   PORTAL_URL="${PORTAL_URL:-https://sidebutton.com}"
   log "bundled wallpaper missing — downloading from ${PORTAL_URL}/sidebutton-wallpaper.png"
@@ -31,7 +43,7 @@ if [ -f "$WALLPAPER_DEST" ]; then
   # In-session applier — runs from XFCE autostart, so DISPLAY/D-Bus are correct.
   cat > /usr/local/bin/sidebutton-set-wallpaper.sh <<'WPEOF'
 #!/usr/bin/env bash
-# Apply the SideButton wallpaper to every XFCE backdrop. Idempotent; waits for
+# Apply the agent desktop wallpaper to every XFCE backdrop. Idempotent; waits for
 # xfdesktop to register its backdrop properties (up to ~15s) before setting.
 IMG="/usr/share/backgrounds/sidebutton-wallpaper.png"
 [ -f "$IMG" ] || exit 0
@@ -64,13 +76,26 @@ WPEOF
   cat > "${AGENT_HOME}/.config/autostart/sidebutton-wallpaper.desktop" <<'DESKTOPEOF'
 [Desktop Entry]
 Type=Application
-Name=SideButton Wallpaper
-Comment=Apply the SideButton-branded desktop background
+Name=Agent Wallpaper
+Comment=Apply the Kadmo-branded desktop background
 Exec=/usr/local/bin/sidebutton-set-wallpaper.sh
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
 DESKTOPEOF
   chown "${AGENT_USER}:${AGENT_USER}" "${AGENT_HOME}/.config/autostart/sidebutton-wallpaper.desktop"
+
+  # A live box: apply now, inside the running session (see the header).
+  _xfce_pid="$(pgrep -u "${AGENT_USER}" -x xfce4-session 2>/dev/null | head -n 1 || true)"
+  if [ -n "$_xfce_pid" ] && [ -r "/proc/${_xfce_pid}/environ" ]; then
+    _xfce_bus="$(tr '\0' '\n' < "/proc/${_xfce_pid}/environ" | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p' | head -n 1 || true)"
+    _xfce_display="$(tr '\0' '\n' < "/proc/${_xfce_pid}/environ" | sed -n 's/^DISPLAY=//p' | head -n 1 || true)"
+    if [ -n "$_xfce_bus" ]; then
+      timeout 30 runuser -u "${AGENT_USER}" -- env HOME="${AGENT_HOME}" DISPLAY="${_xfce_display:-:10}" \
+        DBUS_SESSION_BUS_ADDRESS="$_xfce_bus" /usr/local/bin/sidebutton-set-wallpaper.sh >/dev/null 2>&1 \
+        && log "wallpaper applied in the running session" \
+        || log "WARN: wallpaper not applied in the running session (it applies at the next login)"
+    fi
+  fi
 
   log "wallpaper installed: ${WALLPAPER_DEST} (applied in-session via autostart)"
 fi
