@@ -107,6 +107,43 @@ else
   bad "components.sh aborts under set -euo pipefail (empty set)"
 fi
 
+# 10. Idempotency guard, driven: install.sh sourced with npm as an argv recorder and
+#     a private PATH. 09b's marked reset-time wrapper (DEV-284) answers `command -v
+#     claude`; only one with a working claude behind it counts as installed.
+WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
+SYSBIN="$WORK/sysbin"; mkdir -p "$SYSBIN"
+for t in bash sh sed awk head grep cat env; do
+  p="$(command -v "$t" 2>/dev/null)" && ln -s "$p" "$SYSBIN/$t"
+done
+printf '#!/bin/sh\necho "$*" >> "%s/npm.calls"\n' "$WORK" > "$SYSBIN/npm"; chmod 0755 "$SYSBIN/npm"
+mk_wrapper() {  # a stand-in for 09b's wrapper: the marker, then exec the next claude
+  printf '#!/bin/bash\n# sidebutton-claude-clock-wrapper (DEV-284) - test\n[ -x "%s/real/claude" ] && exec "%s/real/claude" "$@"\nexit 127\n' "$WORK" "$WORK" > "$WORK/local/claude"
+  chmod 0755 "$WORK/local/claude"
+}
+drive() {  # drive <case> — prints the npm calls (empty = install skipped)
+  : > "$WORK/npm.calls"
+  ( set -euo pipefail; export PATH="$WORK/local:$WORK/real:$SYSBIN" BASE_DIR="$ROOT/base"
+    step() { :; }; log() { :; }
+    . "$INSTALL_SH" ) >/dev/null 2>&1 || echo "rc=$?"
+  cat "$WORK/npm.calls"
+}
+mkdir -p "$WORK/local" "$WORK/real"
+printf '#!/bin/sh\necho "2.1.292 (Claude Code)"\n' > "$WORK/real/claude"; chmod 0755 "$WORK/real/claude"
+[ -z "$(drive)" ] && ok "install.sh: a real claude on PATH → no npm install" || bad "install.sh reinstalled over a real claude: $(drive)"
+mk_wrapper
+[ -z "$(drive)" ] && ok "install.sh: 09b wrapper in front of a real claude → no npm install" \
+  || bad "install.sh reinstalled behind a working wrapper: $(drive)"
+rm -f "$WORK/real/claude"
+case "$(drive)" in
+  "install -g @anthropic-ai/claude-code@"*) ok "install.sh: 09b wrapper with no claude behind it → npm install -g runs" ;;
+  *) bad "install.sh skipped the install behind an orphan wrapper: '$(drive)'" ;;
+esac
+rm -f "$WORK/local/claude"
+case "$(drive)" in
+  "install -g @anthropic-ai/claude-code@"*) ok "install.sh: no claude at all → npm install -g runs" ;;
+  *) bad "install.sh did not install with no claude: '$(drive)'" ;;
+esac
+
 if [ "$fail" -ne 0 ]; then
   echo "TEST FAILED"
   exit 1

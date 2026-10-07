@@ -15,7 +15,14 @@
 # sb-self-update (lib-refresh.sh sb_refresh_claude_code).
 
 step "Step 7/16: Claude Code CLI"
-if ! command -v claude >/dev/null 2>&1; then
+# 09b's reset-time wrapper (/usr/local/bin/claude, marked, DEV-284) answers
+# `command -v claude` but only execs the real claude behind it. A wrapper that has
+# nothing behind it (npm's claude gone) does not count as installed: 09b, which
+# runs after this, would remove it and leave the box with no Claude Code.
+_cc_bin="$(command -v claude 2>/dev/null || true)"
+if [ -z "$_cc_bin" ] \
+   || { grep -qF 'sidebutton-claude-clock-wrapper' < <(head -c 4096 "$_cc_bin" 2>/dev/null) \
+        && ! "$_cc_bin" --version >/dev/null 2>&1; }; then
   CLAUDE_CODE_WANT="$(sed -e 's/#.*$//' "${BASE_DIR:-}/components/claude-code/version" 2>/dev/null | awk 'NF {print $1; exit}' || true)"
   npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_WANT:-latest}" >/dev/null
 fi
