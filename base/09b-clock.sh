@@ -122,9 +122,19 @@ fi
 # --preload file would stop claude from starting), the shim swallows its own errors
 # and acts only inside Claude Code, and it removes itself from BUN_OPTIONS so no
 # bun a session runs (bun test …) inherits it.
+# Overridable only so base/tests/test-09b-clock.sh can sandbox the writes. Both
+# land in a sed replacement and the wrapper's text, so they must be plain absolute
+# paths with the default basenames (the shim's self-strip matches its own name).
 SB_CLAUDE_SHIM="${SB_CLAUDE_SHIM:-/usr/local/lib/sidebutton/claude-clock-24h.js}"
 SB_CLAUDE_WRAPPER="${SB_CLAUDE_WRAPPER:-/usr/local/bin/claude}"
-SB_CLAUDE_MARK="sidebutton-claude-clock-wrapper (DEV-284)"
+SB_CLAUDE_PATH_RE='^/[A-Za-z0-9._/-]+$'
+# The ownership marker. Keep it stable: a wrapper without it is "not ours" and is
+# never rewritten or removed again (components/claude-code/install.sh matches it too).
+SB_CLAUDE_MARK="sidebutton-claude-clock-wrapper"
+
+# _clock_ours <file> — 0 when <file> carries our marker. Reads only its head: with
+# an npm prefix of /usr/local the path is npm's link to the ~250 MB claude.exe.
+_clock_ours() { grep -qF "$SB_CLAUDE_MARK" < <(head -c 4096 "$1" 2>/dev/null); }
 
 # _clock_put <dest> <mode> — stdin to <dest>, only when the bytes differ.
 _clock_put() {
@@ -149,7 +159,10 @@ _clock_real_claude() {
   return 1
 }
 
-if [ -e "$SB_CLAUDE_WRAPPER" ] && ! grep -qF "$SB_CLAUDE_MARK" "$SB_CLAUDE_WRAPPER" 2>/dev/null; then
+if ! [[ "$SB_CLAUDE_SHIM" =~ $SB_CLAUDE_PATH_RE ]] || [ "${SB_CLAUDE_SHIM##*/}" != claude-clock-24h.js ] \
+   || ! [[ "$SB_CLAUDE_WRAPPER" =~ $SB_CLAUDE_PATH_RE ]] || [ "${SB_CLAUDE_WRAPPER##*/}" != claude ]; then
+  log "WARN: unsafe SB_CLAUDE_SHIM / SB_CLAUDE_WRAPPER — Claude Code reset times stay 12h"
+elif [ -e "$SB_CLAUDE_WRAPPER" ] && ! _clock_ours "$SB_CLAUDE_WRAPPER"; then
   log "WARN: ${SB_CLAUDE_WRAPPER} exists and is not ours — Claude Code reset times stay 12h"
 elif ! _clock_real_claude; then
   if [ -e "$SB_CLAUDE_WRAPPER" ]; then
@@ -198,7 +211,7 @@ SBCLOCKSHIM
 then
   if sed "s|@SB_CLAUDE_SHIM@|${SB_CLAUDE_SHIM}|; s|@SB_CLAUDE_MARK@|${SB_CLAUDE_MARK}|" <<'SBCLOCKWRAP' | _clock_put "$SB_CLAUDE_WRAPPER" 0755
 #!/bin/bash
-# @SB_CLAUDE_MARK@ — installed by agent-runners base/09b-clock.sh; a refresh
+# @SB_CLAUDE_MARK@ (DEV-284) — installed by agent-runners base/09b-clock.sh; a refresh
 # rewrites it. Runs the real Claude Code (the next `claude` on PATH) with the
 # 24h reset-time shim preloaded; without a readable shim it is a plain exec.
 shim="@SB_CLAUDE_SHIM@"

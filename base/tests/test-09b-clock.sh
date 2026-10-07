@@ -34,7 +34,9 @@
 #         execs the next claude on PATH with --preload=<shim> prepended to
 #         BUN_OPTIONS (none when the shim is unreadable); no real claude => no
 #         wrapper (it would satisfy `command -v claude`), and ours is removed; a
-#         foreign /usr/local/bin/claude is never touched; a re-run rewrites nothing
+#         foreign /usr/local/bin/claude is never touched; a re-run rewrites nothing;
+#         an SB_CLAUDE_SHIM / SB_CLAUDE_WRAPPER override that is not a plain
+#         absolute path with the default basename writes nothing (WARN)
 #   AC9 — the shim, run on Claude Code 2.1.292's reset formatter (copied verbatim):
 #         timeFormat 24-hour gives "Oct 10, 02:00 (Europe/Berlin)" and "HH:MM";
 #         auto, another locale and a non-claude process are untouched; it strips
@@ -410,6 +412,20 @@ new_box unwritable-lib
 rc="$(run_step "SB_CLAUDE_SHIM=$BOX/etc/timezone/x/claude-clock-24h.js")"
 [ "$rc" = 0 ] && [ ! -e "$BOX/bin/claude" ] && grep -q "WARN: could not write .*claude-clock-24h.js" "$BOX/step.log" \
   && ok "AC8 shim cannot be written: WARN, no wrapper, exit 0" || bad "AC8 unwritable shim dir: rc=$rc"
+
+# The overrides reach a sed replacement and the wrapper's text, and the refresh
+# sources ~/.agent-env before the step: only plain paths with the default basenames.
+for kv in "SB_CLAUDE_SHIM=WORKBOX/lib/a&b/claude-clock-24h.js" "SB_CLAUDE_SHIM=WORKBOX/lib/x\"\$(id)/claude-clock-24h.js" \
+          "SB_CLAUDE_SHIM=WORKBOX/lib/other.js" "SB_CLAUDE_WRAPPER=WORKBOX/bin/sudoers" "SB_CLAUDE_WRAPPER=bin/claude"; do
+  n_unsafe=$(( ${n_unsafe:-0} + 1 )); new_box "unsafe$n_unsafe"
+  rc="$(run_step "${kv//WORKBOX/$BOX}")"
+  if [ "$rc" = 0 ] && [ -z "$(ls -A "$BOX/bin")" ] && [ ! -e "$BOX/lib" ] && grep -q "WARN: unsafe SB_CLAUDE_SHIM" "$BOX/step.log" \
+     && [ "$(jq -r .timeFormat "$(settings)")" = 24-hour ]; then
+    ok "AC8 unsafe override ${kv%%=*}=…${kv##*/}: WARN, nothing written, exit 0"
+  else
+    bad "AC8 unsafe override $kv: rc=$rc bin=$(ls -A "$BOX/bin") log=$(tr '\n' '|' < "$BOX/step.log")"
+  fi
+done
 
 # ── AC9: the shim on Claude Code's own reset formatter ───────────────────────
 CFG="$WORK/cfg"; mkdir -p "$CFG/24" "$CFG/auto" "$CFG/broken"
