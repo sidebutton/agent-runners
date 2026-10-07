@@ -21,8 +21,18 @@
 #   * "timeFormat": "24-hour" merged into ~/.claude/settings.json, every other
 #     key kept. 09 writes that file at provision only and the refresh re-merges
 #     only .hooks, so this step is what reaches the fleet.
-#   Claude Code (2.1.281) hardcodes en-US 12h for its usage-limit lines ("resets
-#   7:40pm (Europe/Berlin)") and reads no setting there — only their zone follows.
+#   * Claude Code's usage-limit and reset times in 24h (DEV-284). Its one reset
+#     formatter (2.1.281 … 2.1.292) hardcodes toLocale{,Time}String("en-US",
+#     {hour12: true}) and reads no setting or locale, so the footer said "done 13:08"
+#     while /usage said "Resets 1:20pm" and the limit notice "resets Oct 10, 2am".
+#     claude.exe runs Bun bytecode, so its text cannot be patched; Bun does honour
+#     BUN_OPTIONS=--preload. /usr/local/bin/claude (ahead of npm's /usr/bin/claude
+#     on every PATH) execs the real claude with a small preload that, while
+#     settings.json says 24-hour, turns exactly that call shape into the footer's
+#     h23 clock ("resets Oct 10, 02:00 (Europe/Berlin)", "Resets 13:20"). The
+#     bundle has no other hour12:true call; everything else passes through. Once
+#     upstream honours timeFormat there, the call shape disappears and the preload
+#     matches nothing.
 #
 # ORDER: after 09 (settings.json exists) and before 16/17 start the desktop
 # session, Chrome and (19b) the SideButton server, so a new VM starts all of them
@@ -101,4 +111,114 @@ elif jq '.timeFormat = "24-hour"' "$CLAUDE_SETTINGS" > "${CLAUDE_SETTINGS}.tmp" 
 else
   rm -f "${CLAUDE_SETTINGS}.tmp" 2>/dev/null || true
   log "WARN: could not set timeFormat in ${CLAUDE_SETTINGS} — file left unchanged"
+fi
+
+# The reset-time shim (see WHY/WHAT). Two root-owned files, each written only when
+# its bytes differ (tmp + mv). The wrapper exists only while a real claude does: a
+# wrapper alone would answer `command -v claude`, which gates the Claude Code
+# install (components/claude-code/install.sh) and 19i. A /usr/local/bin/claude that
+# is not ours (no marker: e.g. an npm prefix of /usr/local) is never touched.
+# Failure modes stay harmless: the wrapper preloads only a readable shim (a missing
+# --preload file would stop claude from starting), the shim swallows its own errors
+# and acts only inside Claude Code, and it removes itself from BUN_OPTIONS so no
+# bun a session runs (bun test …) inherits it.
+SB_CLAUDE_SHIM="${SB_CLAUDE_SHIM:-/usr/local/lib/sidebutton/claude-clock-24h.js}"
+SB_CLAUDE_WRAPPER="${SB_CLAUDE_WRAPPER:-/usr/local/bin/claude}"
+SB_CLAUDE_MARK="sidebutton-claude-clock-wrapper (DEV-284)"
+
+# _clock_put <dest> <mode> — stdin to <dest>, only when the bytes differ.
+_clock_put() {
+  local dest="$1" mode="$2" tmp
+  tmp="$(mktemp "${dest}.XXXXXX" 2>/dev/null)" || return 1
+  if ! cat > "$tmp" || ! chmod "$mode" "$tmp"; then rm -f "$tmp"; return 1; fi
+  if cmp -s "$tmp" "$dest"; then rm -f "$tmp"; return 0; fi
+  mv -f "$tmp" "$dest" 2>/dev/null || { rm -f "$tmp"; return 1; }
+}
+
+# _clock_real_claude — 0 when some `claude` on PATH is not our wrapper.
+_clock_real_claude() {
+  local d c self
+  self="$(readlink -f "$SB_CLAUDE_WRAPPER" 2>/dev/null)"
+  local IFS=:
+  for d in $PATH; do
+    c="${d:-.}/claude"
+    [ -f "$c" ] && [ -x "$c" ] || continue
+    [ -n "$self" ] && [ "$(readlink -f "$c")" = "$self" ] && continue
+    return 0
+  done
+  return 1
+}
+
+if [ -e "$SB_CLAUDE_WRAPPER" ] && ! grep -qF "$SB_CLAUDE_MARK" "$SB_CLAUDE_WRAPPER" 2>/dev/null; then
+  log "WARN: ${SB_CLAUDE_WRAPPER} exists and is not ours — Claude Code reset times stay 12h"
+elif ! _clock_real_claude; then
+  if [ -e "$SB_CLAUDE_WRAPPER" ]; then
+    rm -f "$SB_CLAUDE_WRAPPER" 2>/dev/null && log "no Claude Code installed — reset-time wrapper removed" \
+      || log "WARN: could not remove ${SB_CLAUDE_WRAPPER} (no Claude Code behind it)"
+  else
+    log "no Claude Code installed — reset-time shim not installed"
+  fi
+elif mkdir -p "$(dirname "$SB_CLAUDE_SHIM")" 2>/dev/null && _clock_put "$SB_CLAUDE_SHIM" 0644 <<'SBCLOCKSHIM'
+// Installed by agent-runners base/09b-clock.sh (DEV-284); a refresh rewrites it.
+// Preloaded into Claude Code by /usr/local/bin/claude (BUN_OPTIONS=--preload).
+// Claude Code formats every usage-limit / reset time with toLocaleString or
+// toLocaleTimeString("en-US", {hour12: true}) and reads no setting there. While
+// settings.json has timeFormat 24-hour, that call shape gets the turn footer's h23
+// clock instead: "Oct 10, 2am" -> "Oct 10, 02:00", "1:20pm" -> "13:20". Any other
+// call passes through. A throw here would stop claude from starting, so any
+// surprise leaves Claude Code as shipped.
+(() => {
+  try {
+    const env = process.env;
+    if (env.BUN_OPTIONS) {
+      const rest = env.BUN_OPTIONS.split(/\s+/)
+        .filter((a) => a && !/^--preload=\S*\/claude-clock-24h\.js$/.test(a)).join(" ");
+      if (rest) env.BUN_OPTIONS = rest; else delete env.BUN_OPTIONS;
+    }
+    if (!/\/claude(\.exe)?$/.test(process.execPath || "")) return;
+    const path = require("path");
+    const dir = env.CLAUDE_CONFIG_DIR || path.join(require("os").homedir(), ".claude");
+    const tf = JSON.parse(require("fs").readFileSync(path.join(dir, "settings.json"), "utf8")).timeFormat;
+    if (tf !== "24-hour" && tf !== "24-hour-utc") return;
+    for (const name of ["toLocaleString", "toLocaleTimeString"]) {
+      const orig = Date.prototype[name];
+      if (typeof orig !== "function") continue;
+      Date.prototype[name] = function (locales, options) {
+        if (locales === "en-US" && options && options.hour12 === true && options.hour !== undefined) {
+          const o = { ...options, hourCycle: "h23", hour: "2-digit", minute: options.minute || "2-digit" };
+          delete o.hour12;
+          try { return orig.call(this, locales, o); } catch {}
+        }
+        return orig.apply(this, arguments);
+      };
+    }
+  } catch {}
+})();
+SBCLOCKSHIM
+then
+  if sed "s|@SB_CLAUDE_SHIM@|${SB_CLAUDE_SHIM}|; s|@SB_CLAUDE_MARK@|${SB_CLAUDE_MARK}|" <<'SBCLOCKWRAP' | _clock_put "$SB_CLAUDE_WRAPPER" 0755
+#!/bin/bash
+# @SB_CLAUDE_MARK@ — installed by agent-runners base/09b-clock.sh; a refresh
+# rewrites it. Runs the real Claude Code (the next `claude` on PATH) with the
+# 24h reset-time shim preloaded; without a readable shim it is a plain exec.
+shim="@SB_CLAUDE_SHIM@"
+self="$(readlink -f "$0")"
+IFS=: read -ra dirs <<< "$PATH"
+for d in "${dirs[@]}"; do
+  c="${d:-.}/claude"
+  [ -f "$c" ] && [ -x "$c" ] || continue
+  [ "$(readlink -f "$c")" = "$self" ] && continue
+  [ -r "$shim" ] && export BUN_OPTIONS="--preload=${shim}${BUN_OPTIONS:+ $BUN_OPTIONS}"
+  exec -a claude "$c" "$@"
+done
+echo "claude: Claude Code is not installed (only ${self} is on PATH)" >&2
+exit 127
+SBCLOCKWRAP
+  then
+    log "Claude Code reset times: 24h shim at ${SB_CLAUDE_SHIM}, wrapper at ${SB_CLAUDE_WRAPPER}"
+  else
+    log "WARN: could not write ${SB_CLAUDE_WRAPPER} — Claude Code reset times stay 12h"
+  fi
+else
+  log "WARN: could not write ${SB_CLAUDE_SHIM} — Claude Code reset times stay 12h"
 fi

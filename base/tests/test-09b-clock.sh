@@ -29,9 +29,21 @@
 #         empty JSON, no settings.json, a failing timedatectl + ln, a directory at
 #         /etc/localtime all exit 0 and write nothing; an unwritable /etc/timezone
 #         WARNs about that file only
+#   AC8 — Claude Code's reset times (DEV-284): with a real claude on PATH the step
+#         writes the shim and a marked /usr/local/bin/claude wrapper; the wrapper
+#         execs the next claude on PATH with --preload=<shim> prepended to
+#         BUN_OPTIONS (none when the shim is unreadable); no real claude => no
+#         wrapper (it would satisfy `command -v claude`), and ours is removed; a
+#         foreign /usr/local/bin/claude is never touched; a re-run rewrites nothing
+#   AC9 — the shim, run on Claude Code 2.1.292's reset formatter (copied verbatim):
+#         timeFormat 24-hour gives "Oct 10, 02:00 (Europe/Berlin)" and "HH:MM";
+#         auto, another locale and a non-claude process are untouched; it strips
+#         itself from BUN_OPTIONS and never throws on a broken settings.json.
+#         Under node always; under the box's real claude.exe (Bun) when present
 #
-# Pure bash + jq. The zone paths go through the step's SB_ZONEINFO / SB_LOCALTIME /
-# SB_TIMEZONE_FILE seams; timedatectl is a shell-function stub, never the real one.
+# Pure bash + jq (+ node for AC9). The zone paths go through the step's SB_ZONEINFO /
+# SB_LOCALTIME / SB_TIMEZONE_FILE seams, the shim and wrapper through SB_CLAUDE_SHIM /
+# SB_CLAUDE_WRAPPER; timedatectl is a shell-function stub, never the real one.
 # Run: bash base/tests/test-09b-clock.sh
 set -uo pipefail
 
@@ -82,14 +94,27 @@ ln -s Zurich "$ZI/Europe/Busingen"   # a tzdata link, as on Ubuntu
 printf 'not a zone\n' > "$WORK/secret"   # what "../secret" would resolve to
 printf '#\tAllowed leap seconds (a dotless data file, not TZif)\n' > "$ZI/leapseconds"
 
-# System dirs only, never the caller's PATH (same reason as test-15b).
-SANDBOX_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# System dirs only, never the caller's PATH (same reason as test-15b) — and with no
+# `claude`: an agent VM has a real one in /usr/bin, so every system executable but
+# claude is farmed into one dir (as test-19i does). Each box brings its own claude.
+NOCLAUDE="$WORK/.sysbin"; mkdir -p "$NOCLAUDE"
+for d in /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+  [ -d "$d" ] || continue
+  for f in "$d"/*; do
+    b="$(basename "$f")"
+    [ "$b" = claude ] || [ -e "$NOCLAUDE/$b" ] || ln -s "$f" "$NOCLAUDE/$b" 2>/dev/null || true
+  done
+done
 
 # new_box <name> [settings-json|-] — a fresh box on the image default (Etc/UTC)
 # with a settings.json shaped like base/09's; "-" means no settings.json at all.
+# $BOX/bin stands in for /usr/local/bin and $BOX/npm for npm's /usr/bin, whose
+# `claude` stub prints how it was called (no claude: rm it).
 new_box() {
   BOX="$WORK/$1"
-  mkdir -p "$BOX/etc" "$BOX/home/.claude"
+  mkdir -p "$BOX/etc" "$BOX/home/.claude" "$BOX/bin" "$BOX/npm"
+  printf '#!/bin/bash\nprintf "argv0=%%s BUN_OPTIONS=[%%s] args=%%s\\n" "$0" "${BUN_OPTIONS-}" "$*"\n' > "$BOX/npm/claude"
+  chmod 0755 "$BOX/npm/claude"
   ln -s "$ZI/Etc/UTC" "$BOX/etc/localtime"
   echo "Etc/UTC" > "$BOX/etc/timezone"
   : > "$BOX/timedatectl.calls"
@@ -116,9 +141,10 @@ run_step() {
   (
     set -euo pipefail
     unset AGENT_TIMEZONE
-    export AGENT_HOME="$BOX/home" AGENT_USER="$(id -un)" PATH="$SANDBOX_PATH" \
+    export AGENT_HOME="$BOX/home" AGENT_USER="$(id -un)" PATH="$BOX/bin:$BOX/npm:$NOCLAUDE" \
            SB_ZONEINFO="$ZI" SB_LOCALTIME="$BOX/etc/localtime" \
-           SB_TIMEZONE_FILE="$BOX/etc/timezone" TD_MODE=ok
+           SB_TIMEZONE_FILE="$BOX/etc/timezone" TD_MODE=ok \
+           SB_CLAUDE_SHIM="$BOX/lib/claude-clock-24h.js" SB_CLAUDE_WRAPPER="$BOX/bin/claude"
     for kv in "$@"; do export "$kv"; done
     step()  { :; }
     log()   { printf '%s\n' "$*" >> "$BOX/step.log"; }
@@ -320,6 +346,129 @@ if [ "$rc" = 0 ] && [ ! -s "$(settings)" ] && [ ! -e "$(settings).tmp" ] \
   ok "AC7 empty settings.json: WARN (no false 'set'), file untouched, no .tmp, exit 0"
 else
   bad "AC7 empty settings.json: rc=$rc (false success, file changed, .tmp left or no WARN)"
+fi
+
+# ── AC8: the reset-time wrapper + shim (DEV-284) ─────────────────────────────
+new_box shim
+rc="$(run_step)"
+W="$BOX/bin/claude"; SHIM="$BOX/lib/claude-clock-24h.js"
+if [ "$rc" = 0 ] && [ -x "$W" ] && [ -f "$SHIM" ] && grep -qF 'sidebutton-claude-clock-wrapper (DEV-284)' "$W" \
+   && [ "$(stat -c %a "$W")" = 755 ] && [ "$(stat -c %a "$SHIM")" = 644 ] && grep -qF "shim=\"$SHIM\"" "$W" \
+   && bash -n "$W" && grep -q "24h shim at" "$BOX/step.log"; then
+  ok "AC8 real claude on PATH: shim (0644) + marked wrapper (0755) pointing at it"
+else
+  bad "AC8 install: rc=$rc wrapper=$(ls -l "$W" 2>&1) shim=$(ls -l "$SHIM" 2>&1) log=$(tr '\n' '|' < "$BOX/step.log")"
+fi
+out="$(PATH="$BOX/bin:$BOX/npm:$NOCLAUDE" BUN_OPTIONS="--smol" claude -p 'a b' 2>&1)"
+[ "$out" = "argv0=$BOX/npm/claude BUN_OPTIONS=[--preload=$SHIM --smol] args=-p a b" ] \
+  && ok "AC8 wrapper execs the next claude with --preload=<shim> prepended, args intact" \
+  || bad "AC8 wrapper run: '$out'"
+out="$(PATH="$BOX/bin:$BOX/npm:$NOCLAUDE" env -u BUN_OPTIONS claude --version 2>&1)"
+[ "$out" = "argv0=$BOX/npm/claude BUN_OPTIONS=[--preload=$SHIM] args=--version" ] \
+  && ok "AC8 wrapper with no BUN_OPTIONS of its own sets just the preload" || bad "AC8 wrapper, no BUN_OPTIONS: '$out'"
+chmod 000 "$SHIM"
+if [ -r "$SHIM" ]; then
+  ok "AC8 unreadable-shim case skipped (running as root)"
+else
+  out="$(PATH="$BOX/bin:$BOX/npm:$NOCLAUDE" env -u BUN_OPTIONS claude x 2>&1)"
+  [ "$out" = "argv0=$BOX/npm/claude BUN_OPTIONS=[] args=x" ] \
+    && ok "AC8 unreadable shim: plain exec, no --preload (a missing preload would stop claude)" \
+    || bad "AC8 unreadable shim: '$out'"
+fi
+chmod 644 "$SHIM"
+out="$(PATH="$BOX/bin:$NOCLAUDE" claude x 2>&1)"; wrc=$?
+[ "$wrc" = 127 ] && grep -q "not installed" <<<"$out" \
+  && ok "AC8 wrapper with no claude behind it: exit 127, says so (no exec loop)" || bad "AC8 lone wrapper: rc=$wrc '$out'"
+touch -d '2001-01-01' "$W" "$SHIM"
+rc="$(run_step)"
+[ "$rc" = 0 ] && [ "$(stat -c %Y "$W")" = "$(date -d 2001-01-01 +%s)" ] && [ "$(stat -c %Y "$SHIM")" = "$(date -d 2001-01-01 +%s)" ] \
+  && [ -z "$(find "$BOX/bin" "$BOX/lib" -name '*.??????' 2>/dev/null)" ] \
+  && ok "AC8 re-run: wrapper and shim not rewritten, no temp files left" || bad "AC8 re-run rewrote the wrapper/shim (rc=$rc)"
+
+rm -f "$BOX/npm/claude"
+rc="$(run_step)"
+[ "$rc" = 0 ] && [ ! -e "$W" ] && grep -q "reset-time wrapper removed" "$BOX/step.log" \
+  && ok "AC8 Claude Code gone: our wrapper is removed (it would answer \`command -v claude\`)" \
+  || bad "AC8 no claude, wrapper left: rc=$rc $(ls -l "$W" 2>&1)"
+
+new_box claudeless
+rm -f "$BOX/npm/claude"
+rc="$(run_step)"
+[ "$rc" = 0 ] && [ ! -e "$BOX/bin/claude" ] && [ ! -e "$BOX/lib" ] && grep -q "shim not installed" "$BOX/step.log" \
+  && ok "AC8 no Claude Code: no wrapper, no shim (the claude-code install and 19i gate on \`command -v claude\`)" \
+  || bad "AC8 no claude: rc=$rc bin=$(ls "$BOX/bin") log=$(tr '\n' '|' < "$BOX/step.log")"
+
+new_box foreign
+printf '#!/bin/sh\necho real\n' > "$BOX/bin/claude"; chmod 0755 "$BOX/bin/claude"; cp "$BOX/bin/claude" "$WORK/foreign.before"
+rc="$(run_step)"
+[ "$rc" = 0 ] && cmp -s "$BOX/bin/claude" "$WORK/foreign.before" && grep -q "WARN: .*is not ours" "$BOX/step.log" \
+  && [ "$(jq -r .timeFormat "$(settings)")" = 24-hour ] \
+  && ok "AC8 a foreign /usr/local/bin/claude is left alone (WARN), timeFormat still set" \
+  || bad "AC8 foreign claude: rc=$rc log=$(tr '\n' '|' < "$BOX/step.log")"
+
+new_box unwritable-lib
+rc="$(run_step "SB_CLAUDE_SHIM=$BOX/etc/timezone/x/claude-clock-24h.js")"
+[ "$rc" = 0 ] && [ ! -e "$BOX/bin/claude" ] && grep -q "WARN: could not write .*claude-clock-24h.js" "$BOX/step.log" \
+  && ok "AC8 shim cannot be written: WARN, no wrapper, exit 0" || bad "AC8 unwritable shim dir: rc=$rc"
+
+# ── AC9: the shim on Claude Code's own reset formatter ───────────────────────
+CFG="$WORK/cfg"; mkdir -p "$CFG/24" "$CFG/auto" "$CFG/broken"
+echo '{"timeFormat":"24-hour"}' > "$CFG/24/settings.json"
+echo '{"timeFormat":"auto"}' > "$CFG/auto/settings.json"
+echo '{"timeFormat":' > "$CFG/broken/settings.json"
+# Yu() and ngo() from claude.exe 2.1.292 (chunk-3s9gnsfk.js), verbatim but for the
+# ngo cache variable. MODE=claude pretends to be claude.exe (the shim's own gate).
+cat > "$WORK/probe.js" <<'EOF'
+let g;function ngo(){if(!g)g=Intl.DateTimeFormat().resolvedOptions().timeZone;return g}
+function Yu(e,t=!1,r=!0,n=!1){if(!e)return;let s=new Date(e*1000),o=new Date,c=s.getMinutes(),m=(s.getTime()-o.getTime())/3600000;if(n||m>24){let f={month:"short",day:"numeric",hour:r?"numeric":void 0,minute:!r||c===0?void 0:"2-digit",hour12:r?!0:void 0};if(s.getFullYear()!==o.getFullYear())f.year="numeric";return s.toLocaleString("en-US",f).replace(/[  ]([AP]M)/i,(i,d)=>d.toLowerCase())+(t?` (${ngo()})`:"")}return s.toLocaleTimeString("en-US",{hour:"numeric",minute:c===0?void 0:"2-digit",hour12:!0}).replace(/[  ]([AP]M)/i,(f,a)=>a.toLowerCase())+(t?` (${ngo()})`:"")}
+const y = new Date().getFullYear();
+const day = Date.UTC(y, 9, 10, 0, 0) / 1000;                     // Oct 10, 02:00 CEST
+const soon = new Date(Date.now() + 3 * 3600e3); soon.setMinutes(20, 0, 0);
+const out = [Yu(day, true, true, true), Yu(Math.floor(soon / 1000), true),
+  new Date(day * 1000).toLocaleString("de-DE", { hour: "numeric", hour12: true }),
+  "BUN_OPTIONS=" + (process.env.BUN_OPTIONS ?? "(unset)")];
+console.log(out.join(" | "));
+process.exit(0);
+EOF
+if command -v node >/dev/null 2>&1; then
+  probe_node() {  # <config dir> — the shim first, as the wrapper's preload would load it
+    env TZ=Europe/Berlin CLAUDE_CONFIG_DIR="$1" BUN_OPTIONS="--preload=$WORK/shim/lib/claude-clock-24h.js --smol" \
+      node -e 'if (process.env.MODE === "claude") Object.defineProperty(process, "execPath", { value: "/usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe" });
+               require(process.argv[1]); require(process.argv[2]);' "$WORK/shim/lib/claude-clock-24h.js" "$WORK/probe.js" 2>&1
+  }
+  out="$(MODE=claude probe_node "$CFG/24")"
+  if [[ "$out" =~ ^"Oct 10, 02:00 (Europe/Berlin) | "[0-2][0-9]":20 (Europe/Berlin) | ".*" | BUN_OPTIONS=--smol"$ ]]; then
+    ok "AC9 node, timeFormat 24-hour: '${out%% | BUN*}', and the shim left BUN_OPTIONS=--smol"
+  else
+    bad "AC9 node, 24-hour: '$out'"
+  fi
+  [[ "$out" == *" | 2"*"AM | "* ]] \
+    && ok "AC9 another locale's hour12 call is untouched" || bad "AC9 de-DE call changed: '$out'"
+  out="$(MODE=claude probe_node "$CFG/auto")"
+  [[ "$out" =~ ^"Oct 10, 2am (Europe/Berlin) | "[0-9]+":20"[ap]"m (Europe/Berlin) | " ]] \
+    && ok "AC9 timeFormat auto: shipped 12h output unchanged ('${out%% | *}')" || bad "AC9 auto: '$out'"
+  out="$(MODE=claude probe_node "$CFG/broken")"
+  [[ "$out" == "Oct 10, 2am (Europe/Berlin) | "* ]] \
+    && ok "AC9 broken settings.json: no throw, shipped output" || bad "AC9 broken settings: '$out'"
+  out="$(MODE=node probe_node "$CFG/24")"
+  [[ "$out" == "Oct 10, 2am (Europe/Berlin) | "*"BUN_OPTIONS=--smol" ]] \
+    && ok "AC9 not claude (plain node/bun): Date untouched, preload still stripped" || bad "AC9 non-claude: '$out'"
+else
+  ok "AC9 node not installed — shim unit cases skipped"
+fi
+REAL="$(PATH="$NOCLAUDE:/usr/bin:/usr/local/bin" command -v claude 2>/dev/null)"
+if [ -n "$REAL" ] && head -c 4 "$(readlink -f "$REAL")" | grep -q ELF \
+   && grep -qa 'BUN_OPTIONS' "$(readlink -f "$REAL")" 2>/dev/null; then
+  out="$(env -i HOME="$WORK" TZ=Europe/Berlin CLAUDE_CONFIG_DIR="$CFG/24" \
+         BUN_OPTIONS="--preload=$WORK/shim/lib/claude-clock-24h.js --preload=$WORK/probe.js" \
+         timeout 60 "$REAL" --version 2>&1)"
+  if [[ "$out" =~ ^"Oct 10, 02:00 (Europe/Berlin) | "[0-2][0-9]":20 (Europe/Berlin) | ".*" | BUN_OPTIONS=--preload=$WORK/probe.js"$ ]]; then
+    ok "AC9 the box's real claude ($("$REAL" --version 2>/dev/null)): '${out%% | 2*}'"
+  else
+    bad "AC9 real claude: '$out'"
+  fi
+else
+  ok "AC9 no Bun-built claude on this host — real-runtime case skipped"
 fi
 
 echo
